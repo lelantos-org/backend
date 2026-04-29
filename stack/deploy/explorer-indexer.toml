@@ -1,0 +1,12 @@
+# Explorer indexer config. Mounted at /etc/explorer-indexer.toml in the container.
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+erc20_metadata_timeout_ms = 2000
+rpc_urls = []
+
+# Optional: per-chain RPC for ERC20 metadata enrichment. The current event
+# pipeline doesn't need RPC (asset metadata comes from AssetRegistered), so
+# this can be left empty.
+# [[rpc_urls]]
+# chain_id = 1
+# url = "http://host.docker.internal:8545"

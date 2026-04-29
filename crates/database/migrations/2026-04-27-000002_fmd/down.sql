@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS matches;
+DROP TABLE IF EXISTS subscriptions;
+DROP TABLE IF EXISTS nullifiers;
+DROP TABLE IF EXISTS notes;

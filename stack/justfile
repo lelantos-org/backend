@@ -1,0 +1,78 @@
+set shell := ["bash", "-ceuo", "pipefail"]
+
+export FOUNDRY_DISABLE_NIGHTLY_WARNING := "1"
+
+PROFILE := "all"
+CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.6.4")
+DC := "docker compose"
+
+default:
+    @just --list
+
+# ── circuits ────────────────────────────────────────────────────────────
+
+# Fetch tree_update_batch artifacts from @lelantos-org/circuits GH release
+# into ./circuits/, mounted into the relayer container at /circuits:ro.
+fetch-circuits:
+    CIRCUITS_VERSION={{CIRCUITS_VERSION}} ./scripts/fetch-circuits.sh
+
+# Force re-fetch (drop the cached .version sentinel).
+refetch-circuits:
+    rm -f ./circuits/.version
+    just fetch-circuits
+
+# ── lifecycle ───────────────────────────────────────────────────────────
+
+# Bring stack up (postgres + anvil + deploy + all backends). Default profile=all.
+up: fetch-circuits
+    {{DC}} --profile {{PROFILE}} up
+
+# Same, detached.
+up-d: fetch-circuits
+    {{DC}} --profile {{PROFILE}} up -d
+
+# Same, rebuild images first (after crate edits).
+up-build: fetch-circuits
+    {{DC}} --profile {{PROFILE}} up --build
+
+# Bring up a single profile (positional override of PROFILE).
+up-profile P:
+    just PROFILE={{P}} up
+
+# Stop everything + wipe pg/addresses volumes.
+down:
+    {{DC}} --profile {{PROFILE}} down -v
+
+# Stop without wiping volumes.
+stop:
+    {{DC}} --profile {{PROFILE}} stop
+
+# Restart a single service.
+restart SVC:
+    {{DC}} restart {{SVC}}
+
+# Re-run forge deploy against the running anvil (new nonce → new addresses).
+redeploy:
+    {{DC}} --profile {{PROFILE}} up --force-recreate --no-deps deploy
+
+# ── inspection ──────────────────────────────────────────────────────────
+
+# List services + status for the active profile.
+ps:
+    {{DC}} --profile {{PROFILE}} ps
+
+# Tail logs for one service (last 200 lines, follow).
+logs SVC:
+    {{DC}} logs -n 200 -f {{SVC}}
+
+# All logs for active profile (follow).
+logs-all:
+    {{DC}} --profile {{PROFILE}} logs -f
+
+# psql shell into the running postgres.
+db-shell:
+    {{DC}} exec postgres psql -U postgres -d postgres
+
+# Shell into a service container.
+sh SVC:
+    {{DC}} exec {{SVC}} /bin/sh

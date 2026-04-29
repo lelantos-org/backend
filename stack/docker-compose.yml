@@ -1,0 +1,251 @@
+# Lelantos backend stack.
+#
+# Profiles:
+#   db          postgres only (cargo test against real DB)
+#   anvil       ephemeral anvil EVM node
+#   ingester    postgres + ingester
+#   fmd         postgres + ingester + fmd-indexer + fmd-webserver
+#   explorer    postgres + ingester + explorer-indexer + explorer-webserver
+#   relayer     postgres + anvil + relayer
+#   metaquoter  metaquoter only (DB-less; talks to external RPCs)
+#   all         everything (incl. anvil + automatic deploy + fund)
+#
+# Common: `just up` (= `docker compose --profile all up`). Re-runs deploy
+# step on every up; addresses propagate via the `addresses` named volume.
+
+# ───────────────────────────────────────────────────────────── anchors ──
+
+# Profile groupings — change once, propagates to every service in the group.
+x-profiles-pg:        &profiles-pg        [db, ingester, fmd, explorer, relayer, all, prod]
+x-profiles-anvil:     &profiles-anvil     [anvil, all]
+x-profiles-ingester:  &profiles-ingester  [ingester, fmd, explorer, all, prod]
+x-profiles-fmd:       &profiles-fmd       [fmd, all, prod]
+x-profiles-explorer:  &profiles-explorer  [explorer, all, prod]
+x-profiles-relayer:   &profiles-relayer   [relayer, all, prod]
+x-profiles-mq:        &profiles-mq        [metaquoter, all, prod]
+x-profiles-deploy:    &profiles-deploy    [all]
+
+# Build config for every Rust backend that uses backend/Dockerfile.
+x-rust-build: &rust-build
+    context: ..
+    dockerfile: Dockerfile
+
+# Entrypoint that sources /addresses/addresses.env (written by the `deploy`
+# one-shot) before exec'ing the binary. Override BIN_PATH per-service when
+# the image puts the binary somewhere other than /usr/local/bin/app.
+x-addresses-entrypoint: &addresses-entrypoint
+    - /bin/sh
+    - -c
+    - 'if [ -f /addresses/addresses.env ]; then set -a; . /addresses/addresses.env; set +a; fi; exec /usr/bin/tini -- "$${BIN_PATH:-/usr/local/bin/app}"'
+
+# TCP liveness via bash /dev/tcp (no curl/nc needed; bash is present in
+# debian:bookworm-slim). Override PORT in the per-service test.
+x-tcp-healthcheck: &tcp-healthcheck
+    interval: 10s
+    timeout: 3s
+    retries: 10
+    start_period: 15s
+
+# Shared backend config: pg + deploy deps, addresses-volume mount,
+# entrypoint wrapper, backend network. Per-service overrides merge on top.
+x-backend-base: &backend-base
+    restart: unless-stopped
+    depends_on:
+        postgres: { condition: service_healthy }
+        deploy:   { condition: service_completed_successfully, required: false }
+    environment: &backend-env
+        DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres
+        RUST_LOG: info,sqlx=warn
+    entrypoint: *addresses-entrypoint
+    volumes:
+        - addresses:/addresses:ro
+    networks: [backend]
+
+# ──────────────────────────────────────────────────────────── services ──
+
+services:
+
+    # ── infra ──────────────────────────────────────────────────────────
+    postgres:
+        image: postgres:16-alpine
+        profiles: *profiles-pg
+        environment:
+            POSTGRES_USER: postgres
+            POSTGRES_PASSWORD: postgres
+            POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U postgres"]
+            interval: 2s
+            timeout: 2s
+            retries: 30
+        networks: [backend]
+
+    anvil:
+        image: ghcr.io/foundry-rs/foundry:stable
+        profiles: *profiles-anvil
+        entrypoint: [anvil]
+        command:
+            - --host=0.0.0.0
+            - --port=8545
+            - --chain-id=31337
+            - --hardfork=cancun
+            - --disable-code-size-limit
+            - --gas-limit=5000000000
+            - --block-time=1
+        ports: ["8545:8545"]
+        healthcheck:
+            test: ["CMD-SHELL", "cast chain-id --rpc-url http://localhost:8545 >/dev/null 2>&1"]
+            interval: 2s
+            timeout: 2s
+            retries: 30
+        networks: [backend]
+
+    # ── one-shot: deploy contracts + fund recipient + emit env ─────────
+    deploy:
+        image: ghcr.io/foundry-rs/foundry:nightly
+        profiles: *profiles-deploy
+        user: "0:0"
+        depends_on:
+            anvil: { condition: service_healthy }
+        working_dir: /contracts
+        environment:
+            FOUNDRY_DISABLE_NIGHTLY_WARNING: "${FOUNDRY_DISABLE_NIGHTLY_WARNING:-}"
+            RPC_URL: http://anvil:8545
+            # anvil dev key #0 — public, no secret.
+            DEPLOYER_KEY: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+            FUND_RECIPIENT: "0x6bDA96a7204E597857E2e5B7Ac8F8e23557B0a1E"
+            FUND_NATIVE: 100ether
+            FUND_WETH: "100000000000000000000"     # 100 e18
+            FUND_ERC20: "1000000000000000000000000" # 1 e24
+        volumes:
+            - ../../contracts:/contracts
+            - ./deploy/deploy.sh:/deploy.sh:ro
+            - addresses:/addresses
+        entrypoint: [/deploy.sh]
+        networks: [backend]
+
+    # ── backends (generic Dockerfile, /usr/local/bin/app) ──────────────
+    ingester:
+        <<: *backend-base
+        profiles: *profiles-ingester
+        build: { <<: *rust-build, args: { PACKAGE: ingester } }
+        image: lelantos/ingester:dev
+        environment:
+            <<: *backend-env
+            INGESTER_CONFIG: /etc/ingester.toml
+        volumes:
+            - ./deploy/ingester.toml:/etc/ingester.toml:ro
+            - addresses:/addresses:ro
+
+    fmd-indexer:
+        <<: *backend-base
+        profiles: *profiles-fmd
+        build: { <<: *rust-build, args: { PACKAGE: fmd-indexer } }
+        image: lelantos/fmd-indexer:dev
+        environment:
+            <<: *backend-env
+            FILTER_WORKERS: "${FILTER_WORKERS:-4}"
+            FILTER_BATCH:   "${FILTER_BATCH:-1000}"
+            FILTER_TICK_MS: "${FILTER_TICK_MS:-500}"
+
+    explorer-indexer:
+        <<: *backend-base
+        profiles: *profiles-explorer
+        build: { <<: *rust-build, args: { PACKAGE: explorer-indexer } }
+        image: lelantos/explorer-indexer:dev
+        environment:
+            <<: *backend-env
+            EXPLORER_INDEXER_CONFIG: /etc/explorer-indexer.toml
+        volumes:
+            - ./deploy/explorer-indexer.toml:/etc/explorer-indexer.toml:ro
+            - addresses:/addresses:ro
+
+    fmd-webserver:
+        <<: *backend-base
+        profiles: *profiles-fmd
+        build: { <<: *rust-build, args: { PACKAGE: fmd-webserver } }
+        image: lelantos/fmd-webserver:dev
+        environment:
+            <<: *backend-env
+            BIND_ADDR: 0.0.0.0:3001
+            INDEXER_LAG_WARN_BLOCKS: "50"
+        ports: ["3001:3001"]
+        healthcheck:
+            <<: *tcp-healthcheck
+            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3001' >/dev/null 2>&1"]
+
+    explorer-webserver:
+        <<: *backend-base
+        profiles: *profiles-explorer
+        build: { <<: *rust-build, args: { PACKAGE: explorer-webserver } }
+        image: lelantos/explorer-webserver:dev
+        environment:
+            <<: *backend-env
+            EXPLORER_BIND_ADDR: 0.0.0.0:3002
+            CACHE_TTL_S: "30"
+        ports: ["3002:3002"]
+        healthcheck:
+            <<: *tcp-healthcheck
+            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3002' >/dev/null 2>&1"]
+
+    # ── relayer (dedicated Dockerfile; circuits mounted from ./circuits) ─
+    relayer:
+        <<: *backend-base
+        profiles: *profiles-relayer
+        depends_on:
+            postgres: { condition: service_healthy }
+            deploy:   { condition: service_completed_successfully, required: false }
+        build:
+            context: ../..
+            dockerfile: backend/crates/relayer/Dockerfile
+        image: lelantos/relayer:dev
+        environment:
+            <<: *backend-env
+            BIN_PATH: /usr/local/bin/relayer
+            RELAYER_CONFIG: /etc/relayer.toml
+            # 42161 signer required only for prod-style runs; empty in dev is fine.
+            RELAYER_CHAIN_42161_SIGNER_KEY: "${RELAYER_CHAIN_42161_SIGNER_KEY:-}"
+            RELAYER_CHAIN_31337_SIGNER_KEY: "${RELAYER_CHAIN_31337_SIGNER_KEY:-}"
+        volumes:
+            - ./deploy/relayer.toml:/etc/relayer.toml:ro
+            - ./circuits:/circuits:ro
+            - addresses:/addresses:ro
+        ports: ["3003:3003"]
+        healthcheck:
+            <<: *tcp-healthcheck
+            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3003' >/dev/null 2>&1"]
+
+    # ── metaquoter (DB-less; talks to external RPCs only) ──────────────
+    # Sources /addresses/addresses.env at startup like the other backends so
+    # `METAQUOTER_CHAIN_31337_{RPC_URL,UNIV3_QUOTER,UNIV3_ADAPTER}` written
+    # by the deploy one-shot overlays the placeholder anvil chain block.
+    metaquoter:
+        restart: unless-stopped
+        profiles: *profiles-mq
+        depends_on:
+            deploy: { condition: service_completed_successfully, required: false }
+        build: { <<: *rust-build, args: { PACKAGE: metaquoter } }
+        image: lelantos/metaquoter:dev
+        environment:
+            RUST_LOG: info
+            METAQUOTER_CONFIG: /etc/metaquoter.toml
+        entrypoint: *addresses-entrypoint
+        volumes:
+            - ./deploy/metaquoter.toml:/etc/metaquoter.toml:ro
+            - addresses:/addresses:ro
+        ports: ["8081:8081"]
+        networks: [backend]
+        healthcheck:
+            <<: *tcp-healthcheck
+            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8081' >/dev/null 2>&1"]
+
+# ─────────────────────────────────────────────────────── volumes/net ──
+
+volumes:
+    postgres-data:
+    addresses:
+
+networks:
+    backend:
+        driver: bridge

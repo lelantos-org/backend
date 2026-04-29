@@ -1,0 +1,1 @@
+DROP MATERIALIZED VIEW IF EXISTS tree_advances_hourly;

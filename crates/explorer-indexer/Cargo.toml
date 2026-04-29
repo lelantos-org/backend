@@ -1,0 +1,38 @@
+[package]
+name = "explorer-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "explorer-indexer"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+database = { path = "../database" }
+chain-types = { path = "../chain-types" }
+# NOTE: must NOT depend on fmd-crypto. Privacy gate enforced in CI.
+tokio = { workspace = true }
+futures = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+alloy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dotenvy = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+bigdecimal = { workspace = true }
+async-trait = { workspace = true }
+
+[build-dependencies]
+vergen-gix = "9"
+
+[dev-dependencies]
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }

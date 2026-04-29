@@ -1,0 +1,37 @@
+[package]
+name = "integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Empty: all logic lives in tests/
+
+[dev-dependencies]
+shared = { path = "../shared" }
+database = { path = "../database" }
+chain-types = { path = "../chain-types" }
+fmd-crypto = { path = "../fmd-crypto" }
+fmd-indexer = { path = "../fmd-indexer" }
+explorer-indexer = { path = "../explorer-indexer" }
+fmd-webserver = { path = "../fmd-webserver" }
+explorer-webserver = { path = "../explorer-webserver" }
+
+tokio = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+alloy = { workspace = true }
+axum = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+ark-ff = { workspace = true }
+ark-ed-on-bn254 = { workspace = true }
+chrono = { workspace = true }
+bigdecimal = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ingester = { path = "../ingester" }
+url = { workspace = true }

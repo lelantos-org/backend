@@ -1,0 +1,16 @@
+# Ingester multichain config. Mounted at /etc/ingester.toml in the container.
+# Override per-deployment.
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+
+# Arbitrum One. Override via INGESTER_CHAIN_42161_{RPC_URL,POOL_ADDRESS}.
+[[chains]]
+chain_id = 42161
+rpc_url = "https://arb1.arbitrum.io/rpc"
+pool_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
+start_block = 465459960
+reorg_depth = 32
+block_poll_ms = 1000
+backfill_threshold = 50
+backfill_concurrency = 4
+chunk_blocks = 1000

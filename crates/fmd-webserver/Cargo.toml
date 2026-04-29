@@ -1,0 +1,39 @@
+[package]
+name = "fmd-webserver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "fmd-webserver"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared", features = ["webserver"] }
+database = { path = "../database" }
+fmd-crypto = { path = "../fmd-crypto" }
+tokio = { workspace = true }
+futures = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dotenvy = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+bigdecimal = { workspace = true }
+ark-ed-on-bn254 = { workspace = true }
+ark-ff = { workspace = true }
+light-poseidon = { workspace = true }
+moka = { workspace = true }
+
+[build-dependencies]
+vergen-gix = "9"
+anyhow = { workspace = true }

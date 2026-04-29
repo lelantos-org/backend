@@ -1,0 +1,31 @@
+# MetaQuoter config. Mounted at /etc/metaquoter.toml in the container.
+# Override per-deployment via env: METAQUOTER_CHAIN_<id>_RPC_URL etc.
+
+listen_addr = "0.0.0.0:8081"
+race_deadline_ms = 1500
+
+# Mainnet
+[[chains]]
+chain_id = 1
+rpc_url = "https://eth.llamarpc.com"
+univ3_quoter = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+# Replace with deployed UniV3Adapter address.
+univ3_adapter = "0x0000000000000000000000000000000000000000"
+masp_fee_bps = 0
+
+# Base
+[[chains]]
+chain_id = 8453
+rpc_url = "https://mainnet.base.org"
+univ3_quoter = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
+univ3_adapter = "0x0000000000000000000000000000000000000000"
+masp_fee_bps = 0
+
+# Arbitrum One.
+[[chains]]
+chain_id = 42161
+rpc_url = "https://arb1.arbitrum.io/rpc"
+univ3_quoter = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+univ3_adapter = "0xC7C2F63576C3263C5253D87657657C81D63dD1Af"
+masp_fee_bps = 20
+

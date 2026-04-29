@@ -1,0 +1,18 @@
+[package]
+name = "database"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shared = { path = "../shared" }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+diesel_migrations = { workspace = true }
+bb8 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }

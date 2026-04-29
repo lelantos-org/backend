@@ -1,0 +1,50 @@
+name: rust
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-rust
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  fmt:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.95"
+          components: rustfmt
+      - uses: extractions/setup-just@v2
+      - run: just fmt
+
+  clippy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.95"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - run: just clippy
+
+  test:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - run: just test

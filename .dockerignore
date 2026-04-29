@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+.claude/
+.idea/
+.vscode/
+docs/
+PLAN.md
+README.md
+*.md

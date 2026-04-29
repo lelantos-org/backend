@@ -1,0 +1,22 @@
+# Relayer config. Mounted at /etc/relayer.toml in the container.
+# Override secrets via env: RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,SIGNER_KEY}.
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+listen_addr = "0.0.0.0:3003"
+
+# Arbitrum One. RELAYER_CHAIN_42161_SIGNER_KEY MUST be set at runtime.
+[[chains]]
+chain_id = 42161
+rpc_url = "https://arb1.arbitrum.io/rpc"
+pool_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
+signer_key_hex = "0000000000000000000000000000000000000000000000000000000000000000"
+receipt_timeout_s = 60
+flush_interval_s = 3
+flush_max_n = 8
+swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
+
+[prover]
+# Mounted from backend/stack/circuits/ (populated by `just fetch-circuits`).
+wasm_path = "/circuits/tree_update_batch.wasm"
+r1cs_path = "/circuits/tree_update_batch.r1cs"
+zkey_path = "/circuits/tree_update_batch_final.zkey"

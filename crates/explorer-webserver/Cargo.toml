@@ -1,0 +1,40 @@
+[package]
+name = "explorer-webserver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "explorer-webserver"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared", features = ["webserver"] }
+database = { path = "../database" }
+# NOTE: must NOT depend on fmd-crypto. Privacy gate enforced in CI.
+tokio = { workspace = true }
+futures = { workspace = true }
+axum = { workspace = true }
+bigdecimal = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dotenvy = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+async-trait = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+moka = { workspace = true }
+
+[build-dependencies]
+vergen = { version = "8", features = ["build", "cargo", "git", "git2", "rustc"] }
+anyhow = { workspace = true }

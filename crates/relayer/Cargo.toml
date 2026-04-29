@@ -1,0 +1,59 @@
+[package]
+name = "relayer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "relayer"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+database = { path = "../database" }
+fmd-crypto = { path = "../fmd-crypto" }
+chain-types = { path = "../chain-types" }
+tokio = { workspace = true, features = ["fs"] }
+futures = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dotenvy = { workspace = true }
+hex = { workspace = true }
+async-trait = { workspace = true }
+utoipa = { workspace = true }
+alloy = { workspace = true }
+chrono = { workspace = true }
+light-poseidon = { workspace = true }
+url = { workspace = true }
+bigdecimal = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { workspace = true }
+moka = { workspace = true }
+
+# Native Groth16 prover. Witness inputs cross as decimal strings, so no
+# ark types leak past this crate's boundary.
+ark-circom = { version = "0.6", default-features = false }
+ark-groth16 = "0.6"
+ark-bn254 = "0.6"
+ark-ec = "0.6"
+ark-ff = "0.6"
+ark-snark = "0.6"
+ark-serialize = "0.6"
+num-bigint = { version = "0.4", features = ["rand"] }
+rand = "0.8"
+parking_lot = "0.12"
+rayon = { workspace = true }
+
+[build-dependencies]
+vergen-gix = "9"
+
