@@ -5,10 +5,12 @@ use crate::adapters::calldata::{
 use crate::adapters::parse::{parse_address, parse_hex_bytes, parse_u256};
 use crate::domain::dto::SubmitSwapPayload;
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::responses::EstimateResponse;
 use crate::services::fee_quote::FeeQuoter;
+use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    PAIR_LEAVES, PairInputs, build_padded_pair_arrays, build_tu_pi_for_pair, parse_pair_inputs,
-    prove_pair,
+    PAIR_LEAVES, PairInputs, TransactBinding, build_padded_pair_arrays, build_tu_pi_for_pair,
+    parse_pair_inputs, prove_pair,
 };
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::submitter::{SubmissionReceipt, Submitter};
@@ -17,7 +19,7 @@ use alloy::primitives::Address;
 use alloy::sol_types::SolCall;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 /// Per-chain swap pipeline. Mirrors `SpendPipeline` end-to-end except:
 ///   - the leg-1 SNARK PIs travel inside `SwapWrapper.SwapArgs.pi_w`
@@ -39,6 +41,7 @@ pub struct SwapPipeline {
     /// here gives a 400 instead of a wasted Groth16 + revert.
     pub wrapper_address: Address,
     pub fee_quoter: Arc<FeeQuoter>,
+    pub gas_witness: Arc<GasWitness>,
 }
 
 impl SwapPipeline {
@@ -47,7 +50,7 @@ impl SwapPipeline {
         fields(chain_id = self.chain_id, adapter = %payload.swap.adapter, start_index),
     )]
     pub async fn process(&self, payload: SubmitSwapPayload) -> AppResult<SubmissionReceipt> {
-        validate_swap_shape(&payload, self.wrapper_address)?;
+        self.validate(&payload)?;
         let inputs = parse_pair_inputs(&payload.pub_inputs)?;
 
         let mut mirror = self.mirror.lock().await;
@@ -67,16 +70,13 @@ impl SwapPipeline {
 
         let tu_proof = match prove_pair(&self.prover, &slot, &advanced, &inputs).await {
             Ok(p) => p,
-            Err(e) => {
-                error!(error = %e, "prove failed; rolling back mirror");
-                mirror.rollback(PAIR_LEAVES)?;
-                return Err(e);
-            }
+            Err(e) => return Err(mirror.unwind(PAIR_LEAVES, e)),
         };
 
         let calldata = encode_swap_calldata(&payload, &inputs, &slot, &advanced, &tu_proof)?;
         match self.submitter.submit(calldata).await {
             Ok(receipt) => {
+                self.gas_witness.observe(EntryPoint::Swap, receipt.gas_used);
                 info!(
                     tx_hash = %receipt.tx_hash,
                     gas_used = receipt.gas_used,
@@ -84,25 +84,25 @@ impl SwapPipeline {
                 );
                 Ok(receipt)
             }
-            Err(e) => {
-                error!(error = %e, "swap submit failed; rolling back mirror");
-                mirror.rollback(PAIR_LEAVES)?;
-                Err(e)
-            }
+            Err(e) => Err(mirror.unwind(PAIR_LEAVES, e)),
         }
     }
 
-    /// Build swap calldata without mutating tree mirror or submitting.
-    /// Used by `/v1/swap/estimate`.
-    pub async fn dry_build_calldata(&self, payload: SubmitSwapPayload) -> AppResult<Vec<u8>> {
-        validate_swap_shape(&payload, self.wrapper_address)?;
-        let inputs = parse_pair_inputs(&payload.pub_inputs)?;
-        let (slot, advanced) = {
-            let mut mirror = self.mirror.lock().await;
-            mirror.preview_advance(*inputs.cm0, *inputs.cm1, &inputs.cv_dep0, &inputs.cv_dep1)?
+    /// Fee quote for `/v1/swap/estimate`. See `SpendPipeline::estimate` — no
+    /// mirror access, no prove.
+    pub async fn estimate(&self, payload: SubmitSwapPayload) -> AppResult<EstimateResponse> {
+        self.validate(&payload)?;
+        self.fee_quoter
+            .quote_for_gas(self.gas_witness.gas_for(EntryPoint::Swap))
+            .await
+    }
+
+    fn validate(&self, payload: &SubmitSwapPayload) -> AppResult<()> {
+        let binding = TransactBinding {
+            chain_id: self.chain_id,
+            relayer: self.submitter.signer_address,
         };
-        let tu_proof = prove_pair(&self.prover, &slot, &advanced, &inputs).await?;
-        encode_swap_calldata(&payload, &inputs, &slot, &advanced, &tu_proof)
+        validate_swap_shape(payload, self.wrapper_address, binding)
     }
 }
 
@@ -146,7 +146,20 @@ fn encode_swap_calldata(
     .abi_encode())
 }
 
-fn validate_swap_shape(p: &SubmitSwapPayload, wrapper: Address) -> AppResult<()> {
+fn validate_swap_shape(
+    p: &SubmitSwapPayload,
+    wrapper: Address,
+    binding: TransactBinding,
+) -> AppResult<()> {
+    binding.check(&p.pub_inputs)?;
+    // Leg 2 is chain-bound separately: it rides in the same calldata but the
+    // wrapper escrows it into MASP under its own `chainId` field.
+    if p.swap.intent_d.chain_id != binding.chain_id as u64 {
+        return Err(AppError::BadRequest(format!(
+            "intent_d.chainId ({}) must equal the request chainId ({})",
+            p.swap.intent_d.chain_id, binding.chain_id
+        )));
+    }
     // Leg 1 is structurally a withdraw: shielded note(s) → public token to
     // the wrapper. The 2x2 SNARK enforces conservation; we just block the
     // obviously-wrong shapes early.
@@ -274,55 +287,95 @@ mod tests {
         Address::from([0x77u8; 20])
     }
 
+    const CHAIN_ID: i64 = 31337;
+
+    fn relayer() -> Address {
+        Address::from([0x99u8; 20])
+    }
+
+    /// Payload as a well-behaved wallet would send it, plus a mutation.
+    fn checked(mutate: impl FnOnce(&mut SubmitSwapPayload)) -> AppResult<()> {
+        let w = wrapper();
+        let mut p = fake_payload(&w.to_string());
+        p.pub_inputs.relayer = relayer().to_string();
+        mutate(&mut p);
+        validate_swap_shape(
+            &p,
+            w,
+            TransactBinding {
+                chain_id: CHAIN_ID,
+                relayer: relayer(),
+            },
+        )
+    }
+
     #[test]
     fn validate_accepts_well_formed_payload() {
-        let w = wrapper();
-        let p = fake_payload(&w.to_string());
-        validate_swap_shape(&p, w).unwrap();
+        checked(|_| {}).unwrap();
     }
 
     #[test]
     fn validate_rejects_public_in_nonzero() {
-        let w = wrapper();
-        let mut p = fake_payload(&w.to_string());
-        p.pub_inputs.public_in = 1;
-        let err = validate_swap_shape(&p, w).unwrap_err();
+        let err = checked(|p| p.pub_inputs.public_in = 1).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[test]
     fn validate_rejects_public_out_zero() {
-        let w = wrapper();
-        let mut p = fake_payload(&w.to_string());
-        p.pub_inputs.public_out = 0;
-        let err = validate_swap_shape(&p, w).unwrap_err();
+        let err = checked(|p| p.pub_inputs.public_out = 0).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[test]
     fn validate_rejects_recipient_mismatch() {
-        let w = wrapper();
-        let mut p = fake_payload(&w.to_string());
-        p.pub_inputs.recipient = "0x000000000000000000000000000000000000dead".into();
-        let err = validate_swap_shape(&p, w).unwrap_err();
+        let err = checked(|p| {
+            p.pub_inputs.recipient = "0x000000000000000000000000000000000000dead".into()
+        })
+        .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[test]
     fn validate_rejects_payer_mismatch() {
-        let w = wrapper();
-        let mut p = fake_payload(&w.to_string());
-        p.swap.intent_d.payer = "0x000000000000000000000000000000000000dead".into();
-        let err = validate_swap_shape(&p, w).unwrap_err();
+        let err = checked(|p| {
+            p.swap.intent_d.payer = "0x000000000000000000000000000000000000dead".into()
+        })
+        .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[test]
     fn validate_rejects_zero_intent_public_in() {
-        let w = wrapper();
-        let mut p = fake_payload(&w.to_string());
-        p.swap.intent_d.public_in = 0;
-        let err = validate_swap_shape(&p, w).unwrap_err();
+        let err = checked(|p| p.swap.intent_d.public_in = 0).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn validate_rejects_leg1_chain_id_mismatch() {
+        let err = checked(|p| p.pub_inputs.chain_id = CHAIN_ID as u64 + 1).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn validate_rejects_leg2_chain_id_mismatch() {
+        let err = checked(|p| p.swap.intent_d.chain_id = CHAIN_ID as u64 + 1).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    /// The 2x2 proof pins a relayer address; another relayer's submission
+    /// cannot satisfy it, so it must not reach the prover.
+    #[test]
+    fn validate_rejects_a_proof_bound_to_another_relayer() {
+        let err =
+            checked(|p| p.pub_inputs.relayer = "0x000000000000000000000000000000000000dead".into())
+                .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_nullifiers() {
+        let err =
+            checked(|p| p.pub_inputs.nullifier[1] = p.pub_inputs.nullifier[0].clone()).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 }

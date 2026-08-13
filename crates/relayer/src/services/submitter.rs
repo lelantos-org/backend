@@ -1,11 +1,14 @@
 // Submits a single MASP.transact() call per chain. Sequential nonces are
 // implicit because the pipeline mutex serializes per-chain submissions.
 //
-// v1: build provider per submission (cheap; alloy ProviderBuilder generates
-// deeply-generic types that resist `dyn Provider` boxing). Defer connection
-// pooling / persistent provider once we settle on a fixed type alias.
+// The alloy `ProviderBuilder` output is deeply generic and resists `dyn
+// Provider` boxing, so the provider itself is still rebuilt per submission.
+// Everything expensive underneath it is not: the signer is parsed once here,
+// and the connection pool lives in `RpcEndpoint`.
 
+use crate::adapters::rpc::RpcEndpoint;
 use crate::domain::error::{AppError, AppResult};
+use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
@@ -15,12 +18,12 @@ use tracing::{error, info, instrument, warn};
 
 pub struct Submitter {
     pub chain_id: i64,
-    pub rpc_url: String,
     pub pool_address: Address,
-    pub signer_key_hex: String,
     pub signer_address: Address,
     pub receipt_timeout_s: u64,
     pub receipt_poll_interval_ms: u64,
+    wallet: EthereumWallet,
+    rpc: RpcEndpoint,
 }
 
 #[derive(Debug, Clone)]
@@ -36,7 +39,7 @@ pub struct SubmissionReceipt {
 impl Submitter {
     pub fn new(
         chain_id: i64,
-        rpc_url: &str,
+        rpc: RpcEndpoint,
         signer_key_hex: &str,
         pool_address_hex: &str,
         receipt_timeout_s: u64,
@@ -49,12 +52,12 @@ impl Submitter {
             .map_err(|e| AppError::Internal(format!("pool addr: {}", e)))?;
         Ok(Self {
             chain_id,
-            rpc_url: rpc_url.to_string(),
             pool_address,
-            signer_key_hex: signer_key_hex.to_string(),
             signer_address,
             receipt_timeout_s,
             receipt_poll_interval_ms,
+            wallet: EthereumWallet::from(signer),
+            rpc,
         })
     }
 
@@ -62,29 +65,29 @@ impl Submitter {
     /// Pipeline picks the encoding (`flushBatch` / `transfer` / `withdraw` /
     /// `withdrawNative`) and passes the bytes here, keeping this layer
     /// call-shape-agnostic. None of the supported entry points are payable.
+    ///
+    /// Failure modes are deliberately distinct, because the caller's tree
+    /// mirror rollback is only sound for some of them:
+    ///   - [`AppError::Rpc`] — the node refused the broadcast; nothing landed.
+    ///   - [`AppError::Reverted`] — mined, but reverted; no leaves inserted.
+    ///   - [`AppError::SubmitUnknown`] — broadcast accepted, no receipt within
+    ///     the timeout. It may still mine. Do not roll back.
     #[instrument(
         skip_all,
         fields(chain_id = self.chain_id, pool = %self.pool_address, calldata_len = data.len()),
     )]
     pub async fn submit(&self, data: Vec<u8>) -> AppResult<SubmissionReceipt> {
-        let signer = PrivateKeySigner::from_str(&self.signer_key_hex)
-            .map_err(|e| AppError::Internal(format!("signer key: {}", e)))?;
-        let url: alloy::transports::http::reqwest::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e: url::ParseError| AppError::Internal(format!("rpc url: {}", e)))?;
-        let wallet = alloy::network::EthereumWallet::from(signer);
         let provider = ProviderBuilder::new()
             .with_recommended_fillers()
-            .wallet(wallet)
-            .on_http(url);
+            .wallet(self.wallet.clone())
+            .on_client(self.rpc.client());
         provider
             .client()
             .set_poll_interval(Duration::from_millis(self.receipt_poll_interval_ms));
 
         let tx = alloy::rpc::types::TransactionRequest::default()
             .to(self.pool_address)
-            .input(data.clone().into());
+            .input(data.into());
 
         // eth_call probe surfaces revert data that `send_transaction` would
         // otherwise hide. Only the revert path is logged; success is implied
@@ -100,10 +103,9 @@ impl Submitter {
             .with_timeout(Some(Duration::from_secs(self.receipt_timeout_s)));
         let tx_hash = *pending.tx_hash();
         info!(%tx_hash, "tx submitted, awaiting receipt");
-        let receipt = pending
-            .get_receipt()
-            .await
-            .map_err(|e| AppError::Rpc(format!("receipt: {}", e)))?;
+        let receipt = pending.get_receipt().await.map_err(|e| {
+            AppError::SubmitUnknown(format!("tx {} broadcast, no receipt: {}", tx_hash, e))
+        })?;
         if !receipt.status() {
             error!(tx_hash = %receipt.transaction_hash, "tx reverted on-chain");
             return Err(AppError::Reverted(format!(
@@ -111,10 +113,11 @@ impl Submitter {
                 receipt.transaction_hash
             )));
         }
-        let block_number = receipt
-            .block_number
-            .ok_or_else(|| AppError::Rpc("receipt missing block_number".into()))?
-            as i64;
+        // A receipt without a block number still means the tx executed, so
+        // this is an unknown-outcome failure, not a clean one.
+        let block_number = receipt.block_number.ok_or_else(|| {
+            AppError::SubmitUnknown(format!("tx {} receipt missing block_number", tx_hash))
+        })? as i64;
         info!(
             tx_hash = %receipt.transaction_hash,
             block = block_number,

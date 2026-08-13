@@ -4,15 +4,17 @@
 use crate::domain::error::{AppError, AppResult};
 use async_trait::async_trait;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use ark_bn254::{Bn254, Fr};
 use ark_circom::read_zkey;
-use ark_circom::{CircomBuilder, CircomConfig, CircomReduction};
+use ark_circom::{CircomCircuit, CircomConfig, CircomReduction};
 use ark_ff::PrimeField;
 use ark_groth16::{Groth16, ProvingKey};
 use ark_snark::SNARK;
@@ -57,31 +59,34 @@ pub trait TreeUpdateBatchProver: Send + Sync {
     async fn prove(&self, witness: TreeUpdateBatchWitness) -> AppResult<TreeUpdateBatchProof>;
 }
 
-/// In-process Groth16 prover. Holds the parsed `ProvingKey` once; per call
-/// it spawns a blocking task that builds a fresh `CircomConfig` (wasm +
-/// r1cs are mmap-fast) and proves. Keeping pk Arc'd is the big win — zkey
-/// parse is the dominant cost (~150MB zkey for tree_update_batch).
+/// In-process Groth16 prover. The proving key (~150MB zkey) *and* the circom
+/// config (wasm module + parsed r1cs) are loaded once at startup and reused;
+/// a prove then costs only the witness calculation and the proof itself.
+///
+/// Proving is serialized — `Groth16::prove` already saturates the machine —
+/// but the gate is a `Semaphore` held *outside* `spawn_blocking`, not a mutex
+/// inside it. Queuing on a blocking-pool thread would let a burst of requests
+/// park the whole pool, which the DB and everything else also draws from.
 pub struct ArkCircomProver {
     pk: Arc<ProvingKey<Bn254>>,
-    wasm_path: PathBuf,
-    r1cs_path: PathBuf,
-    /// Serializes proves; `Groth16::prove` is heavily multithreaded internally.
-    gate: Arc<Mutex<()>>,
+    /// Guarded by `gate`, so the inner lock is always uncontended.
+    cfg: Arc<Mutex<CircomConfig<Fr>>>,
+    gate: Arc<Semaphore>,
 }
 
 impl ArkCircomProver {
     pub fn new(wasm_path: &PathBuf, r1cs_path: &PathBuf, zkey_path: &PathBuf) -> AppResult<Self> {
-        let _probe = CircomConfig::<Fr>::new(wasm_path, r1cs_path)
-            .map_err(|e| AppError::Prover(format!("circom config probe: {}", e)))?;
+        let mut cfg = CircomConfig::<Fr>::new(wasm_path, r1cs_path)
+            .map_err(|e| AppError::Prover(format!("circom config: {}", e)))?;
+        cfg.sanity_check = true;
         let mut zk = std::fs::File::open(zkey_path)
             .map_err(|e| AppError::Prover(format!("open zkey: {}", e)))?;
         let (pk, _matrices) =
             read_zkey(&mut zk).map_err(|e| AppError::Prover(format!("read zkey: {}", e)))?;
         Ok(Self {
             pk: Arc::new(pk),
-            wasm_path: wasm_path.clone(),
-            r1cs_path: r1cs_path.clone(),
-            gate: Arc::new(Mutex::new(())),
+            cfg: Arc::new(Mutex::new(cfg)),
+            gate: Arc::new(Semaphore::new(1)),
         })
     }
 }
@@ -90,59 +95,25 @@ impl ArkCircomProver {
 impl TreeUpdateBatchProver for ArkCircomProver {
     async fn prove(&self, witness: TreeUpdateBatchWitness) -> AppResult<TreeUpdateBatchProof> {
         let pk = self.pk.clone();
-        let wasm_path = self.wasm_path.clone();
-        let r1cs_path = self.r1cs_path.clone();
-        let gate = self.gate.clone();
+        let cfg = self.cfg.clone();
 
-        let started = Instant::now();
         info!(
             start_index = %witness.start_index,
             actual_count = %witness.actual_count,
-            "ark-circom groth16 prove start"
+            "ark-circom groth16 prove queued"
         );
+        let _permit = self
+            .gate
+            .acquire()
+            .await
+            .map_err(|e| AppError::Prover(format!("prove gate: {}", e)))?;
 
+        let inputs = circom_inputs(&witness)?;
+
+        let started = Instant::now();
         let result = tokio::task::spawn_blocking(move || -> AppResult<TreeUpdateBatchProof> {
-            let _guard = gate.lock();
-
-            let mut cfg = CircomConfig::<Fr>::new(&wasm_path, &r1cs_path)
-                .map_err(|e| AppError::Prover(format!("circom config: {}", e)))?;
-            cfg.sanity_check = true;
-            let mut builder = CircomBuilder::new(cfg);
-
-            push_dec(&mut builder, "z", &witness.z)?;
-            push_dec(&mut builder, "old_root", &witness.old_root)?;
-            push_dec(&mut builder, "new_root", &witness.new_root)?;
-            push_dec(&mut builder, "start_index", &witness.start_index)?;
-            push_dec(&mut builder, "actual_count", &witness.actual_count)?;
-            for cm in &witness.cms {
-                push_dec(&mut builder, "cms", cm)?;
-            }
-            for pt in &witness.cv_dep {
-                for c in pt {
-                    push_dec(&mut builder, "cv_dep", c)?;
-                }
-            }
-            for v in &witness.pair_asset {
-                push_dec(&mut builder, "pair_asset", v)?;
-            }
-            for v in &witness.pair_public_in {
-                push_dec(&mut builder, "pair_public_in", v)?;
-            }
-            for v in &witness.is_deposit {
-                push_dec(&mut builder, "is_deposit", v)?;
-            }
-            for row in &witness.frontier_in {
-                for cell in row {
-                    push_dec(&mut builder, "frontier_in", cell)?;
-                }
-            }
-            for v in &witness.rcv_total {
-                push_dec(&mut builder, "rcv_total", v)?;
-            }
-
-            let circom = builder
-                .build()
-                .map_err(|e| AppError::Prover(format!("witness build: {}", e)))?;
+            let mut cfg = cfg.lock();
+            let circom = build_circuit(&mut cfg, inputs)?;
 
             let public_inputs_fr = circom
                 .get_public_inputs()
@@ -175,11 +146,67 @@ impl TreeUpdateBatchProver for ArkCircomProver {
     }
 }
 
-fn push_dec(builder: &mut CircomBuilder<Fr>, name: &str, dec: &str) -> AppResult<()> {
-    let bi = BigInt::from_str(dec)
-        .map_err(|e| AppError::Prover(format!("input '{}' parse: {}", name, e)))?;
-    builder.push_input(name, bi);
-    Ok(())
+/// `CircomBuilder::build` consumes its `CircomConfig`, which would force a
+/// wasm + r1cs reload per prove. This is the same sequence against a borrowed
+/// config, so the expensive parts stay resident.
+fn build_circuit(
+    cfg: &mut CircomConfig<Fr>,
+    inputs: HashMap<String, Vec<BigInt>>,
+) -> AppResult<CircomCircuit<Fr>> {
+    let mut r1cs = cfg.r1cs.clone();
+    // Disable the wire mapping, as `CircomBuilder::setup` does.
+    r1cs.wire_mapping = None;
+    let witness = cfg
+        .wtns
+        .calculate_witness_element::<Fr, _>(&mut cfg.store, inputs, cfg.sanity_check)
+        .map_err(|e| AppError::Prover(format!("witness build: {}", e)))?;
+    Ok(CircomCircuit {
+        r1cs,
+        witness: Some(witness),
+    })
+}
+
+/// Witness → circom signal map, in the shape `tree_update_batch.circom`
+/// declares. Kept separate from proving so the mapping is checkable without a
+/// zkey; a wrong length here otherwise surfaces from circom as an opaque
+/// witness-build failure.
+fn circom_inputs(w: &TreeUpdateBatchWitness) -> AppResult<HashMap<String, Vec<BigInt>>> {
+    let mut inputs: HashMap<String, Vec<BigInt>> = HashMap::new();
+    let mut signal = |name: &str, decs: &mut dyn Iterator<Item = &str>| -> AppResult<()> {
+        let values = decs
+            .map(|d| {
+                BigInt::from_str(d)
+                    .map_err(|e| AppError::Prover(format!("signal '{name}' value '{d}': {e}")))
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        if inputs.insert(name.to_string(), values).is_some() {
+            return Err(AppError::Prover(format!("signal '{name}' set twice")));
+        }
+        Ok(())
+    };
+
+    signal("z", &mut std::iter::once(w.z.as_str()))?;
+    signal("old_root", &mut std::iter::once(w.old_root.as_str()))?;
+    signal("new_root", &mut std::iter::once(w.new_root.as_str()))?;
+    signal("start_index", &mut std::iter::once(w.start_index.as_str()))?;
+    signal(
+        "actual_count",
+        &mut std::iter::once(w.actual_count.as_str()),
+    )?;
+    signal("cms", &mut w.cms.iter().map(String::as_str))?;
+    signal("cv_dep", &mut w.cv_dep.iter().flatten().map(String::as_str))?;
+    signal("pair_asset", &mut w.pair_asset.iter().map(String::as_str))?;
+    signal(
+        "pair_public_in",
+        &mut w.pair_public_in.iter().map(String::as_str),
+    )?;
+    signal("is_deposit", &mut w.is_deposit.iter().map(String::as_str))?;
+    signal(
+        "frontier_in",
+        &mut w.frontier_in.iter().flatten().map(String::as_str),
+    )?;
+    signal("rcv_total", &mut w.rcv_total.iter().map(String::as_str))?;
+    Ok(inputs)
 }
 
 /// Affine G1 → snarkjs proof shape: `[x, y, "1"]` in decimal.
@@ -214,4 +241,106 @@ fn fq_to_dec(x: &ark_bn254::Fq) -> String {
 
 fn fr_to_dec(x: &Fr) -> String {
     x.into_bigint().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::calldata::MAX_N_BATCH;
+    use crate::services::tree::{AdvancedState, ReservedSlot};
+    use crate::services::witness;
+    use alloy::primitives::{FixedBytes, U256};
+
+    /// An N=1 spend witness, the shape both single-pair pipelines produce.
+    fn spend_witness() -> TreeUpdateBatchWitness {
+        let slot = ReservedSlot {
+            start_index: 4,
+            old_root: [1u8; 32],
+            old_frontier: vec![[[2u8; 32], [3u8; 32], [4u8; 32]]; 10],
+        };
+        let advanced = AdvancedState {
+            new_root: [5u8; 32],
+        };
+        witness::build_n1(
+            &slot,
+            &advanced,
+            &FixedBytes::<32>::from([6u8; 32]),
+            &FixedBytes::<32>::from([7u8; 32]),
+            &[U256::from(8u8), U256::from(9u8)],
+            &[U256::from(10u8), U256::from(11u8)],
+            "12".to_string(),
+        )
+    }
+
+    /// The circuit declares fixed-width arrays; a short or long signal is
+    /// rejected deep inside circom with no useful message, so pin the widths.
+    #[test]
+    fn signal_widths_match_the_circuit_declaration() {
+        let inputs = circom_inputs(&spend_witness()).unwrap();
+        let width = |name: &str| {
+            inputs
+                .get(name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .len()
+        };
+
+        for scalar in ["z", "old_root", "new_root", "start_index", "actual_count"] {
+            assert_eq!(width(scalar), 1, "{scalar}");
+        }
+        assert_eq!(width("cms"), 2 * MAX_N_BATCH);
+        assert_eq!(width("cv_dep"), 2 * 2 * MAX_N_BATCH, "flattened BJJ points");
+        assert_eq!(width("pair_asset"), MAX_N_BATCH);
+        assert_eq!(width("pair_public_in"), MAX_N_BATCH);
+        assert_eq!(width("is_deposit"), MAX_N_BATCH);
+        assert_eq!(width("rcv_total"), MAX_N_BATCH);
+        assert_eq!(width("frontier_in"), 3 * 10, "depth rows of 3 siblings");
+    }
+
+    #[test]
+    fn every_declared_signal_is_supplied_and_no_others() {
+        let inputs = circom_inputs(&spend_witness()).unwrap();
+        let mut names: Vec<&str> = inputs.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "actual_count",
+                "cms",
+                "cv_dep",
+                "frontier_in",
+                "is_deposit",
+                "new_root",
+                "old_root",
+                "pair_asset",
+                "pair_public_in",
+                "rcv_total",
+                "start_index",
+                "z",
+            ]
+        );
+    }
+
+    /// Padding slots must be zero — the circuit and the contract both enforce
+    /// it, and a stray value there is otherwise invisible until the prove.
+    #[test]
+    fn padding_slots_are_zero() {
+        let inputs = circom_inputs(&spend_witness()).unwrap();
+        let zero = BigInt::from(0);
+        for (name, from) in [("cms", 2), ("cv_dep", 4)] {
+            for (i, v) in inputs[name].iter().enumerate().skip(from) {
+                assert_eq!(*v, zero, "{name}[{i}] should be padding");
+            }
+        }
+        for name in ["pair_asset", "pair_public_in", "is_deposit", "rcv_total"] {
+            assert!(inputs[name].iter().all(|v| *v == zero), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_non_numeric_signal_names_itself_in_the_error() {
+        let mut w = spend_witness();
+        w.cms[0] = "not-a-number".into();
+        let err = circom_inputs(&w).unwrap_err();
+        assert!(err.to_string().contains("cms"), "got {err}");
+    }
 }

@@ -12,7 +12,6 @@ path = "src/main.rs"
 shared = { path = "../shared" }
 database = { path = "../database" }
 fmd-crypto = { path = "../fmd-crypto" }
-chain-types = { path = "../chain-types" }
 tokio = { workspace = true, features = ["fs"] }
 futures = { workspace = true }
 axum = { workspace = true }
@@ -30,10 +29,7 @@ tracing-subscriber = { workspace = true }
 dotenvy = { workspace = true }
 hex = { workspace = true }
 async-trait = { workspace = true }
-utoipa = { workspace = true }
 alloy = { workspace = true }
-chrono = { workspace = true }
-light-poseidon = { workspace = true }
 url = { workspace = true }
 bigdecimal = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -48,7 +44,6 @@ ark-bn254 = "0.6"
 ark-ec = "0.6"
 ark-ff = "0.6"
 ark-snark = "0.6"
-ark-serialize = "0.6"
 num-bigint = { version = "0.4", features = ["rand"] }
 rand = "0.8"
 parking_lot = "0.12"

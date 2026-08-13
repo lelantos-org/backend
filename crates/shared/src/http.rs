@@ -14,20 +14,37 @@ pub enum AppError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
     #[error("db: {0}")]
     Db(String),
     #[error("internal: {0}")]
     Internal(String),
 }
 
+/// Body returned for every 5xx, in place of the underlying error.
+const INTERNAL_BODY: &str = "internal server error";
+
 impl IntoResponse for AppError {
+    /// 4xx bodies echo the message: it describes the caller's own input.
+    /// 5xx bodies do not — `Db` carries the raw driver string, which leaks
+    /// table, column and constraint names and sometimes the failing value.
+    /// That detail goes to the log instead.
     fn into_response(self) -> Response {
-        let status = match &self {
-            AppError::NotFound(_) => StatusCode::NOT_FOUND,
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            AppError::Db(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (status, self.to_string()).into_response()
+        match &self {
+            AppError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
+            AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
+            AppError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()).into_response(),
+            AppError::Unauthorized(_) => {
+                (StatusCode::UNAUTHORIZED, self.to_string()).into_response()
+            }
+            AppError::Db(detail) | AppError::Internal(detail) => {
+                tracing::error!(error = %detail, "request failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_BODY).into_response()
+            }
+        }
     }
 }
 

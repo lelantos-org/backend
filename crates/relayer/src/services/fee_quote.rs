@@ -1,5 +1,5 @@
-// Orchestrates a fee estimate: gas estimator output + price oracle +
-// configured fee tokens → final `EstimateResponse`.
+// Orchestrates a fee estimate: observed gas units + live fee data + price
+// oracle + configured fee tokens → final `EstimateResponse`.
 //
 // Each accepted fee token is priced concurrently via `try_join_all`.
 // Amount math uses scaled integers (PRICE_SCALE=1e8) to avoid f64
@@ -50,14 +50,13 @@ impl FeeToken {
 }
 
 impl FeeQuoter {
-    pub async fn quote_for_calldata(
-        &self,
-        to: Address,
-        calldata: Vec<u8>,
-    ) -> AppResult<EstimateResponse> {
-        let gas = self.gas_estimator.quote(to, calldata).await?;
+    /// Price `gas_used` units at the chain's current fee data. Callers source
+    /// the units from `gas_witness`, so this path costs one RPC round trip and
+    /// a (usually cached) oracle lookup — no proving, no `eth_estimateGas`.
+    pub async fn quote_for_gas(&self, gas_used: u64) -> AppResult<EstimateResponse> {
+        let fee_data = self.gas_estimator.fee_data().await?;
         let total_native_wei =
-            apply_markup(gas.gas_used, gas.effective_gas_price_wei, self.markup_bps);
+            apply_markup(gas_used, fee_data.effective_gas_price_wei, self.markup_bps);
 
         let oracle = self.oracle.clone();
         let native = self.native_symbol.clone();
@@ -95,8 +94,8 @@ impl FeeQuoter {
             .unwrap_or(0);
 
         Ok(EstimateResponse {
-            gas_used: gas.gas_used,
-            effective_gas_price_wei: gas.effective_gas_price_wei.to_string(),
+            gas_used,
+            effective_gas_price_wei: fee_data.effective_gas_price_wei.to_string(),
             total_native_wei: total_native_wei.to_string(),
             markup_bps: self.markup_bps,
             quoted_at,

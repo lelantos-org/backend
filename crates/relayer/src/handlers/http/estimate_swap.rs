@@ -17,8 +17,5 @@ pub async fn estimate_swap(
         .get(&chain_id)
         .ok_or(AppError::UnknownChain(chain_id))?
         .clone();
-    let calldata = pipeline.dry_build_calldata(payload).await?;
-    let to = pipeline.submitter.pool_address;
-    let resp = pipeline.fee_quoter.quote_for_calldata(to, calldata).await?;
-    Ok(Json(resp))
+    Ok(Json(pipeline.estimate(payload).await?))
 }

@@ -15,8 +15,6 @@ pub struct FmdIndexerConfig {
     pub filter_batch: usize,
     #[serde(default = "default_filter_tick_ms")]
     pub filter_tick_ms: u64,
-    #[serde(default = "default_retention_days")]
-    pub retention_days: u32,
 }
 
 impl FmdIndexerConfig {
@@ -32,7 +30,6 @@ impl FmdIndexerConfig {
                 filter_workers: default_filter_workers(),
                 filter_batch: default_filter_batch(),
                 filter_tick_ms: default_filter_tick_ms(),
-                retention_days: default_retention_days(),
             })
         }
     }
@@ -48,7 +45,4 @@ fn default_filter_batch() -> usize {
 }
 fn default_filter_tick_ms() -> u64 {
     500
-}
-fn default_retention_days() -> u32 {
-    30
 }

@@ -3,7 +3,7 @@
 //
 // Rust port of `sdk/src/crypto/merkle.ts`. MUST stay byte-identical to the
 // SDK and to `circuits/src/lib/merkle.circom`. Used by:
-//   - fmd-webserver: serve `/v1/path/:cm` and `/v1/tree-state`.
+//   - fmd-webserver: serve `/v1/tree-state`.
 //   - relayer: build tree_update witnesses (frontier + path indices).
 //
 // NOT a privacy-sensitive primitive — the tree is public data — but lives in
@@ -37,7 +37,16 @@ pub struct MerkleProof {
 
 pub struct MerkleTree {
     pub depth: usize,
-    leaves: Vec<Field>,
+    /// Materialised nodes per level: `levels[0]` are the leaves, `levels[d][i]`
+    /// is the node at level `d`, index `i`. Indices past a level's length are
+    /// implicitly `zeros[d]` — since `zeros[d+1] = hash(zeros[d] × 4)`, an
+    /// absent node and a materialised all-zero subtree are the same value.
+    ///
+    /// Kept in sync by every mutation, so `root()` is O(1) and `frontier()` /
+    /// `proof()` are O(depth) table lookups. Costs ~1.33 × leaf-count of
+    /// memory; buys back the O(N) Poseidon sweep the recursive form paid on
+    /// every single call.
+    levels: Vec<Vec<Field>>,
     zeros: Vec<Field>,
 }
 
@@ -52,54 +61,114 @@ impl MerkleTree {
         zeros.push(z);
         Ok(Self {
             depth,
-            leaves: Vec::new(),
+            levels: vec![Vec::new(); depth + 1],
             zeros,
         })
     }
 
-    pub fn insert(&mut self, leaf: Field) -> usize {
-        self.leaves.push(leaf);
-        self.leaves.len() - 1
+    /// Append one leaf and refresh the `depth` nodes on its path to the root.
+    pub fn insert(&mut self, leaf: Field) -> Result<usize, TreeError> {
+        self.levels[0].push(leaf);
+        let index = self.levels[0].len() - 1;
+        self.refresh_path(index)?;
+        Ok(index)
+    }
+
+    /// Append many leaves and rebuild the internal levels bottom-up in
+    /// parallel. O(N) total rather than the O(N · depth) of N `insert` calls —
+    /// use this for bootstrap replay.
+    pub fn extend(&mut self, leaves: impl IntoIterator<Item = Field>) -> Result<(), TreeError> {
+        self.levels[0].extend(leaves);
+        self.rebuild()
     }
 
     pub fn leaf_count(&self) -> usize {
-        self.leaves.len()
+        self.levels[0].len()
     }
 
     /// Drop the last `n` leaves. Used by callers that speculatively
     /// `insert` and need to undo on failure (relayer rollback).
-    pub fn truncate_leaves(&mut self, n: usize) {
-        let len = self.leaves.len();
+    ///
+    /// Every level shrinks to `ceil(child_len / ARITY)`; only its new last
+    /// node can have lost children, so one re-hash per level suffices.
+    pub fn truncate_leaves(&mut self, n: usize) -> Result<(), TreeError> {
+        let len = self.levels[0].len();
         let keep = len.saturating_sub(n);
-        self.leaves.truncate(keep);
+        if keep == len {
+            return Ok(());
+        }
+        self.levels[0].truncate(keep);
+        for lvl in 0..self.depth {
+            let parent_len = self.levels[lvl].len().div_ceil(ARITY);
+            self.levels[lvl + 1].truncate(parent_len);
+            if parent_len > 0 {
+                let parent = parent_len - 1;
+                let first = parent * ARITY;
+                self.levels[lvl + 1][parent] = hash_node(
+                    &self.node_at(lvl, first),
+                    &self.node_at(lvl, first + 1),
+                    &self.node_at(lvl, first + 2),
+                    &self.node_at(lvl, first + 3),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn root(&self) -> Result<Field, TreeError> {
-        self.node_at(self.depth, 0)
+        Ok(self.node_at(self.depth, 0))
     }
 
-    /// Bottom-up parallel root rebuild. Produces byte-identical output to
-    /// `root()` (same Poseidon math, same zero padding) but hashes each level
-    /// across threads via rayon. Use for bulk reconstructions (bootstrap
-    /// replay); per-insert callers should stick with `root()`.
+    /// Retained for call sites that predate incremental node maintenance.
+    /// `root()` is now O(1), so this is a plain alias.
     pub fn root_par(&self) -> Result<Field, TreeError> {
-        if self.leaves.is_empty() {
-            return Ok(self.zeros[self.depth]);
+        self.root()
+    }
+
+    /// Re-hash the path from `leaf_index` up to the root. Each level's parent
+    /// index grows by at most one slot, so the `resize` appends at most one
+    /// entry and never leaves a gap.
+    fn refresh_path(&mut self, leaf_index: usize) -> Result<(), TreeError> {
+        let mut idx = leaf_index;
+        for lvl in 0..self.depth {
+            let parent = idx / ARITY;
+            let first = parent * ARITY;
+            let h = hash_node(
+                &self.node_at(lvl, first),
+                &self.node_at(lvl, first + 1),
+                &self.node_at(lvl, first + 2),
+                &self.node_at(lvl, first + 3),
+            )?;
+            let up = lvl + 1;
+            if self.levels[up].len() <= parent {
+                self.levels[up].resize(parent + 1, self.zeros[up]);
+            }
+            self.levels[up][parent] = h;
+            idx = parent;
         }
-        let mut cur: Vec<Field> = self.leaves.clone();
+        Ok(())
+    }
+
+    /// Rebuild every internal level from `levels[0]`, hashing each level's
+    /// nodes across threads via rayon.
+    fn rebuild(&mut self) -> Result<(), TreeError> {
         for lvl in 0..self.depth {
             let zero = self.zeros[lvl];
-            let rem = cur.len() % ARITY;
-            if rem != 0 {
-                cur.extend(std::iter::repeat_n(zero, ARITY - rem));
-            }
-            cur = cur
-                .par_chunks(ARITY)
-                .map(|c| hash_node(&c[0], &c[1], &c[2], &c[3]))
-                .collect::<Result<Vec<Field>, TreeError>>()?;
+            let parents = {
+                let child = &self.levels[lvl];
+                let parent_len = child.len().div_ceil(ARITY);
+                (0..parent_len)
+                    .into_par_iter()
+                    .map(|p| {
+                        let f = p * ARITY;
+                        let at = |i: usize| child.get(i).unwrap_or(&zero);
+                        hash_node(at(f), at(f + 1), at(f + 2), at(f + 3))
+                    })
+                    .collect::<Result<Vec<Field>, TreeError>>()?
+            };
+            self.levels[lvl + 1] = parents;
         }
-        debug_assert_eq!(cur.len(), 1);
-        Ok(cur[0])
+        Ok(())
     }
 
     /// `frontier()` — depth × 3 slots, mirroring the layout the prior on-chain
@@ -111,7 +180,7 @@ impl MerkleTree {
     /// insert at this level (would have been stale-from-prior-parent in the
     /// contract); we zero them deterministically.
     pub fn frontier(&self) -> Result<Vec<[Field; 3]>, TreeError> {
-        let n = self.leaves.len();
+        let n = self.leaf_count();
         let mut out: Vec<[Field; 3]> = Vec::with_capacity(self.depth);
         for lvl in 0..self.depth {
             let stride = ARITY.pow(lvl as u32);
@@ -121,7 +190,7 @@ impl MerkleTree {
             #[allow(clippy::needless_range_loop)]
             for k in 0..3 {
                 if k < slot {
-                    row[k] = self.node_at(lvl, parent_idx * ARITY + k)?;
+                    row[k] = self.node_at(lvl, parent_idx * ARITY + k);
                 }
             }
             out.push(row);
@@ -140,11 +209,9 @@ impl MerkleTree {
         out
     }
 
+    /// Sibling path for `leaf_index`. Not-yet-inserted leaves get zero
+    /// siblings via `node_at`'s zero fallback, matching SDK behaviour.
     pub fn proof(&self, leaf_index: usize) -> Result<MerkleProof, TreeError> {
-        if leaf_index >= self.leaves.len() && !self.leaves.is_empty() {
-            // Not-yet-inserted leaves get zero siblings via node_at's zero
-            // fallback, matching SDK behaviour.
-        }
         let mut path_elements: Vec<[Field; 3]> = Vec::with_capacity(self.depth);
         let mut path_indices: Vec<u8> = Vec::with_capacity(self.depth);
         let mut idx = leaf_index;
@@ -155,7 +222,7 @@ impl MerkleTree {
             let mut s = 0usize;
             for k in 0..ARITY {
                 if k != self_pos {
-                    sibs[s] = self.node_at(level, parent_idx * ARITY + k)?;
+                    sibs[s] = self.node_at(level, parent_idx * ARITY + k);
                     s += 1;
                 }
             }
@@ -169,21 +236,13 @@ impl MerkleTree {
         })
     }
 
-    fn node_at(&self, level: usize, index: usize) -> Result<Field, TreeError> {
-        if level == 0 {
-            return Ok(self.leaves.get(index).copied().unwrap_or([0u8; 32]));
-        }
-        let subtree_start = index * ARITY.pow(level as u32);
-        if subtree_start >= self.leaves.len() {
-            return Ok(self.zeros[level]);
-        }
-        let child_level = level - 1;
-        let first_child = index * ARITY;
-        let c0 = self.node_at(child_level, first_child)?;
-        let c1 = self.node_at(child_level, first_child + 1)?;
-        let c2 = self.node_at(child_level, first_child + 2)?;
-        let c3 = self.node_at(child_level, first_child + 3)?;
-        hash_node(&c0, &c1, &c2, &c3)
+    /// Materialised node, or the level's zero-subtree constant when the index
+    /// is past what has been filled.
+    fn node_at(&self, level: usize, index: usize) -> Field {
+        self.levels[level]
+            .get(index)
+            .copied()
+            .unwrap_or(self.zeros[level])
     }
 }
 

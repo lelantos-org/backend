@@ -14,13 +14,16 @@ use alloy::rpc::types::eth::Log;
 use alloy::sol_types::SolEvent;
 use async_trait::async_trait;
 use chain_types::abi::NotePayload;
+use database::advisory::{ChainLock, NS_INGESTER, chain_key};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use ingester::adapters::rpc::{ChainRpc, DynRpc};
 use ingester::app::config::ChainConfig;
+use ingester::app::state::WorkerDeps;
 use ingester::domain::error::IngesterError;
 use ingester::domain::models::{TickOutcome, parse_address};
 use ingester::repositories::{PostgresChainStateRepo, PostgresRawEventRepo};
+use ingester::services::backfill::BackfillService;
 use ingester::services::ingest::IngestService;
 use ingester::services::live::{LiveService, LiveServiceImpl};
 use ingester::services::reorg::ReorgService;
@@ -412,4 +415,86 @@ async fn multichain_independent_cursors() {
         c2.iter().map(|r| r.block_number).collect::<Vec<_>>(),
         (500..=509).collect::<Vec<_>>()
     );
+}
+
+// ---------- replica failover ----------
+
+async fn db_url() -> &'static str {
+    &shared_container().await.url
+}
+
+fn worker_deps(
+    pool: &database::DbPool,
+    rpc: &Arc<MockRpc>,
+    cfg: ChainConfig,
+    url: &str,
+) -> WorkerDeps {
+    let raw_events = Arc::new(PostgresRawEventRepo::new(pool.clone()));
+    let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
+    let ingest = Arc::new(IngestService::new(raw_events.clone(), chain_state.clone()));
+    let reorg = Arc::new(ReorgService::new(raw_events, chain_state.clone()));
+    let backfill = Arc::new(BackfillService::new(rpc.clone() as DynRpc, ingest.clone()));
+    WorkerDeps {
+        cfg,
+        rpc: rpc.clone() as DynRpc,
+        chain_state,
+        ingest,
+        reorg,
+        backfill,
+        database_url: url.to_string(),
+    }
+}
+
+async fn count_raw_events(pool: &database::DbPool) -> i64 {
+    use database::schema::raw_events;
+    let mut conn = pool.get().await.unwrap();
+    raw_events::table
+        .count()
+        .get_result(&mut conn)
+        .await
+        .unwrap()
+}
+
+/// A second ingester replica must stand by rather than ingest beside the
+/// leader — and must take over once the leader's lock goes away. Returning
+/// early instead of retrying would leave the standby permanently inert, so
+/// there would be no failover at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standby_ingester_waits_for_the_lock_then_takes_over() {
+    let (pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+    let rpc = Arc::new(MockRpc::new());
+    populate_blocks(&rpc, 100..=109, 0xa0);
+
+    let leader = ChainLock::try_acquire(url, chain_key(NS_INGESTER, 1))
+        .await
+        .unwrap()
+        .expect("leader lock");
+
+    let deps = worker_deps(&pool, &rpc, cfg(1, 100), url);
+    let worker = tokio::spawn(async move { ingester::handlers::worker::run(deps).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        count_raw_events(&pool).await,
+        0,
+        "standby must not ingest while the leader holds the lock"
+    );
+    assert!(
+        !worker.is_finished(),
+        "standby must keep retrying, not exit"
+    );
+
+    drop(leader);
+
+    let mut ingested = 0;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        ingested = count_raw_events(&pool).await;
+        if ingested > 0 {
+            break;
+        }
+    }
+    assert!(ingested > 0, "standby must take over once the lock frees");
+    worker.abort();
 }

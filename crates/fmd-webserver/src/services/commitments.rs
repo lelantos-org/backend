@@ -20,7 +20,11 @@ pub struct ChunkResponse {
     pub is_complete: bool,
 }
 
-pub async fn get_chunk(st: &AppState, chain_id: i64, chunk_id: u64) -> AppResult<Arc<ChunkResponse>> {
+pub async fn get_chunk(
+    st: &AppState,
+    chain_id: i64,
+    chunk_id: u64,
+) -> AppResult<Arc<ChunkResponse>> {
     // Only complete (immutable) chunks are cached; see `AppCache::chunks`.
     if let Some(cached) = st.cache.chunks.get(&(chain_id, chunk_id)).await {
         return Ok(cached);
@@ -39,10 +43,17 @@ pub async fn get_chunk(st: &AppState, chain_id: i64, chunk_id: u64) -> AppResult
             cv_dep_y: r.cv_dep_y.to_string(),
         })
         .collect();
-    let response = Arc::new(ChunkResponse { chunk_id, entries, is_complete });
+    let response = Arc::new(ChunkResponse {
+        chunk_id,
+        entries,
+        is_complete,
+    });
 
     if is_complete {
-        st.cache.chunks.insert((chain_id, chunk_id), Arc::clone(&response)).await;
+        st.cache
+            .chunks
+            .insert((chain_id, chunk_id), Arc::clone(&response))
+            .await;
     }
 
     Ok(response)

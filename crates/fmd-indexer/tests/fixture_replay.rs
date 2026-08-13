@@ -7,14 +7,19 @@ use alloy::sol_types::SolEvent;
 use ark_ed_on_bn254::Fq;
 use ark_ff::{BigInteger, PrimeField};
 use chain_types::abi::{NotePayload, RootAdvanced};
+use database::advisory::ChainLock;
+use database::{CursorRepo, UpsertCursor};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use fmd_crypto::clue;
+use fmd_indexer::adapters::locks::ChainLocks;
 use fmd_indexer::repositories::cursor::PostgresCursorRepo;
 use fmd_indexer::repositories::matches::PostgresMatchesRepo;
 use fmd_indexer::repositories::notes::PostgresNotesRepo;
 use fmd_indexer::repositories::raw_events::PostgresRawEventsRepo;
-use fmd_indexer::repositories::spent_nullifiers::PostgresSpentNullifiersRepo;
+use fmd_indexer::repositories::spent_nullifiers::{
+    NewSpentNullifier, PostgresSpentNullifiersRepo, SpentNullifiersRepo,
+};
 use fmd_indexer::repositories::subscriptions::PostgresSubscriptionsRepo;
 use fmd_indexer::services::consume::{ConsumeService, ConsumeServiceImpl};
 use fmd_indexer::services::filter::{FilterService, FilterServiceImpl};
@@ -60,6 +65,10 @@ async fn shared_container() -> &'static ContainerHandle {
     .await
 }
 
+async fn db_url() -> &'static str {
+    &shared_container().await.url
+}
+
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
     static SERIAL: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
     let mu = SERIAL
@@ -73,7 +82,7 @@ async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "TRUNCATE raw_events, chain_state, consumer_cursors, notes, \
-         subscriptions, matches, assets, tree_advances \
+         subscriptions, matches, assets, tree_advances, spent_nullifiers \
          RESTART IDENTITY CASCADE",
     )
     .execute(&mut conn)
@@ -89,6 +98,7 @@ fn build_consume(pool: &database::DbPool) -> ConsumeServiceImpl {
         Arc::new(PostgresRawEventsRepo::new(pool.clone())),
         Arc::new(PostgresNotesRepo::new(pool.clone())),
         Arc::new(PostgresSpentNullifiersRepo::new(pool.clone())),
+        ChainLocks::disabled(),
     )
 }
 
@@ -484,4 +494,283 @@ async fn filter_emits_match_via_test_clue() {
     }
     filter.tick_chain(CHAIN_A, 100).await.unwrap();
     assert_eq!(count_matches(&pool).await, 2, "ON CONFLICT DO NOTHING");
+}
+
+fn new_nf(block_number: i64, log_index: i32, tag: u8) -> NewSpentNullifier {
+    NewSpentNullifier {
+        chain_id: CHAIN_A,
+        block_number,
+        log_index,
+        nf: vec![tag; 32],
+        tx_hash: vec![0xcc; 32],
+        block_ts: 1_700_000_000 + block_number,
+    }
+}
+
+async fn seqs(pool: &database::DbPool, chain_id: i64) -> Vec<i64> {
+    use database::schema::spent_nullifiers as sn;
+    let mut conn = pool.get().await.unwrap();
+    sn::table
+        .filter(sn::chain_id.eq(chain_id))
+        .order(sn::seq.asc())
+        .select(sn::seq)
+        .load(&mut conn)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn spent_nullifier_seq_is_dense_across_batches_and_chains() {
+    let (pool, _serial) = fresh_pool().await;
+    let repo = PostgresSpentNullifiersRepo::new(pool.clone());
+
+    // Out-of-order within the batch: `seq` must follow (block_number,
+    // log_index), not the order the caller happened to build the rows in.
+    repo.insert_batch(&[new_nf(10, 1, 0xb1), new_nf(10, 0, 0xb0)])
+        .await
+        .unwrap();
+    repo.insert_batch(&[new_nf(11, 0, 0xb2)]).await.unwrap();
+
+    assert_eq!(seqs(&pool, CHAIN_A).await, vec![0, 1, 2]);
+
+    let other = NewSpentNullifier {
+        chain_id: CHAIN_B,
+        ..new_nf(10, 0, 0xc0)
+    };
+    PostgresSpentNullifiersRepo::new(pool.clone())
+        .insert_batch(&[other])
+        .await
+        .unwrap();
+    assert_eq!(seqs(&pool, CHAIN_B).await, vec![0], "seq is per chain");
+
+    use database::schema::spent_nullifiers as sn;
+    let mut conn = pool.get().await.unwrap();
+    let ordered: Vec<i64> = sn::table
+        .filter(sn::chain_id.eq(CHAIN_A))
+        .order(sn::seq.asc())
+        .select(sn::block_number)
+        .load(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(ordered, vec![10, 10, 11]);
+}
+
+#[tokio::test]
+async fn spent_nullifier_seq_survives_replay_and_reorg() {
+    let (pool, _serial) = fresh_pool().await;
+    let repo = PostgresSpentNullifiersRepo::new(pool.clone());
+
+    let batch = [new_nf(10, 0, 0xb0), new_nf(11, 0, 0xb1)];
+    repo.insert_batch(&batch).await.unwrap();
+
+    // Crash between insert and cursor upsert replays the same batch. Rows
+    // already stored must not consume ordinals, or the next insert collides.
+    assert_eq!(repo.insert_batch(&batch).await.unwrap(), 0);
+    repo.insert_batch(&[new_nf(12, 0, 0xb2)]).await.unwrap();
+    assert_eq!(seqs(&pool, CHAIN_A).await, vec![0, 1, 2]);
+
+    // Reorg trims the tail; the sequence stays dense and re-extends from
+    // the surviving max, so completed chunks keep their contents.
+    repo.delete_from_block(CHAIN_A, 11).await.unwrap();
+    assert_eq!(seqs(&pool, CHAIN_A).await, vec![0]);
+    repo.insert_batch(&[new_nf(11, 0, 0xd1), new_nf(12, 0, 0xd2)])
+        .await
+        .unwrap();
+    assert_eq!(seqs(&pool, CHAIN_A).await, vec![0, 1, 2]);
+}
+
+// --------------------------------------------------------- replica failover
+
+const NS_OTHER: i64 = database::advisory::NS_INGESTER;
+
+async fn cursor_of(pool: &database::DbPool, name: &str, chain_id: i64) -> i64 {
+    PostgresCursorRepo::new(pool.clone())
+        .fetch(name, chain_id)
+        .await
+        .unwrap()
+        .0
+}
+
+#[tokio::test]
+async fn chain_lock_is_exclusive_and_releases_on_drop() {
+    let (_pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+    let key = database::advisory::chain_key(database::advisory::NS_FMD_CONSUME, CHAIN_A);
+
+    let first = ChainLock::try_acquire(url, key).await.unwrap();
+    assert!(first.is_some(), "uncontended acquire must win");
+    assert!(
+        ChainLock::try_acquire(url, key).await.unwrap().is_none(),
+        "second holder must be turned away, not blocked"
+    );
+
+    // Failover: the leader dying frees the lock for a standby.
+    drop(first);
+    assert!(
+        ChainLock::try_acquire(url, key).await.unwrap().is_some(),
+        "lock must release when the holder drops"
+    );
+}
+
+#[tokio::test]
+async fn chain_locks_are_scoped_by_chain_and_namespace() {
+    let (_pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+    let ns = database::advisory::NS_FMD_CONSUME;
+
+    let _a = ChainLock::try_acquire(url, database::advisory::chain_key(ns, CHAIN_A))
+        .await
+        .unwrap()
+        .expect("chain A");
+    assert!(
+        ChainLock::try_acquire(url, database::advisory::chain_key(ns, CHAIN_B))
+            .await
+            .unwrap()
+            .is_some(),
+        "a lock on one chain must not block another chain"
+    );
+    // fmd-indexer and ingester guard different tables; neither may exclude the
+    // other for the same chain.
+    assert!(
+        ChainLock::try_acquire(url, database::advisory::chain_key(NS_OTHER, CHAIN_A))
+            .await
+            .unwrap()
+            .is_some(),
+        "namespaces must not collide"
+    );
+}
+
+#[tokio::test]
+async fn standby_replica_does_no_work_until_the_leader_releases() {
+    let (pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let (rx, ry) = gamma3_r();
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        0,
+        &[0x01, 0x02],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        100,
+        0x10,
+    )
+    .await;
+
+    let standby = ConsumeServiceImpl::new(
+        Arc::new(PostgresCursorRepo::new(pool.clone())),
+        Arc::new(PostgresRawEventsRepo::new(pool.clone())),
+        Arc::new(PostgresNotesRepo::new(pool.clone())),
+        Arc::new(PostgresSpentNullifiersRepo::new(pool.clone())),
+        ChainLocks::enabled(url),
+    );
+
+    // Another replica is the leader.
+    let leader = ChainLock::try_acquire(
+        url,
+        database::advisory::chain_key(database::advisory::NS_FMD_CONSUME, CHAIN_A),
+    )
+    .await
+    .unwrap()
+    .expect("leader lock");
+
+    standby.tick_chain(CHAIN_A, 100).await.unwrap();
+    assert_eq!(
+        count_notes(&pool, CHAIN_A).await,
+        0,
+        "standby must not write"
+    );
+    assert_eq!(
+        cursor_of(&pool, "fmd", CHAIN_A).await,
+        0,
+        "cursor untouched"
+    );
+
+    // Leader dies; the standby is promoted on its next tick.
+    drop(leader);
+    standby.tick_chain(CHAIN_A, 100).await.unwrap();
+    assert_eq!(
+        count_notes(&pool, CHAIN_A).await,
+        2,
+        "promoted and caught up"
+    );
+    assert!(cursor_of(&pool, "fmd", CHAIN_A).await > 0);
+}
+
+#[tokio::test]
+async fn concurrent_replicas_keep_spent_nullifier_seq_dense() {
+    let (pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let (rx, ry) = gamma3_r();
+    for (i, tx_byte) in [0x10u8, 0x11, 0x12].iter().enumerate() {
+        insert_tx(
+            &pool,
+            CHAIN_A,
+            (i * 2) as u64,
+            &[0x20 + i as u8, 0x30 + i as u8],
+            rx,
+            ry,
+            GAMMA3_BITS_LE,
+            100 + i as u64,
+            *tx_byte,
+        )
+        .await;
+    }
+
+    let build = || {
+        ConsumeServiceImpl::new(
+            Arc::new(PostgresCursorRepo::new(pool.clone())),
+            Arc::new(PostgresRawEventsRepo::new(pool.clone())),
+            Arc::new(PostgresNotesRepo::new(pool.clone())),
+            Arc::new(PostgresSpentNullifiersRepo::new(pool.clone())),
+            ChainLocks::enabled(url),
+        )
+    };
+    let (a, b) = (build(), build());
+    let (ra, rb) = tokio::join!(a.tick_chain(CHAIN_A, 100), b.tick_chain(CHAIN_A, 100));
+    ra.unwrap();
+    rb.unwrap();
+
+    assert_eq!(count_notes(&pool, CHAIN_A).await, 6);
+    // `seq` is assigned by a read-then-write with no transaction; a second
+    // concurrent writer would leave permanent gaps.
+    let seqs = seqs(&pool, CHAIN_A).await;
+    assert_eq!(
+        seqs,
+        (0..seqs.len() as i64).collect::<Vec<_>>(),
+        "seq must stay gapless"
+    );
+}
+
+#[tokio::test]
+async fn cursor_advance_is_monotonic_but_reset_still_rewinds() {
+    let (pool, _serial) = fresh_pool().await;
+    let repo = PostgresCursorRepo::new(pool.clone());
+    let row = |last_event_id: i64| UpsertCursor {
+        name: "fmd".to_string(),
+        chain_id: CHAIN_A,
+        last_event_id,
+        last_block_number: last_event_id,
+    };
+
+    repo.upsert_monotonic(row(100)).await.unwrap();
+    assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 100);
+
+    // A slower replica landing late must not drag the watermark backwards.
+    repo.upsert_monotonic(row(50)).await.unwrap();
+    assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 100, "no regression");
+
+    repo.upsert_monotonic(row(150)).await.unwrap();
+    assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 150, "advances");
+
+    // The reset path is a deliberate rewind and keeps using plain `upsert`.
+    repo.upsert(row(0)).await.unwrap();
+    assert_eq!(
+        cursor_of(&pool, "fmd", CHAIN_A).await,
+        0,
+        "reset still works"
+    );
 }

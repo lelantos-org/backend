@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use fmd_indexer::adapters;
+use fmd_indexer::adapters::locks::ChainLocks;
 use fmd_indexer::app::{self, AppState, FmdIndexerConfig};
 use fmd_indexer::handlers::worker;
 use fmd_indexer::repositories::cursor::PostgresCursorRepo;
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
         raw_events,
         notes.clone(),
         spent_nfs,
+        ChainLocks::enabled(&cfg.database_url),
     ));
     let filter = Arc::new(FilterServiceImpl::new(
         cursors,

@@ -22,7 +22,7 @@ fn empty_tree_root_matches_iterated_zero() {
 fn single_leaf_root_matches_direct() {
     let mut t = MerkleTree::new(2).expect("new");
     let l = leaf(0xabcd);
-    t.insert(l);
+    t.insert(l).unwrap();
     let z = [0u8; 32];
     let bottom0 = hash_node(&l, &z, &z, &z).unwrap();
     let bottom_z = hash_node(&z, &z, &z, &z).unwrap();
@@ -45,7 +45,7 @@ fn frontier_zero_for_empty_tree() {
 fn frontier_after_one_insert_holds_leaf_at_slot_0_level_0() {
     let mut t = MerkleTree::new(3).expect("new");
     let l = leaf(0x42);
-    t.insert(l);
+    t.insert(l).unwrap();
     let f = t.frontier().unwrap();
     // After 1 insert, slot at lvl 0 = 1, parent_idx = 0.
     // frontier[0][0] = nodeAt(0, 0) = leaf.
@@ -74,7 +74,7 @@ fn proof_recomputes_root_for_each_inserted_leaf() {
     for i in 0..16u64 {
         let l = leaf(0x100 + i);
         leaves.push(l);
-        t.insert(l);
+        t.insert(l).unwrap();
     }
     let expected = t.root().unwrap();
     for (i, l) in leaves.iter().enumerate() {
@@ -101,21 +101,92 @@ fn proof_recomputes_root_for_each_inserted_leaf() {
     }
 }
 
+fn filled(depth: usize, n: usize) -> MerkleTree {
+    let mut t = MerkleTree::new(depth).expect("new");
+    for i in 0..n {
+        t.insert(leaf(i as u64)).unwrap();
+    }
+    t
+}
+
+/// Bulk `extend` (parallel bottom-up rebuild) must land on the same state as
+/// N incremental `insert`s.
 #[test]
-fn root_par_matches_root_across_fill_levels() {
-    for n in [0usize, 1, 3, 4, 5, 16, 17, 63, 64, 100] {
-        let mut t = MerkleTree::new(3).expect("new"); // 64 cap
-        if n > 64 {
-            continue;
-        }
-        for i in 0..n {
-            t.insert(leaf(i as u64));
-        }
+fn extend_matches_incremental_insert() {
+    for n in [0usize, 1, 3, 4, 5, 16, 17, 63, 64] {
+        let incremental = filled(3, n);
+        let mut bulk = MerkleTree::new(3).expect("new");
+        bulk.extend((0..n).map(|i| leaf(i as u64))).unwrap();
         assert_eq!(
-            t.root().unwrap(),
-            t.root_par().unwrap(),
-            "mismatch at n={}",
+            bulk.root().unwrap(),
+            incremental.root().unwrap(),
+            "root mismatch at n={}",
+            n
+        );
+        assert_eq!(
+            bulk.frontier().unwrap(),
+            incremental.frontier().unwrap(),
+            "frontier mismatch at n={}",
             n
         );
     }
+}
+
+/// `truncate_leaves` must leave the tree indistinguishable from one that was
+/// only ever filled to the surviving leaf count — this is the relayer's
+/// rollback path, where a stale internal node means a permanently divergent
+/// mirror.
+#[test]
+fn truncate_matches_tree_built_without_the_dropped_leaves() {
+    for n in [1usize, 4, 5, 17, 33, 64] {
+        for drop in [1usize, 2, 3] {
+            if drop > n {
+                continue;
+            }
+            let mut t = filled(3, n);
+            t.truncate_leaves(drop).unwrap();
+            let expected = filled(3, n - drop);
+            assert_eq!(t.leaf_count(), n - drop);
+            assert_eq!(
+                t.root().unwrap(),
+                expected.root().unwrap(),
+                "root mismatch at n={} drop={}",
+                n,
+                drop
+            );
+            assert_eq!(
+                t.frontier().unwrap(),
+                expected.frontier().unwrap(),
+                "frontier mismatch at n={} drop={}",
+                n,
+                drop
+            );
+        }
+    }
+}
+
+/// Insert-after-rollback is the exact sequence a failed submit produces.
+#[test]
+fn reinsert_after_truncate_matches_direct_fill() {
+    let mut t = filled(3, 10);
+    t.truncate_leaves(2).unwrap();
+    t.insert(leaf(0xaa)).unwrap();
+    t.insert(leaf(0xbb)).unwrap();
+
+    let mut expected = filled(3, 8);
+    expected.insert(leaf(0xaa)).unwrap();
+    expected.insert(leaf(0xbb)).unwrap();
+
+    assert_eq!(t.root().unwrap(), expected.root().unwrap());
+    assert_eq!(t.frontier().unwrap(), expected.frontier().unwrap());
+}
+
+#[test]
+fn truncate_to_empty_restores_zero_root() {
+    let empty = MerkleTree::new(3).expect("new");
+    let mut t = filled(3, 7);
+    t.truncate_leaves(7).unwrap();
+    assert_eq!(t.leaf_count(), 0);
+    assert_eq!(t.root().unwrap(), empty.root().unwrap());
+    assert_eq!(t.frontier().unwrap(), empty.frontier().unwrap());
 }

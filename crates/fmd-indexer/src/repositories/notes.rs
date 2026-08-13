@@ -48,6 +48,14 @@ pub trait NotesRepo: Send + Sync {
     async fn insert_batch(&self, rows: &[NewNote]) -> Result<usize>;
     async fn delete_from_block(&self, chain_id: i64, from_block: i64) -> Result<usize>;
     async fn fetch_after(&self, chain_id: i64, after_id: i64, limit: i64) -> Result<Vec<NoteRow>>;
+
+    /// Chain-agnostic variant for the subscription backfill pass, which
+    /// tracks a single global `notes.id` pointer rather than a per-chain
+    /// cursor.
+    async fn fetch_after_any_chain(&self, after_id: i64, limit: i64) -> Result<Vec<NoteRow>>;
+
+    /// Highest ingested `notes.id` across all chains, or 0 when empty.
+    async fn max_id(&self) -> Result<i64>;
 }
 
 pub struct PostgresNotesRepo {
@@ -111,5 +119,34 @@ impl NotesRepo for PostgresNotesRepo {
             .load(&mut conn)
             .await?;
         Ok(rows)
+    }
+
+    async fn fetch_after_any_chain(&self, after_id: i64, limit: i64) -> Result<Vec<NoteRow>> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let rows = notes::table
+            .filter(notes::id.gt(after_id))
+            .order(notes::id.asc())
+            .limit(limit)
+            .select(NoteRow::as_select())
+            .load(&mut conn)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn max_id(&self) -> Result<i64> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let max: Option<i64> = notes::table
+            .select(diesel::dsl::max(notes::id))
+            .first(&mut conn)
+            .await?;
+        Ok(max.unwrap_or(0))
     }
 }

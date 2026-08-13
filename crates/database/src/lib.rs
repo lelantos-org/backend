@@ -11,11 +11,13 @@
 //!     impls should live next to their domain only when the storage shape
 //!     differs from a shared concept.
 
+pub mod advisory;
 pub mod cursor;
 pub mod migrate;
 pub mod models;
 pub mod pool;
 pub mod schema;
 
+pub use advisory::{AdvisoryError, AdvisoryResult, ChainLock, chain_key};
 pub use cursor::{CursorError, CursorRepo, CursorResult, PostgresCursorRepo, UpsertCursor};
 pub use pool::{DbPool, PoolCfg, PoolError, build_pool};

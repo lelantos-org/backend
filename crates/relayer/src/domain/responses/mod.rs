@@ -30,6 +30,10 @@ pub struct ChainHealth {
     pub current_root_hex: String,
     /// EIP-55 checksummed MASP pool address.
     pub masp_address: String,
+    /// True once a submission's outcome could not be determined. The mirror is
+    /// parked: the relayer rejects work on this chain until it restarts, and
+    /// `current_root_hex` may no longer match the chain.
+    pub desynced: bool,
 }
 
 #[derive(Debug, Serialize)]

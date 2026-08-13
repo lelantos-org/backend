@@ -1,3 +1,4 @@
+use crate::adapters::locks::ChainLocks;
 use crate::domain::error::Result;
 use crate::domain::pending::{EscrowedMap, EscrowedSlot, plan_commit};
 use crate::repositories::cursor::{CursorRepo, UpsertCursor};
@@ -32,6 +33,7 @@ pub struct ConsumeServiceImpl {
     raw_events: Arc<dyn RawEventsRepo>,
     notes: Arc<dyn NotesRepo>,
     spent_nfs: Arc<dyn SpentNullifiersRepo>,
+    locks: ChainLocks,
 }
 
 impl ConsumeServiceImpl {
@@ -40,12 +42,14 @@ impl ConsumeServiceImpl {
         raw_events: Arc<dyn RawEventsRepo>,
         notes: Arc<dyn NotesRepo>,
         spent_nfs: Arc<dyn SpentNullifiersRepo>,
+        locks: ChainLocks,
     ) -> Self {
         Self {
             cursors,
             raw_events,
             notes,
             spent_nfs,
+            locks,
         }
     }
 
@@ -122,6 +126,13 @@ impl ConsumeServiceImpl {
 #[async_trait]
 impl ConsumeService for ConsumeServiceImpl {
     async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<()> {
+        // Every write below assumes this process is the only one consuming
+        // this chain: the cursor read-modify-write, and `spent_nullifiers.seq`
+        // ordinal assignment which silently gaps under a concurrent writer.
+        if !self.locks.is_leader(chain_id).await? {
+            return Ok(());
+        }
+
         let (after, _last_block) = self.cursors.fetch(NAME, chain_id).await?;
         let max_id = self.raw_events.max_id(chain_id).await?;
         if after > max_id {
@@ -154,8 +165,11 @@ impl ConsumeService for ConsumeServiceImpl {
 
         self.notes.insert_batch(&plan.notes).await?;
         self.spent_nfs.insert_batch(&plan.spent_nfs).await?;
+        // Monotonic: never drag the cursor backwards if a peer is ahead. The
+        // reset above deliberately stays on plain `upsert` — rewinding to 0 is
+        // its whole purpose.
         self.cursors
-            .upsert(UpsertCursor {
+            .upsert_monotonic(UpsertCursor {
                 name: NAME.to_string(),
                 chain_id,
                 last_event_id: plan.last_event_id,

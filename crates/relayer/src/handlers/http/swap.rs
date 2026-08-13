@@ -3,7 +3,6 @@ use crate::app::AppState;
 use crate::domain::dto::SubmitSwapPayload;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::RelayerSubmitResponse;
-use crate::services::nullifier_guard;
 use axum::Json;
 use axum::extract::State;
 use tracing::instrument;
@@ -23,9 +22,11 @@ pub async fn submit_swap(
         parse_b32(&payload.pub_inputs.nullifier[0])?.0,
         parse_b32(&payload.pub_inputs.nullifier[1])?.0,
     ];
-    let _nf_guard =
-        nullifier_guard::reserve_and_check(&st.pending_nullifiers, &st.pool, chain_id, nfs).await?;
+    let nf_guard = st.nullifiers.reserve(&st.pool, chain_id, nfs).await?;
     let receipt = pipeline.process(payload).await?;
+    // Landed. Hold these nullifiers against a resubmit until the indexer has
+    // written them to `spent_nullifiers`.
+    nf_guard.spent().await;
     Ok(Json(RelayerSubmitResponse {
         tx_hash: format!("0x{}", hex::encode(receipt.tx_hash)),
     }))

@@ -237,9 +237,15 @@ impl PriceOracle for CoinbaseOracle {
                 Ok(p)
             }
             Err(e) => {
+                // `max_stale` extends past the TTL rather than being measured
+                // from the same instant: this branch is only reachable once
+                // the entry is already older than `ttl`, so a `max_stale`
+                // measured from `fetched_at` would make the whole fallback
+                // dead code whenever `max_stale <= ttl` — which the defaults
+                // (300s and 300s) do.
                 let cache = self.cache.read().await;
                 if let Some(c) = self.cache_lookup(&cache, base, quote)
-                    && c.fetched_at.elapsed() < self.max_stale
+                    && c.fetched_at.elapsed() < self.ttl + self.max_stale
                 {
                     warn!(
                         base,

@@ -91,6 +91,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # misc
 hex = "0.4"
+rand = "0.9"
+sha2 = "0.10"
 url = "2"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
@@ -98,3 +100,15 @@ async-trait = "0.1"
 # integration testing
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
+
+# The FMD filter is field arithmetic through and through: arkworks generics
+# inlined across crate boundaries, so cross-crate optimisation is worth real
+# time. Measured on the `clue_breakdown` bench: batched scalar mul -10%,
+# Poseidon -3%, whole `test_clue_batch` path -3%.
+#
+# `thin` rather than `fat` — it measured the same here and builds far faster.
+# `target-cpu=native` was also tried and is deliberately absent: it bought
+# ~0.5% and would tie the release binary to the machine that built it.
+[profile.release]
+lto = "thin"
+codegen-units = 1

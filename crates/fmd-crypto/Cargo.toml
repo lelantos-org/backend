@@ -25,3 +25,7 @@ rand = "0.8"
 [[bench]]
 name = "filter_batch"
 harness = false
+
+[[bench]]
+name = "clue_breakdown"
+harness = false

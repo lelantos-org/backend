@@ -12,7 +12,7 @@ use alloy::primitives::{B256, FixedBytes, U256};
 use alloy::sol_types::SolCall;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 pub struct FlushPipeline {
     pub chain_id: i64,
@@ -98,11 +98,7 @@ impl FlushPipeline {
         let prove_started = std::time::Instant::now();
         let tu_proof = match self.prover.prove(tu_witness).await {
             Ok(p) => p,
-            Err(e) => {
-                error!(error = %e, "flush prove failed; rolling back mirror");
-                mirror.rollback(2 * n)?;
-                return Err(e);
-            }
+            Err(e) => return Err(mirror.unwind(2 * n, e)),
         };
         info!(
             elapsed_ms = prove_started.elapsed().as_millis() as u64,
@@ -130,11 +126,7 @@ impl FlushPipeline {
         .abi_encode();
         let receipt = match self.submitter.submit(calldata).await {
             Ok(r) => r,
-            Err(e) => {
-                error!(error = %e, "flush submit failed; rolling back mirror");
-                mirror.rollback(2 * n)?;
-                return Err(e);
-            }
+            Err(e) => return Err(mirror.unwind(2 * n, e)),
         };
         // Drop the mirror lock before the DB write so other pipelines can proceed.
         drop(mirror);
@@ -142,12 +134,18 @@ impl FlushPipeline {
         // Optimistic mark — keeps these IDs out of subsequent `pop_pending`
         // until the ingester observes the on-chain `IntentFlushed` event
         // and overwrites with the canonical block number.
-        if let Err(e) = self
+        match self
             .mempool
             .mark_submitted(&ids_u64, receipt.block_number)
             .await
         {
-            warn!(error = %e, "flush mark_submitted failed (ingester will catch up)");
+            Ok(claimed) if claimed != n => warn!(
+                claimed,
+                batched = n,
+                "flush claimed fewer intents than it submitted; another relayer may share this chain"
+            ),
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "flush mark_submitted failed (ingester will catch up)"),
         }
 
         let tx_hash_hex = format!("0x{}", hex::encode(receipt.tx_hash));

@@ -60,6 +60,8 @@ diesel::table! {
         gamma -> Int4,
         created_at -> Timestamptz,
         active -> Bool,
+        token_hash -> Nullable<Bytea>,
+        backfilled_through_note_id -> Int8,
     }
 }
 
@@ -117,6 +119,7 @@ diesel::table! {
         nf -> Bytea,
         tx_hash -> Bytea,
         block_ts -> Int8,
+        seq -> Int8,
     }
 }
 

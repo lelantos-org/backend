@@ -4,11 +4,11 @@
 // Pending = NOT (flushed OR canceled). Order by `submitted_at_block` so
 // older intents drain first.
 
+use crate::adapters::numeric::{bigdecimal_to_u64, bigdecimal_to_u256};
 use crate::domain::error::{AppError, AppResult};
 use alloy::primitives::U256;
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
-use bigdecimal::ToPrimitive;
 use database::DbPool;
 use database::schema::intent_escrowed_events;
 use diesel::prelude::*;
@@ -86,12 +86,8 @@ impl IntentMempool {
 
         let mut out = Vec::with_capacity(rows.len());
         for (id_bd, cm0, cm1, asset, public_in_bd, fbps, cv0x, cv0y, cv1x, cv1y, rcv) in rows {
-            let id = id_bd.to_u64().ok_or_else(|| {
-                AppError::Internal(format!("intent_id {} out of u64 range", id_bd))
-            })?;
-            let public_in = public_in_bd.to_u64().ok_or_else(|| {
-                AppError::Internal(format!("public_in {} out of u64 range", public_in_bd))
-            })?;
+            let id = bigdecimal_to_u64(&id_bd)?;
+            let public_in = bigdecimal_to_u64(&public_in_bd)?;
             let fee_bps_at_submit = u16::try_from(fbps).map_err(|_| {
                 AppError::Internal(format!("fee_bps_at_submit {} out of u16 range", fbps))
             })?;
@@ -102,9 +98,9 @@ impl IntentMempool {
                 public_asset_id: asset as u64,
                 public_in,
                 fee_bps_at_submit,
-                cv_dep0: [bd_to_u256(&cv0x)?, bd_to_u256(&cv0y)?],
-                cv_dep1: [bd_to_u256(&cv1x)?, bd_to_u256(&cv1y)?],
-                rcv_total: bd_to_u256(&rcv)?,
+                cv_dep0: [bigdecimal_to_u256(&cv0x)?, bigdecimal_to_u256(&cv0y)?],
+                cv_dep1: [bigdecimal_to_u256(&cv1x)?, bigdecimal_to_u256(&cv1y)?],
+                rcv_total: bigdecimal_to_u256(&rcv)?,
             });
         }
         Ok(out)
@@ -114,6 +110,12 @@ impl IntentMempool {
     /// overwrites with the canonical `IntentFlushed` block_number, but the
     /// optimistic write is enough to keep them out of `pop_pending` while
     /// the indexer catches up.
+    ///
+    /// Returns the number of rows actually claimed. A short count means some
+    /// ids were already flushed between `pop_pending` and here — only possible
+    /// with a second relayer on this chain, which `pop_pending`'s plain SELECT
+    /// does not guard against. Running more than one instance per chain needs
+    /// claim-based dispatch, not this optimistic write.
     pub async fn mark_submitted(&self, ids: &[u64], block_number: i64) -> AppResult<usize> {
         if ids.is_empty() {
             return Ok(0);
@@ -142,14 +144,6 @@ impl IntentMempool {
         .map_err(|e| AppError::Db(e.to_string()))?;
         Ok(n)
     }
-}
-
-fn bd_to_u256(bd: &BigDecimal) -> AppResult<U256> {
-    // Numeric columns are always non-negative integers in this schema (BN254
-    // coords and BJJ scalars). BigDecimal → decimal string → U256.
-    let s = bd.to_string();
-    U256::from_str_radix(&s, 10)
-        .map_err(|e| AppError::Internal(format!("u256 parse of {}: {}", s, e)))
 }
 
 fn vec_to_arr32(v: &[u8]) -> AppResult<[u8; 32]> {

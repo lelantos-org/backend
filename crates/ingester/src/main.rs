@@ -54,11 +54,11 @@ async fn main() -> Result<()> {
         let deps = WorkerDeps {
             cfg: chain_cfg,
             rpc,
-            raw_events,
             chain_state,
             ingest,
             reorg,
             backfill,
+            database_url: cfg.database_url.clone(),
         };
 
         let h = tokio::spawn(async move {

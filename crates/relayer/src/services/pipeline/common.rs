@@ -7,18 +7,57 @@
 
 use crate::adapters::abi::IMasp;
 use crate::adapters::calldata::{MAX_N_BATCH, build_tu_batch_pub_inputs};
-use crate::adapters::parse::{parse_b32, parse_u256};
+use crate::adapters::parse::{parse_address, parse_b32, parse_u256};
 use crate::domain::dto::PubInputsDto;
-use crate::domain::error::AppResult;
+use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::tree::{AdvancedState, ReservedSlot};
 use crate::services::witness;
-use alloy::primitives::{FixedBytes, U256};
+use alloy::primitives::{Address, FixedBytes, U256};
 use std::sync::Arc;
 
 /// Single-pair transact ops always insert exactly two leaves.
 pub const PAIR_LEAVES: usize = 2;
+
+/// What a payload's `transact_2x2` proof must be bound to for this relayer to
+/// be able to land it. Named fields rather than positional arguments: both are
+/// checked against wallet-supplied values, and `chain_id`/`relayer` are easy to
+/// transpose silently.
+#[derive(Debug, Clone, Copy)]
+pub struct TransactBinding {
+    pub chain_id: i64,
+    /// This relayer's signer. The proof pins an address, and only submissions
+    /// from that address satisfy it.
+    pub relayer: Address,
+}
+
+impl TransactBinding {
+    /// Reject payloads that cannot possibly land, before the prover runs.
+    /// Each of these is an on-chain revert that would otherwise cost a
+    /// multi-second Groth16 first.
+    pub fn check(&self, pi: &PubInputsDto) -> AppResult<()> {
+        if pi.chain_id != self.chain_id as u64 {
+            return Err(AppError::BadRequest(format!(
+                "pubInputs.chainId ({}) must equal the request chainId ({})",
+                pi.chain_id, self.chain_id
+            )));
+        }
+        let bound = parse_address(&pi.relayer)?;
+        if bound != self.relayer {
+            return Err(AppError::BadRequest(format!(
+                "pubInputs.relayer ({bound}) must equal this relayer's signer ({})",
+                self.relayer
+            )));
+        }
+        if pi.nullifier[0] == pi.nullifier[1] {
+            return Err(AppError::BadRequest(
+                "the two nullifiers must differ".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Parsed leg-1 commitment + value-commitment pair, ready to feed the tree
 /// mirror, the Fiat-Shamir transcript, and the SNARK witness builder.

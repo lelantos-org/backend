@@ -15,6 +15,7 @@ pub async fn chains(State(st): State<AppState>) -> AppResult<Json<ChainsResponse
             committed_count: mirror.committed_count() as i64,
             current_root_hex: field_to_hex(&root),
             masp_address: pipeline.submitter.pool_address.to_checksum(None),
+            desynced: mirror.is_desynced(),
         });
     }
     chains.sort_by_key(|c| c.chain_id);

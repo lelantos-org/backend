@@ -1,8 +1,8 @@
 use ark_ed_on_bn254::Fq;
 use ark_ff::{BigInteger, PrimeField};
-use light_poseidon::{Poseidon, PoseidonHasher};
 
 use super::{Field, TreeError};
+use crate::poseidon;
 
 pub(super) const ARITY: usize = 4;
 pub const TAG_MERKLE: u64 = 5;
@@ -25,7 +25,6 @@ pub(super) fn hash_node(
     c2: &Field,
     c3: &Field,
 ) -> Result<Field, TreeError> {
-    let mut p = Poseidon::<Fq>::new_circom(5).map_err(|e| TreeError::Poseidon(e.to_string()))?;
     let inputs = [
         Fq::from(TAG_MERKLE),
         be_to_fq(c0),
@@ -33,8 +32,6 @@ pub(super) fn hash_node(
         be_to_fq(c2),
         be_to_fq(c3),
     ];
-    let out = p
-        .hash(&inputs)
-        .map_err(|e| TreeError::Poseidon(e.to_string()))?;
+    let out = poseidon::hash(&inputs).map_err(|e| TreeError::Poseidon(e.to_string()))?;
     Ok(fq_to_be(out))
 }

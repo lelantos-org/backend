@@ -62,6 +62,7 @@ async fn fmd_consume_pairs_root_advanced_with_note_created() {
         raw_events_repo,
         notes_repo,
         spent_nfs_repo,
+        fmd_indexer::adapters::locks::ChainLocks::disabled(),
     );
     use fmd_indexer::services::consume::ConsumeService;
     svc.tick_chain(CHAIN_ID, 100)
@@ -178,7 +179,7 @@ async fn boot_pool() -> database::DbPool {
 
 async fn truncate_all(pool: &database::DbPool) {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("TRUNCATE TABLE notes, raw_events, tree_advances, consumer_cursors, chain_state, assets, matches, subscriptions RESTART IDENTITY CASCADE")
+    diesel::sql_query("TRUNCATE TABLE notes, raw_events, tree_advances, consumer_cursors, chain_state, assets, matches, subscriptions, spent_nullifiers RESTART IDENTITY CASCADE")
         .execute(&mut conn)
         .await
         .ok();
@@ -351,4 +352,97 @@ async fn insert_asset_registered_event(
         log,
     )
     .await;
+}
+
+/// The spent set is served as a chunk feed
+/// so wallets filter locally instead of telling the server which
+/// nullifiers they hold. Mirrors the commitment feed's slicing and
+/// cache semantics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nullifier_chunk_feed_slices_spent_set() {
+    use fmd_indexer::repositories::spent_nullifiers::{
+        NewSpentNullifier, PostgresSpentNullifiersRepo, SpentNullifiersRepo,
+    };
+
+    let _guard = serial_lock().await;
+    let pool = boot_pool().await;
+
+    // One past a chunk boundary, so chunk 0 is complete and chunk 1 is the tail.
+    const TOTAL: usize = 1025;
+    let repo = PostgresSpentNullifiersRepo::new(pool.clone());
+    let rows: Vec<NewSpentNullifier> = (0..TOTAL)
+        .map(|i| {
+            let mut nf = vec![0u8; 32];
+            nf[24..].copy_from_slice(&(i as u64).to_be_bytes());
+            NewSpentNullifier {
+                chain_id: CHAIN_ID,
+                block_number: i as i64,
+                log_index: 0,
+                nf,
+                tx_hash: vec![0xcc; 32],
+                block_ts: 1_700_000_000,
+            }
+        })
+        .collect();
+    repo.insert_batch(&rows).await.unwrap();
+
+    let base = spawn_fmd_webserver(&pool).await;
+    let client = reqwest::Client::new();
+
+    let fetch = |id: u64| {
+        let client = client.clone();
+        let url = format!("{base}/v1/chains/{CHAIN_ID}/nullifiers/chunks/{id}");
+        async move { client.get(url).send().await.unwrap() }
+    };
+
+    let resp = fetch(0).await;
+    assert_eq!(
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("public, max-age=31536000, immutable"),
+        "a full chunk can never change, so it is served as immutable"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["isComplete"], true);
+    let first = body["nullifiers"].as_array().unwrap();
+    assert_eq!(first.len(), 1024);
+    assert_eq!(first[0], format!("0x{}", hex::encode(&rows[0].nf)));
+    assert_eq!(first[1023], format!("0x{}", hex::encode(&rows[1023].nf)));
+
+    let resp = fetch(1).await;
+    assert_eq!(
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("public, max-age=5"),
+        "the tail chunk still grows"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["isComplete"], false);
+    let tail = body["nullifiers"].as_array().unwrap();
+    assert_eq!(tail.len(), TOTAL - 1024);
+    assert_eq!(tail[0], format!("0x{}", hex::encode(&rows[1024].nf)));
+
+    // Past the end: empty, not an error — the client has already stopped.
+    let body: serde_json::Value = fetch(2).await.json().await.unwrap();
+    assert_eq!(body["nullifiers"].as_array().unwrap().len(), 0);
+    assert_eq!(body["isComplete"], false);
+}
+
+async fn spawn_fmd_webserver(pool: &database::DbPool) -> String {
+    let state = fmd_webserver::AppState {
+        pool: pool.clone(),
+        cfg: Arc::new(fmd_webserver::FmdWebserverConfig {
+            database_url: String::new(),
+            bind_addr: String::new(),
+            indexer_lag_warn_blocks: 50,
+        }),
+        cache: fmd_webserver::app::cache::AppCache::new(),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = fmd_webserver::build_router(state);
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    format!("http://{addr}")
 }

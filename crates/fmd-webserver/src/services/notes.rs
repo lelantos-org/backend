@@ -8,7 +8,10 @@ fn clue_bits_hex(ciphertext: &[u8]) -> String {
     if ciphertext.len() < 2 {
         return "0x0000".to_string();
     }
-    format!("0x{:04x}", u16::from_be_bytes([ciphertext[0], ciphertext[1]]))
+    format!(
+        "0x{:04x}",
+        u16::from_be_bytes([ciphertext[0], ciphertext[1]])
+    )
 }
 
 #[tracing::instrument(skip(st))]

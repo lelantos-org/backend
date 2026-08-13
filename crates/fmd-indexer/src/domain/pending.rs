@@ -127,12 +127,23 @@ pub fn plan_commit(
                     cv_dep_x,
                     cv_dep_y,
                 } => {
+                    // Block coordinates only: a tx hash in the log is a
+                    // direct pointer from an operator's log stream into the
+                    // note -> intent -> payer/recipient join.
                     if !p.root_seen {
-                        warn!(tx_hash = %hex::encode(&r.tx_hash), "NoteCreated before RootAdvanced; skipping");
+                        warn!(
+                            block_number = r.block_number,
+                            log_index = r.log_index,
+                            "NoteCreated before RootAdvanced; skipping"
+                        );
                         continue;
                     }
                     if (p.notes.len() as u64) >= p.inserted {
-                        warn!(tx_hash = %hex::encode(&r.tx_hash), "extra NoteCreated beyond inserted count");
+                        warn!(
+                            block_number = r.block_number,
+                            log_index = r.log_index,
+                            "extra NoteCreated beyond inserted count"
+                        );
                         continue;
                     }
                     if ciphertext.len() < 2 {

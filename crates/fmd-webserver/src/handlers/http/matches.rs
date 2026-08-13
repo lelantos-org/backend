@@ -1,7 +1,8 @@
 use crate::app::AppState;
-use crate::domain::dto::ListMatchesQuery;
+use crate::domain::dto::{self as dto, ListMatchesQuery};
 use crate::domain::error::AppResult;
 use crate::domain::responses::MatchOut;
+use crate::handlers::http::auth::CapabilityToken;
 use crate::services;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -11,17 +12,23 @@ use std::sync::Arc;
     get,
     path = "/v1/matches",
     tag = "matches",
-    params(ListMatchesQuery),
-    responses((status = 200, body = [MatchOut]))
+    params(
+        ListMatchesQuery,
+        ("Authorization" = String, Header, description = "`Bearer <subscription capability token, 32-byte hex>`"),
+    ),
+    responses((status = 200, body = [MatchOut]), (status = 401, description = "missing or malformed Authorization header"))
 )]
-#[tracing::instrument(skip(st), fields(subscription = q.subscription))]
+// `q` carries only the paging cursor and is safe to record. The token arrives
+// in `Authorization`, which no span here reads.
+#[tracing::instrument(skip(st, token))]
 pub async fn list_matches(
     State(st): State<AppState>,
+    token: CapabilityToken,
     Query(q): Query<ListMatchesQuery>,
 ) -> AppResult<Json<Arc<Vec<MatchOut>>>> {
-    let after = q.after.unwrap_or(0);
-    let limit = q.limit.unwrap_or(100).min(1000);
+    let subscription_id = services::subscriptions::id_for_token(&st, token.hash()).await?;
+    let (after, limit) = dto::page(q.after, q.limit);
     Ok(Json(
-        services::matches::list(&st, q.subscription, after, limit).await?,
+        services::matches::list(&st, subscription_id, after, limit).await?,
     ))
 }

@@ -75,8 +75,12 @@ pub struct PriceOracleCfg {
     pub base_url: String,
     #[serde(default = "default_oracle_endpoint")]
     pub endpoint: String, // "spot" | "buy"
+    /// How long a cached price is served without refetching.
     #[serde(default = "default_oracle_ttl_s")]
     pub cache_ttl_s: u64,
+    /// How much *further* past `cache_ttl_s` a cached price may be served when
+    /// the upstream fetch fails. Measured from the end of the TTL, not from
+    /// the fetch.
     #[serde(default = "default_oracle_max_stale_s")]
     pub max_stale_s: u64,
     #[serde(default = "default_oracle_allow_usd_cross")]

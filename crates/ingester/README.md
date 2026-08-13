@@ -2,6 +2,21 @@
 
 Multi-chain block/event ingester. Runs database migrations on startup, then spawns one worker per configured chain. Each worker polls its RPC, follows the head with a reorg buffer, and backfills in chunks when far behind tip.
 
+## Replicas
+
+Safe to run as N replicas, as failover rather than scale-out. Each chain worker
+must hold a Postgres advisory lock (`database::advisory`, namespace
+`NS_INGESTER`) before ingesting. One replica wins per chain; the rest block in a
+retry loop and take over when the leader's lock frees. Throughput per chain stays
+1x — the lock serialises, it does not shard.
+
+The lock is held on a dedicated connection, deliberately not one from the bb8
+pool: a pooled connection is returned after the query and eventually reaped by
+`idle_timeout`, which would silently release the lock while the process kept
+writing. The leader also re-checks that connection on an interval and stops the
+worker if it has died, so a dropped connection cannot leave two writers on one
+chain.
+
 ## Run
 
 ```bash

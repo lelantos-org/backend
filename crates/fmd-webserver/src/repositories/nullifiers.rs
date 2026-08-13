@@ -4,16 +4,21 @@ use database::schema::spent_nullifiers;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
-/// Return the subset of `nfs` that is recorded in `spent_nullifiers` for
-/// the given chain. Order is not preserved; caller deduplicates.
-pub async fn subset(pool: &DbPool, chain_id: i64, nfs: Vec<Vec<u8>>) -> AppResult<Vec<Vec<u8>>> {
-    if nfs.is_empty() {
-        return Ok(vec![]);
-    }
+/// One `seq`-ordered slice of the spent set. `seq` is the dense per-chain
+/// ordinal fmd-indexer assigns at insert; see `notes::list_chunk` for the
+/// `leaf_index` equivalent.
+pub async fn list_chunk(
+    pool: &DbPool,
+    chain_id: i64,
+    from_seq: i64,
+    to_seq: i64,
+) -> AppResult<Vec<Vec<u8>>> {
     let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
     spent_nullifiers::table
         .filter(spent_nullifiers::chain_id.eq(chain_id))
-        .filter(spent_nullifiers::nf.eq_any(nfs))
+        .filter(spent_nullifiers::seq.ge(from_seq))
+        .filter(spent_nullifiers::seq.lt(to_seq))
+        .order(spent_nullifiers::seq.asc())
         .select(spent_nullifiers::nf)
         .load::<Vec<u8>>(&mut conn)
         .await

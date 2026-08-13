@@ -1,8 +1,7 @@
-use crate::domain::dto::{CreateSubscription, SpentRequest};
-use crate::domain::responses::{
-    MatchOut, MerkleProofOut, NoteOut, SpentResponse, SubscriptionOut, TreeStateOut,
-};
+use crate::domain::dto::CreateSubscription;
+use crate::domain::responses::{MatchOut, NoteOut, SubscriptionOut, TreeStateOut};
 use crate::handlers::http as handlers;
+use crate::handlers::http::nullifiers::NullifierChunkOut;
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]
@@ -11,20 +10,18 @@ use utoipa::OpenApi;
     paths(
         handlers::notes::list_notes,
         handlers::matches::list_matches,
-        handlers::subscriptions::list_subscriptions,
         handlers::subscriptions::create_subscription,
         handlers::subscriptions::delete_subscription,
-        handlers::tree::get_path,
         handlers::tree::get_tree_state,
-        handlers::spent::check_spent,
+        handlers::nullifiers::get_nullifier_chunk,
     ),
-    components(schemas(NoteOut, MatchOut, SubscriptionOut, CreateSubscription, MerkleProofOut, TreeStateOut, SpentRequest, SpentResponse)),
+    components(schemas(NoteOut, MatchOut, SubscriptionOut, CreateSubscription, TreeStateOut, NullifierChunkOut)),
     tags(
         (name = "notes", description = "Notes"),
         (name = "matches", description = "Matches"),
         (name = "subscriptions", description = "Subscriptions"),
-        (name = "tree", description = "Merkle tree paths + state"),
-        (name = "spent", description = "Spent-nullifier set"),
+        (name = "tree", description = "Merkle tree state"),
+        (name = "nullifiers", description = "Spent-nullifier chunk feed"),
     )
 )]
 pub struct ApiDoc;

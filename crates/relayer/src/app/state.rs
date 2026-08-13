@@ -1,12 +1,14 @@
 use crate::adapters::calldata::MAX_N_BATCH;
+use crate::adapters::rpc::RpcEndpoint;
 use crate::app::config::RelayerConfig;
 use crate::domain::error::AppError;
 use crate::domain::error::AppResult;
 use crate::services::events::EventBroadcaster;
 use crate::services::fee_quote::{FeeQuoter, FeeToken};
 use crate::services::gas_estimator::GasEstimator;
+use crate::services::gas_witness::GasWitness;
 use crate::services::intent_mempool::IntentMempool;
-use crate::services::nullifier_guard::PendingMap;
+use crate::services::nullifier_guard::NullifierGuards;
 use crate::services::oracle::{CoinbaseOracle, PriceOracle};
 use crate::services::pipeline::{FlushPipeline, SpendPipeline, SwapPipeline};
 use crate::services::prover::TreeUpdateBatchProver;
@@ -14,11 +16,11 @@ use crate::services::submitter::Submitter;
 use crate::services::tree::TreeMirror;
 use alloy::primitives::Address;
 use database::DbPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -33,9 +35,8 @@ pub struct AppState {
     /// DB pool. Used by `nullifier_guard` for `spent_nullifiers` lookups
     /// before SNARK generation.
     pub pool: DbPool,
-    /// Per-chain set of nullifiers currently in flight through a spend or
-    /// swap pipeline. See `services::nullifier_guard`.
-    pub pending_nullifiers: PendingMap,
+    /// Nullifier admission control. See `services::nullifier_guard`.
+    pub nullifiers: Arc<NullifierGuards>,
 }
 
 pub async fn build_state(
@@ -50,9 +51,10 @@ pub async fn build_state(
     );
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
-    let mut pending_nullifiers: HashMap<i64, Arc<Mutex<HashSet<[u8; 32]>>>> = HashMap::new();
+    let nullifiers = Arc::new(NullifierGuards::new(cfg.chains.iter().map(|c| c.chain_id)));
     for c in &cfg.chains {
-        pending_nullifiers.insert(c.chain_id, Arc::new(Mutex::new(HashSet::new())));
+        let rpc = RpcEndpoint::new(&c.rpc_url)
+            .map_err(|e| AppError::Internal(format!("rpc endpoint chain {}: {}", c.chain_id, e)))?;
         let mut mirror = TreeMirror::new(c.chain_id)
             .map_err(|e| AppError::Internal(format!("mirror init chain {}: {}", c.chain_id, e)))?;
         mirror
@@ -60,7 +62,7 @@ pub async fn build_state(
             .await
             .map_err(|e| AppError::Internal(format!("bootstrap chain {}: {}", c.chain_id, e)))?;
         mirror
-            .verify_chain_root(&c.rpc_url, &c.pool_address)
+            .verify_chain_root(&rpc, &c.pool_address)
             .await
             .map_err(|e| AppError::Internal(format!("chain root check {}: {}", c.chain_id, e)))?;
 
@@ -68,7 +70,7 @@ pub async fn build_state(
         let submitter = Arc::new(
             Submitter::new(
                 c.chain_id,
-                &c.rpc_url,
+                rpc.clone(),
                 &c.signer_key_hex,
                 &c.pool_address,
                 c.receipt_timeout_s,
@@ -86,11 +88,8 @@ pub async fn build_state(
             .collect::<AppResult<_>>()?;
         validate_fee_token_pairs(oracle.as_ref(), &c.native_symbol, &fee_tokens, c.chain_id)
             .await?;
-        let gas_estimator = Arc::new(GasEstimator::new(
-            c.chain_id,
-            &c.rpc_url,
-            submitter.signer_address,
-        ));
+        let gas_estimator = Arc::new(GasEstimator::new(c.chain_id, rpc.clone()));
+        let gas_witness = Arc::new(GasWitness::new());
         let fee_quoter = Arc::new(FeeQuoter {
             chain_id: c.chain_id,
             native_symbol: c.native_symbol.clone(),
@@ -107,6 +106,7 @@ pub async fn build_state(
             submitter: submitter.clone(),
             prover: prover.clone(),
             fee_quoter: fee_quoter.clone(),
+            gas_witness: gas_witness.clone(),
         };
         spend_pipelines.insert(c.chain_id, Arc::new(spend));
 
@@ -120,7 +120,7 @@ pub async fn build_state(
             let swap_submitter = Arc::new(
                 Submitter::new(
                     c.chain_id,
-                    &c.rpc_url,
+                    rpc.clone(),
                     &c.signer_key_hex,
                     wrapper_hex,
                     c.receipt_timeout_s,
@@ -137,6 +137,7 @@ pub async fn build_state(
                 prover: prover.clone(),
                 wrapper_address,
                 fee_quoter: fee_quoter.clone(),
+                gas_witness: gas_witness.clone(),
             };
             swap_pipelines.insert(c.chain_id, Arc::new(swap));
             info!(
@@ -166,6 +167,12 @@ pub async fn build_state(
                 tick.tick().await;
                 match flush_task.tick().await {
                     Ok(Some(_)) | Ok(None) => {}
+                    // A parked mirror never un-parks without a restart, so
+                    // keep the loop from retrying (and log-spamming) forever.
+                    Err(e @ AppError::MirrorDesynced(_)) => {
+                        error!(chain_id = flush_task.chain_id, error = %e, "flush worker stopping");
+                        return;
+                    }
                     Err(e) => {
                         warn!(chain_id = flush_task.chain_id, error = %e, "flush tick failed")
                     }
@@ -186,7 +193,7 @@ pub async fn build_state(
         swap_pipelines: Arc::new(swap_pipelines),
         events,
         pool,
-        pending_nullifiers: Arc::new(pending_nullifiers),
+        nullifiers,
     })
 }
 

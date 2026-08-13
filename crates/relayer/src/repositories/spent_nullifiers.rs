@@ -5,8 +5,8 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
 /// Return the subset of `nfs` already recorded as spent for `chain_id`.
-/// Mirrors `fmd-webserver::repositories::spent::subset` (kept local so the
-/// relayer does not depend on the webserver crate).
+/// Point lookup for the relayer's own pre-submit guard. Wallets no longer
+/// get this shape — they pull the nullifier chunk feed and filter locally.
 pub async fn any_spent(pool: &DbPool, chain_id: i64, nfs: &[[u8; 32]]) -> AppResult<Vec<Vec<u8>>> {
     if nfs.is_empty() {
         return Ok(vec![]);

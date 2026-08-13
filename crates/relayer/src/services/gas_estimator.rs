@@ -1,58 +1,41 @@
-// Gas + EIP-1559 fee estimator. Builds an alloy provider per call
-// (mirrors `submitter.rs` v1 pattern; persistent provider TBD).
+// EIP-1559 fee-data source for quotes.
 //
 // Picks EIP-1559 path when the latest block exposes `baseFeePerGas`; falls
 // back to legacy `eth_gasPrice` otherwise (BSC, some sidechains).
 //
-// Caveat: on optimistic rollups (Arbitrum, Optimism) `eth_estimateGas`
-// returns L2 execution gas only; L1 data-availability fee is separate
-// and can dominate. v1 documents this as a known undercount.
+// Gas *units* come from `gas_witness`, not from `eth_estimateGas` — see that
+// module for why. This type only answers "what does a unit of gas cost right
+// now".
+//
+// Caveat: on optimistic rollups (Arbitrum, Optimism) execution gas excludes
+// the L1 data-availability fee, which can dominate. v1 documents this as a
+// known undercount.
 
+use crate::adapters::rpc::RpcEndpoint;
 use crate::domain::error::{AppError, AppResult};
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::rpc::types::{BlockNumberOrTag, TransactionRequest};
-use std::str::FromStr;
+use alloy::rpc::types::BlockNumberOrTag;
 
 pub struct GasEstimator {
     pub chain_id: i64,
-    pub rpc_url: String,
-    pub from: Address,
+    rpc: RpcEndpoint,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct GasQuote {
-    pub gas_used: u64,
+pub struct FeeData {
     pub base_fee_per_gas_wei: u128,
     pub max_priority_fee_per_gas_wei: u128,
     pub effective_gas_price_wei: u128,
 }
 
 impl GasEstimator {
-    pub fn new(chain_id: i64, rpc_url: &str, from: Address) -> Self {
-        Self {
-            chain_id,
-            rpc_url: rpc_url.to_string(),
-            from,
-        }
+    pub fn new(chain_id: i64, rpc: RpcEndpoint) -> Self {
+        Self { chain_id, rpc }
     }
 
-    pub async fn quote(&self, to: Address, calldata: Vec<u8>) -> AppResult<GasQuote> {
-        let url: alloy::transports::http::reqwest::Url = self
-            .rpc_url
-            .parse()
-            .map_err(|e: url::ParseError| AppError::Internal(format!("rpc url: {e}")))?;
-        let provider = ProviderBuilder::new().on_http(url);
-
-        let tx = TransactionRequest::default()
-            .from(self.from)
-            .to(to)
-            .input(Bytes::from(calldata).into());
-
-        let gas_used = provider
-            .estimate_gas(&tx)
-            .await
-            .map_err(|e| AppError::Rpc(format!("eth_estimateGas: {e}")))?;
+    pub async fn fee_data(&self) -> AppResult<FeeData> {
+        let provider = ProviderBuilder::new().on_client(self.rpc.client());
 
         let block = provider
             .get_block_by_number(BlockNumberOrTag::Latest, false)
@@ -77,18 +60,12 @@ impl GasEstimator {
             (gp, 0u128, gp)
         };
 
-        Ok(GasQuote {
-            gas_used,
+        Ok(FeeData {
             base_fee_per_gas_wei: base_fee,
             max_priority_fee_per_gas_wei: priority_fee,
             effective_gas_price_wei: effective,
         })
     }
-}
-
-/// Helper for handlers that read an `Address` from a hex string.
-pub fn parse_addr(hex: &str) -> AppResult<Address> {
-    Address::from_str(hex).map_err(|e| AppError::Internal(format!("address parse: {e}")))
 }
 
 /// Total native wei = gas_used * effective_price * (10_000 + markup_bps) / 10_000

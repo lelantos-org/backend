@@ -5,7 +5,7 @@ use database::DbPool;
 use database::schema::raw_events;
 use diesel::prelude::*;
 use diesel::sql_query;
-use diesel::sql_types::{BigInt, Text};
+use diesel::sql_types::Text;
 use diesel_async::RunQueryDsl;
 
 #[async_trait]
@@ -22,7 +22,6 @@ pub trait RawEventRepo: Send + Sync {
         block_number: i64,
     ) -> Result<Option<Vec<u8>>, IngesterError>;
     async fn notify(&self, chain_id: i64) -> Result<(), IngesterError>;
-    async fn try_advisory_lock(&self, key: i64) -> Result<bool, IngesterError>;
 }
 
 #[derive(Insertable)]
@@ -143,24 +142,5 @@ impl RawEventRepo for PostgresRawEventRepo {
             .await
             .map_err(|e| IngesterError::Db(e.to_string()))?;
         Ok(())
-    }
-
-    async fn try_advisory_lock(&self, key: i64) -> Result<bool, IngesterError> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        #[derive(QueryableByName)]
-        struct Got {
-            #[diesel(sql_type = diesel::sql_types::Bool)]
-            pg_try_advisory_lock: bool,
-        }
-        let r: Got = sql_query("SELECT pg_try_advisory_lock($1) AS pg_try_advisory_lock")
-            .bind::<BigInt, _>(key)
-            .get_result(&mut conn)
-            .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        Ok(r.pg_try_advisory_lock)
     }
 }
