@@ -1,26 +1,22 @@
 use alloy::sol_types::SolEvent;
 use chain_types::abi::{
-    AssetMoved, AssetRegistered, IntentCanceled, IntentEscrowed, IntentFlushed, NotePayload,
-    NotesCreated, NullifierConsumed, RootAdvanced,
+    AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed, NotePayload,
+    NullifierConsumed, RootAdvanced,
 };
 
 #[test]
 fn print_sigs() {
     eprintln!(
-        "IntentEscrowed: {}",
-        hex::encode(IntentEscrowed::SIGNATURE_HASH.0)
+        "DepositEscrowed: {}",
+        hex::encode(DepositEscrowed::SIGNATURE_HASH.0)
     );
     eprintln!(
-        "IntentFlushed: {}",
-        hex::encode(IntentFlushed::SIGNATURE_HASH.0)
+        "DepositFlushed: {}",
+        hex::encode(DepositFlushed::SIGNATURE_HASH.0)
     );
     eprintln!(
-        "IntentCanceled: {}",
-        hex::encode(IntentCanceled::SIGNATURE_HASH.0)
-    );
-    eprintln!(
-        "NotesCreated: {}",
-        hex::encode(NotesCreated::SIGNATURE_HASH.0)
+        "DepositCanceled: {}",
+        hex::encode(DepositCanceled::SIGNATURE_HASH.0)
     );
     eprintln!(
         "NotePayload: {}",

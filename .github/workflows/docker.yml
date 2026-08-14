@@ -58,6 +58,8 @@ jobs:
               - 'crates/explorer-webserver/**'
             relayer:
               - 'crates/relayer/**'
+            risk-webserver:
+              - 'crates/risk-webserver/**'
       - name: Build matrix
         id: set-matrix
         env:
@@ -69,6 +71,7 @@ jobs:
           CHANGED_FMD_WEBSERVER: ${{ steps.filter.outputs.fmd-webserver }}
           CHANGED_EXPLORER_WEBSERVER: ${{ steps.filter.outputs.explorer-webserver }}
           CHANGED_RELAYER: ${{ steps.filter.outputs.relayer }}
+          CHANGED_RISK_WEBSERVER: ${{ steps.filter.outputs.risk-webserver }}
         run: |
           all_images='[
             {"image":"ingester",           "package":"ingester",           "needs_shared":true},
@@ -76,7 +79,8 @@ jobs:
             {"image":"explorer-indexer",   "package":"explorer-indexer",   "needs_shared":true},
             {"image":"fmd-webserver",      "package":"fmd-webserver",      "needs_shared":true},
             {"image":"explorer-webserver", "package":"explorer-webserver", "needs_shared":true},
-            {"image":"relayer",            "package":"relayer",            "needs_shared":true}
+            {"image":"relayer",            "package":"relayer",            "needs_shared":true},
+            {"image":"risk-webserver",     "package":"risk-webserver",     "needs_shared":true}
           ]'
 
           if [ "$BUILD_ALL" == "true" ]; then
@@ -89,14 +93,16 @@ jobs:
               --arg explorer_indexer "$CHANGED_EXPLORER_INDEXER" \
               --arg fmd_webserver "$CHANGED_FMD_WEBSERVER" \
               --arg explorer_webserver "$CHANGED_EXPLORER_WEBSERVER" \
-              --arg relayer "$CHANGED_RELAYER" '
+              --arg relayer "$CHANGED_RELAYER" \
+              --arg risk_webserver "$CHANGED_RISK_WEBSERVER" '
               {
                 "ingester": $ingester,
                 "fmd-indexer": $fmd_indexer,
                 "explorer-indexer": $explorer_indexer,
                 "fmd-webserver": $fmd_webserver,
                 "explorer-webserver": $explorer_webserver,
-                "relayer": $relayer
+                "relayer": $relayer,
+                "risk-webserver": $risk_webserver
               } as $changes |
               [.[] | select(
                 ($changes[.image] == "true") or (.needs_shared and $shared == "true")

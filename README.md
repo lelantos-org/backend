@@ -23,10 +23,12 @@ flowchart LR
   REL[relayer] -->|prove + submit tx| EVM
   FT -->|spent nullifiers| REL
   MQ[metaquoter] -->|eth_call quoters| EVM
+  SA[(screened_addresses)] --> RW[risk-webserver]
   FW --> APP[clients]
   EW --> APP
   REL --> APP
   MQ --> APP
+  RW --> APP
 ```
 
 ## Services
@@ -54,8 +56,8 @@ flowchart TD
 ### FMD — `fmd-indexer` + `fmd-webserver`
 
 **Indexer.** Two tick loops over `raw_events`. *Consume* decodes
-`IntentEscrowed` and nullifier events into `notes` and `spent_nullifiers`,
-holding escrowed intents in a pending map until the batch that commits them
+`DepositEscrowed` and nullifier events into `notes` and `spent_nullifiers`,
+holding escrowed deposits in a pending map until the batch that commits them
 lands. *Filter* runs FMD detection: each note's clue is tested against every
 active subscription key (`fmd-crypto`), producing `matches`. Both keep their own
 row in `consumer_cursors`; filter also backfills new subscriptions over
@@ -125,7 +127,7 @@ per-chain pipeline builds the witness against a mirrored copy of the commitment
 tree, generates a Groth16 proof (ark-circom, serialized behind a mutex since it
 is CPU-bound), and submits the batch transaction. Nullifier guard rejects
 double-spends before proving, the oracle and gas estimator price the fee, and
-successful flushes publish intent-lifecycle events on an SSE stream. The
+successful flushes publish deposit-lifecycle events on an SSE stream. The
 `/estimate` routes run the same build without submitting.
 
 ```mermaid
@@ -140,7 +142,7 @@ flowchart TD
   PIPE --> FQ[fee quote]
   FQ --> OR[oracle] & GE[gas estimator]
   SUB --> EV[event broadcaster]
-  EV -->|SSE /v1/intents/stream| CL
+  EV -->|SSE /v1/deposits/stream| CL
   CL -->|POST /v1/*/estimate| FQ
 ```
 
@@ -162,6 +164,30 @@ flowchart LR
   BEST --> CL
 ```
 
+### Risk screening — `risk-webserver`
+
+Read-only address screening over the `screened_addresses` table: given a chain
+and an address, returns the highest risk across every source that lists it, and
+whether that risk blocks. Addresses are normalized before lookup — EVM
+addresses are lowercased so a checksummed and a lowercase spelling cannot screen
+differently — and verdicts, negatives included, are cached with a TTL.
+
+There is no write endpoint; the list is populated out-of-band by SQL. That is
+what makes running it unauthenticated acceptable, since network reach cannot be
+used to remove a sanctioned address. Screening is fail-closed: a DB error is a
+500, never a "clean" verdict. It is the one webserver that runs migrations,
+because no indexer writes its table.
+
+```mermaid
+flowchart LR
+  CL[client] -->|POST /v1/screen| SVC[ScreeningService]
+  SVC --> CA[verdict cache TTL]
+  CA -->|miss| REPO[ScreenedAddressRepo]
+  REPO --> SA[(screened_addresses)]
+  SQL[ops SQL] -.populates.-> SA
+  SVC -->|risk + blocked| CL
+```
+
 ### Libraries
 
 No IO loop of their own; every binary sits on top of them. `shared` holds
@@ -173,7 +199,7 @@ end-to-end via testcontainers.
 
 ```mermaid
 flowchart BT
-  BINS["ingester · fmd-indexer · explorer-indexer<br/>fmd-webserver · explorer-webserver<br/>relayer · metaquoter"] --> SH[shared]
+  BINS["ingester · fmd-indexer · explorer-indexer<br/>fmd-webserver · explorer-webserver · risk-webserver<br/>relayer · metaquoter"] --> SH[shared]
   BINS --> CT[chain-types]
   BINS --> FC[fmd-crypto]
   BINS --> DB[database]
@@ -200,7 +226,7 @@ just ci       # fmt + clippy + test
 ```sh
 cd stack
 just up               # everything (profile=all)
-just up-profile fmd   # single profile: db | anvil | ingester | fmd | explorer | relayer | metaquoter
+just up-profile fmd   # single profile: db | anvil | ingester | fmd | explorer | relayer | metaquoter | risk
 just logs <service>   # tail one service
 just down             # stop + wipe volumes
 ```

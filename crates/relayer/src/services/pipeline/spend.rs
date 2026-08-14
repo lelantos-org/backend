@@ -1,21 +1,32 @@
-use crate::adapters::abi::IMasp;
+use crate::adapters::abi::{IMasp, INativeAdapter};
 use crate::adapters::calldata::{build_aux, build_proof, build_pub_inputs, build_tu_proof};
+use crate::adapters::parse::parse_address;
 use crate::domain::dto::{SpendKind, SubmitSpendPayload};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::EstimateResponse;
 use crate::services::fee_quote::FeeQuoter;
 use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    PAIR_LEAVES, PairInputs, TransactBinding, build_padded_pair_arrays, build_tu_pi_for_pair,
-    parse_pair_inputs, prove_pair,
+    SPEND_LEAVES, SpendInputs, TransactBinding, build_padded_spend_arrays, build_tu_pi_for_spend,
+    parse_spend_inputs, prove_spend,
 };
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::submitter::{SubmissionReceipt, Submitter};
 use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
+use alloy::primitives::Address;
 use alloy::sol_types::SolCall;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, instrument};
+
+/// Native unshields do not go to the pool. `NativeAdapter` calls
+/// `MASP.withdraw` itself, unwraps the proceeds and forwards them to
+/// `pi.payer`, so it is both the SNARK's `recipient` and its `relayer`, and
+/// the tx must be sent to the adapter address.
+pub struct NativeRoute {
+    pub address: Address,
+    pub submitter: Arc<Submitter>,
+}
 
 pub struct SpendPipeline {
     pub chain_id: i64,
@@ -24,14 +35,18 @@ pub struct SpendPipeline {
     pub prover: Arc<dyn TreeUpdateBatchProver>,
     pub fee_quoter: Arc<FeeQuoter>,
     pub gas_witness: Arc<GasWitness>,
+    /// Built only for chains where `native_adapter_address` is configured.
+    /// Without it, `withdrawNative` payloads are rejected.
+    pub native: Option<Arc<NativeRoute>>,
 }
 
 impl SpendPipeline {
     #[instrument(skip_all, fields(chain_id = self.chain_id, kind = ?payload.kind, start_index))]
     pub async fn process(&self, payload: SubmitSpendPayload) -> AppResult<SubmissionReceipt> {
         self.validate(&payload)?;
-        let inputs = parse_pair_inputs(&payload.pub_inputs)?;
+        let inputs = parse_spend_inputs(&payload.pub_inputs)?;
         let entry = EntryPoint::from(payload.kind);
+        let submitter = self.submitter_for(payload.kind)?;
 
         // Hold the mirror lock through reserve→prove→submit so concurrent
         // pipelines on this chain serialise cleanly.
@@ -40,21 +55,16 @@ impl SpendPipeline {
             leaf_count = mirror.committed_count(),
             "spend pipeline start"
         );
-        let (slot, advanced) = mirror.reserve_and_advance(
-            *inputs.cm0,
-            *inputs.cm1,
-            &inputs.cv_dep0,
-            &inputs.cv_dep1,
-        )?;
+        let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
         tracing::Span::current().record("start_index", slot.start_index);
 
-        let tu_proof = match prove_pair(&self.prover, &slot, &advanced, &inputs).await {
+        let tu_proof = match prove_spend(&self.prover, &slot, &advanced, &inputs).await {
             Ok(p) => p,
-            Err(e) => return Err(mirror.unwind(PAIR_LEAVES, e)),
+            Err(e) => return Err(mirror.unwind(SPEND_LEAVES, e)),
         };
 
         let calldata = encode_spend_calldata(&payload, &inputs, &slot, &advanced, &tu_proof)?;
-        match self.submitter.submit(calldata).await {
+        match submitter.submit(calldata).await {
             Ok(receipt) => {
                 self.gas_witness.observe(entry, receipt.gas_used);
                 info!(
@@ -65,7 +75,7 @@ impl SpendPipeline {
                 );
                 Ok(receipt)
             }
-            Err(e) => Err(mirror.unwind(PAIR_LEAVES, e)),
+            Err(e) => Err(mirror.unwind(SPEND_LEAVES, e)),
         }
     }
 
@@ -85,28 +95,54 @@ impl SpendPipeline {
     }
 
     fn validate(&self, payload: &SubmitSpendPayload) -> AppResult<()> {
-        validate_spend_shape(payload, self.binding())
+        validate_spend_shape(payload, self.binding(payload.kind)?, self.native_address())
     }
 
-    fn binding(&self) -> TransactBinding {
-        TransactBinding {
+    /// The address the proof must name as `relayer`: this relayer's signer
+    /// for pool-targeted calls, the adapter for a native unshield.
+    fn binding(&self, kind: SpendKind) -> AppResult<TransactBinding> {
+        let relayer = match kind {
+            SpendKind::WithdrawNative => self.native_route()?.address,
+            _ => self.submitter.signer_address,
+        };
+        Ok(TransactBinding {
             chain_id: self.chain_id,
-            relayer: self.submitter.signer_address,
-        }
+            relayer,
+        })
+    }
+
+    fn native_address(&self) -> Option<Address> {
+        self.native.as_ref().map(|n| n.address)
+    }
+
+    fn native_route(&self) -> AppResult<&Arc<NativeRoute>> {
+        self.native.as_ref().ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "withdrawNative is not available on chain {}: no native_adapter_address configured",
+                self.chain_id
+            ))
+        })
+    }
+
+    fn submitter_for(&self, kind: SpendKind) -> AppResult<Arc<Submitter>> {
+        Ok(match kind {
+            SpendKind::WithdrawNative => self.native_route()?.submitter.clone(),
+            _ => self.submitter.clone(),
+        })
     }
 }
 
 fn encode_spend_calldata(
     payload: &SubmitSpendPayload,
-    inputs: &PairInputs,
+    _inputs: &SpendInputs,
     slot: &ReservedSlot,
     advanced: &AdvancedState,
     tu_proof: &TreeUpdateBatchProof,
 ) -> AppResult<Vec<u8>> {
-    let p = build_proof(&payload.proof2x2)?;
+    let p = build_proof(&payload.proof)?;
     let pi = build_pub_inputs(&payload.pub_inputs)?;
     let tp = build_tu_proof(tu_proof)?;
-    let tpi = build_tu_pi_for_pair(slot, advanced, build_padded_pair_arrays(inputs));
+    let tpi = build_tu_pi_for_spend(slot, advanced, build_padded_spend_arrays(_inputs));
     let aux = build_aux(&payload.aux)?;
     let out = match payload.kind {
         SpendKind::Transfer => IMasp::transferCall {
@@ -125,7 +161,9 @@ fn encode_spend_calldata(
             aux,
         }
         .abi_encode(),
-        SpendKind::WithdrawNative => IMasp::withdrawNativeCall {
+        // Same argument tuple, different callee: the adapter forwards it to
+        // `MASP.withdraw` and unwraps what comes back.
+        SpendKind::WithdrawNative => INativeAdapter::withdrawNativeCall {
             p,
             pi,
             tp,
@@ -137,7 +175,11 @@ fn encode_spend_calldata(
     Ok(out)
 }
 
-fn validate_spend_shape(payload: &SubmitSpendPayload, binding: TransactBinding) -> AppResult<()> {
+fn validate_spend_shape(
+    payload: &SubmitSpendPayload,
+    binding: TransactBinding,
+    native_adapter: Option<Address>,
+) -> AppResult<()> {
     binding.check(&payload.pub_inputs)?;
     if payload.pub_inputs.public_in != 0 {
         return Err(AppError::BadRequest(
@@ -152,11 +194,29 @@ fn validate_spend_shape(payload: &SubmitSpendPayload, binding: TransactBinding) 
                 ));
             }
         }
-        SpendKind::Withdraw | SpendKind::WithdrawNative => {
+        SpendKind::Withdraw => {
             if payload.pub_inputs.public_out == 0 {
                 return Err(AppError::BadRequest(
-                    "withdraw/withdrawNative require publicOut > 0".into(),
+                    "withdraw requires publicOut > 0".into(),
                 ));
+            }
+        }
+        SpendKind::WithdrawNative => {
+            if payload.pub_inputs.public_out == 0 {
+                return Err(AppError::BadRequest(
+                    "withdrawNative requires publicOut > 0".into(),
+                ));
+            }
+            // The adapter reverts `AdapterNotRecipient` otherwise; the ERC20
+            // proceeds must land on it so it can unwrap them.
+            let adapter = native_adapter.ok_or_else(|| {
+                AppError::BadRequest("withdrawNative is not available on this chain".into())
+            })?;
+            let recipient = parse_address(&payload.pub_inputs.recipient)?;
+            if recipient != adapter {
+                return Err(AppError::BadRequest(format!(
+                    "withdrawNative requires pi.recipient ({recipient}) to equal the native adapter ({adapter})"
+                )));
             }
         }
     }
@@ -166,13 +226,19 @@ fn validate_spend_shape(payload: &SubmitSpendPayload, binding: TransactBinding) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::dto::{OutputAuxDto, PointDto, ProofDto, PubInputsDto};
-    use alloy::primitives::Address;
+    use crate::domain::dto::{
+        OutputAuxDto, PointDto, ProofDto, PubInputsDto, TRANSACT_IN, TRANSACT_OUT,
+    };
+    use std::array;
 
     const CHAIN_ID: i64 = 31337;
 
     fn relayer() -> Address {
         Address::from([0x99u8; 20])
+    }
+
+    fn adapter() -> Address {
+        Address::from([0x88u8; 20])
     }
 
     fn payload(kind: SpendKind, public_out: u64) -> SubmitSpendPayload {
@@ -185,10 +251,18 @@ mod tests {
             eph_pub: p.clone(),
             ciphertext: "0x".into(),
         };
+        let recipient = match kind {
+            SpendKind::WithdrawNative => adapter().to_string(),
+            _ => "0x000000000000000000000000000000000000beef".into(),
+        };
+        let bound_relayer = match kind {
+            SpendKind::WithdrawNative => adapter().to_string(),
+            _ => relayer().to_string(),
+        };
         SubmitSpendPayload {
             chain_id: CHAIN_ID,
             kind,
-            proof2x2: ProofDto {
+            proof: ProofDto {
                 pi_a: ["0".into(), "0".into(), "1".into()],
                 pi_b: [
                     ["0".into(), "0".into()],
@@ -199,20 +273,20 @@ mod tests {
             },
             pub_inputs: PubInputsDto {
                 merkle_root: format!("0x{:0>64}", "0"),
-                nullifier: [format!("0x{:0>64}", "1"), format!("0x{:0>64}", "2")],
-                out_cm: [format!("0x{:0>64}", "3"), format!("0x{:0>64}", "4")],
+                nullifier: array::from_fn(|i| format!("0x{:0>64}", i + 1)),
+                out_cm: array::from_fn(|i| format!("0x{:0>64}", i + 10)),
                 public_asset_id: 1,
                 public_in: 0,
                 public_out,
-                in_cv: [p.clone(), p.clone()],
-                out_cv: [p.clone(), p.clone()],
-                out_cv_dep: [p.clone(), p],
-                recipient: "0x000000000000000000000000000000000000beef".into(),
+                in_cv: array::from_fn(|_| p.clone()),
+                out_cv: array::from_fn(|_| p.clone()),
+                out_cv_dep: array::from_fn(|_| p.clone()),
+                recipient,
                 chain_id: CHAIN_ID as u64,
                 payer: "0x0000000000000000000000000000000000000000".into(),
-                relayer: relayer().to_string(),
+                relayer: bound_relayer,
             },
-            aux: [aux.clone(), aux],
+            aux: array::from_fn(|_| aux.clone()),
         }
     }
 
@@ -223,13 +297,26 @@ mod tests {
     ) -> AppResult<()> {
         let mut p = payload(kind, public_out);
         mutate(&mut p);
+        let bound = match kind {
+            SpendKind::WithdrawNative => adapter(),
+            _ => relayer(),
+        };
         validate_spend_shape(
             &p,
             TransactBinding {
                 chain_id: CHAIN_ID,
-                relayer: relayer(),
+                relayer: bound,
             },
+            Some(adapter()),
         )
+    }
+
+    #[test]
+    fn the_payload_shape_matches_the_deployed_circuit() {
+        let p = payload(SpendKind::Transfer, 0);
+        assert_eq!(p.pub_inputs.nullifier.len(), TRANSACT_IN);
+        assert_eq!(p.pub_inputs.out_cm.len(), TRANSACT_OUT);
+        assert_eq!(p.aux.len(), TRANSACT_OUT);
     }
 
     #[test]
@@ -281,8 +368,44 @@ mod tests {
     #[test]
     fn rejects_duplicate_nullifiers() {
         let err = checked(SpendKind::Transfer, 0, |p| {
-            p.pub_inputs.nullifier[1] = p.pub_inputs.nullifier[0].clone()
+            p.pub_inputs.nullifier[2] = p.pub_inputs.nullifier[0].clone()
         })
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    /// The adapter drives `MASP.withdraw` itself, so the proof must name it
+    /// as relayer — this relayer's own signer would revert `AdapterNotRelayer`.
+    #[test]
+    fn native_withdraw_binds_to_the_adapter_not_the_signer() {
+        checked(SpendKind::WithdrawNative, 1_000, |_| {}).unwrap();
+        let err = checked(SpendKind::WithdrawNative, 1_000, |p| {
+            p.pub_inputs.relayer = relayer().to_string()
+        })
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn native_withdraw_requires_the_adapter_as_recipient() {
+        let err = checked(SpendKind::WithdrawNative, 1_000, |p| {
+            p.pub_inputs.recipient = "0x000000000000000000000000000000000000beef".into()
+        })
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn native_withdraw_is_rejected_when_no_adapter_is_configured() {
+        let p = payload(SpendKind::WithdrawNative, 1_000);
+        let err = validate_spend_shape(
+            &p,
+            TransactBinding {
+                chain_id: CHAIN_ID,
+                relayer: adapter(),
+            },
+            None,
+        )
         .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }

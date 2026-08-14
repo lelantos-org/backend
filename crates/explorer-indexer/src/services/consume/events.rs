@@ -2,7 +2,7 @@ use crate::error::ExplorerIndexerError;
 use crate::repositories::{
     asset_flows::{self, NewAssetFlow},
     assets::{self, UpsertAsset},
-    intent_events::{self, NewIntentEscrowed},
+    deposit_events::{self, NewDepositEscrowed},
     raw_events::RawEventRow,
     tree_advances::{self, NewTreeAdvance},
 };
@@ -58,7 +58,7 @@ pub async fn asset_moved(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn intent_escrowed(
+pub async fn deposit_escrowed(
     pool: &DbPool,
     chain_id: i64,
     row: &RawEventRow,
@@ -68,34 +68,28 @@ pub async fn intent_escrowed(
     public_asset_id: u64,
     public_in: u64,
     fee_bps_at_submit: u16,
-    cm0: B256,
-    cm1: B256,
-    cv_dep0_x: U256,
-    cv_dep0_y: U256,
-    cv_dep1_x: U256,
-    cv_dep1_y: U256,
-    rcv_total: U256,
+    cm: B256,
+    cv_dep_x: U256,
+    cv_dep_y: U256,
+    rcv: U256,
     aux: serde_json::Value,
 ) -> Result<(), ExplorerIndexerError> {
-    intent_events::insert(
+    deposit_events::insert(
         pool,
-        NewIntentEscrowed {
+        NewDepositEscrowed {
             chain_id,
             block_number: row.block_number,
             log_index: row.log_index,
-            intent_id: u256_to_bigdecimal(id),
+            deposit_id: u256_to_bigdecimal(id),
             payer: payer.as_slice().to_vec(),
             recipient: recipient.as_slice().to_vec(),
             public_asset_id: public_asset_id as i64,
             public_in: u256_to_bigdecimal(U256::from(public_in)),
             fee_bps_at_submit: i32::from(fee_bps_at_submit),
-            cm0: cm0.0.to_vec(),
-            cm1: cm1.0.to_vec(),
-            cv_dep0_x: u256_to_bigdecimal(cv_dep0_x),
-            cv_dep0_y: u256_to_bigdecimal(cv_dep0_y),
-            cv_dep1_x: u256_to_bigdecimal(cv_dep1_x),
-            cv_dep1_y: u256_to_bigdecimal(cv_dep1_y),
-            rcv_total: u256_to_bigdecimal(rcv_total),
+            cm: cm.0.to_vec(),
+            cv_dep_x: u256_to_bigdecimal(cv_dep_x),
+            cv_dep_y: u256_to_bigdecimal(cv_dep_y),
+            rcv: u256_to_bigdecimal(rcv),
             aux,
             submitted_at_block: row.block_number,
             tx_hash: row.tx_hash.clone(),
@@ -106,56 +100,42 @@ pub async fn intent_escrowed(
     Ok(())
 }
 
-pub async fn intent_flushed(
+pub async fn deposit_flushed(
     pool: &DbPool,
     chain_id: i64,
     row: &RawEventRow,
     id: U256,
 ) -> Result<(), ExplorerIndexerError> {
-    intent_events::mark_flushed(pool, chain_id, u256_to_bigdecimal(id), row.block_number).await?;
+    deposit_events::mark_flushed(pool, chain_id, u256_to_bigdecimal(id), row.block_number).await?;
     Ok(())
 }
 
-pub async fn intent_canceled(
+pub async fn deposit_canceled(
     pool: &DbPool,
     chain_id: i64,
     row: &RawEventRow,
     id: U256,
 ) -> Result<(), ExplorerIndexerError> {
-    intent_events::mark_canceled(pool, chain_id, u256_to_bigdecimal(id), row.block_number).await?;
+    deposit_events::mark_canceled(pool, chain_id, u256_to_bigdecimal(id), row.block_number).await?;
     Ok(())
 }
 
-/// Encode the per-output aux blob as JSON for the `aux` column.
-#[allow(clippy::too_many_arguments)]
+/// Encode the deposit leaf's aux blob as JSON for the `aux` column. A deposit
+/// occupies one leaf, so this is a single object, not an array.
 pub fn encode_aux(
-    clue_rx0: U256,
-    clue_ry0: U256,
-    eph_pub_x0: U256,
-    eph_pub_y0: U256,
-    ciphertext0: &[u8],
-    clue_rx1: U256,
-    clue_ry1: U256,
-    eph_pub_x1: U256,
-    eph_pub_y1: U256,
-    ciphertext1: &[u8],
+    clue_rx: U256,
+    clue_ry: U256,
+    eph_pub_x: U256,
+    eph_pub_y: U256,
+    ciphertext: &[u8],
 ) -> serde_json::Value {
-    json!([
-        {
-            "clueRx": clue_rx0.to_string(),
-            "clueRy": clue_ry0.to_string(),
-            "ephPubX": eph_pub_x0.to_string(),
-            "ephPubY": eph_pub_y0.to_string(),
-            "ciphertext": format!("0x{}", hex::encode(ciphertext0)),
-        },
-        {
-            "clueRx": clue_rx1.to_string(),
-            "clueRy": clue_ry1.to_string(),
-            "ephPubX": eph_pub_x1.to_string(),
-            "ephPubY": eph_pub_y1.to_string(),
-            "ciphertext": format!("0x{}", hex::encode(ciphertext1)),
-        }
-    ])
+    json!({
+        "clueRx": clue_rx.to_string(),
+        "clueRy": clue_ry.to_string(),
+        "ephPubX": eph_pub_x.to_string(),
+        "ephPubY": eph_pub_y.to_string(),
+        "ciphertext": format!("0x{}", hex::encode(ciphertext)),
+    })
 }
 
 pub async fn root_advanced(

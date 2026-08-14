@@ -1,14 +1,14 @@
-//! Shared building blocks for single-pair transact pipelines (spend + swap).
+//! Shared building blocks for single-transact pipelines (spend + swap).
 //!
-//! Both pipelines insert exactly two leaves, run the same `tree_update_batch`
-//! SNARK with `actual_count = 1`, and differ only in: (a) which contract
-//! they target, (b) how they encode the calldata, and (c) which payload-shape
-//! checks they apply. This module owns everything they share.
+//! Both pipelines insert `TRANSACT_OUT` leaves, run the same
+//! `tree_update_batch` SNARK over them, and differ only in: (a) which
+//! contract they target, (b) how they encode the calldata, and (c) which
+//! payload-shape checks they apply. This module owns everything they share.
 
 use crate::adapters::abi::IMasp;
-use crate::adapters::calldata::{MAX_N_BATCH, build_tu_batch_pub_inputs};
+use crate::adapters::calldata::{MAX_L_BATCH, build_tu_batch_pub_inputs};
 use crate::adapters::parse::{parse_address, parse_b32, parse_u256};
-use crate::domain::dto::PubInputsDto;
+use crate::domain::dto::{PubInputsDto, TRANSACT_OUT};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
@@ -17,18 +17,19 @@ use crate::services::witness;
 use alloy::primitives::{Address, FixedBytes, U256};
 use std::sync::Arc;
 
-/// Single-pair transact ops always insert exactly two leaves.
-pub const PAIR_LEAVES: usize = 2;
+/// A spend inserts one leaf per transact output.
+pub const SPEND_LEAVES: usize = TRANSACT_OUT;
 
-/// What a payload's `transact_2x2` proof must be bound to for this relayer to
-/// be able to land it. Named fields rather than positional arguments: both are
-/// checked against wallet-supplied values, and `chain_id`/`relayer` are easy to
-/// transpose silently.
+/// What a payload's transact proof must be bound to for this relayer to be
+/// able to land it. Named fields rather than positional arguments: both are
+/// checked against wallet-supplied values, and `chain_id`/`relayer` are easy
+/// to transpose silently.
 #[derive(Debug, Clone, Copy)]
 pub struct TransactBinding {
     pub chain_id: i64,
-    /// This relayer's signer. The proof pins an address, and only submissions
-    /// from that address satisfy it.
+    /// Address the proof must name as `relayer`. Usually this relayer's
+    /// signer; for a native unshield it is the `NativeAdapter`, which drives
+    /// `MASP.withdraw` itself and so is the pool's caller.
     pub relayer: Address,
 }
 
@@ -46,123 +47,126 @@ impl TransactBinding {
         let bound = parse_address(&pi.relayer)?;
         if bound != self.relayer {
             return Err(AppError::BadRequest(format!(
-                "pubInputs.relayer ({bound}) must equal this relayer's signer ({})",
+                "pubInputs.relayer ({bound}) must equal the expected relayer ({})",
                 self.relayer
             )));
         }
-        if pi.nullifier[0] == pi.nullifier[1] {
-            return Err(AppError::BadRequest(
-                "the two nullifiers must differ".into(),
-            ));
+        // Pairwise over the whole input shape: the circuit constrains every
+        // pair, so any repeat is a double-spend the pool would reject.
+        for i in 0..pi.nullifier.len() {
+            for j in (i + 1)..pi.nullifier.len() {
+                if pi.nullifier[i] == pi.nullifier[j] {
+                    return Err(AppError::BadRequest(format!(
+                        "nullifiers {i} and {j} are equal; all must differ"
+                    )));
+                }
+            }
         }
         Ok(())
     }
 }
 
-/// Parsed leg-1 commitment + value-commitment pair, ready to feed the tree
-/// mirror, the Fiat-Shamir transcript, and the SNARK witness builder.
+/// Parsed leg-1 output commitments + value commitments, ready to feed the
+/// tree mirror, the Fiat-Shamir transcript, and the SNARK witness builder.
 #[derive(Clone, Copy)]
-pub struct PairInputs {
-    pub cm0: FixedBytes<32>,
-    pub cm1: FixedBytes<32>,
-    pub cv_dep0: [U256; 2],
-    pub cv_dep1: [U256; 2],
+pub struct SpendInputs {
+    pub cms: [FixedBytes<32>; SPEND_LEAVES],
+    pub cv_deps: [[U256; 2]; SPEND_LEAVES],
+}
+
+impl SpendInputs {
+    /// `(cm, cv_dep)` leaves in insertion order, as `TreeMirror` wants them.
+    pub fn leaves(&self) -> Vec<(fmd_crypto::tree::Field, [U256; 2])> {
+        self.cms
+            .iter()
+            .zip(self.cv_deps.iter())
+            .map(|(cm, cv)| (cm.0, *cv))
+            .collect()
+    }
 }
 
 /// Padded arrays expected by `build_tu_batch_pub_inputs` and `compute_z`.
-/// Pair slot 0 carries the active leg-1 pair; everything else is zero.
+/// Leaf slots `0..SPEND_LEAVES` carry the spend; everything else is zero.
 pub type PaddedBatchArrays = (
-    [FixedBytes<32>; 2 * MAX_N_BATCH],
-    [[U256; 2]; 2 * MAX_N_BATCH],
-    [u64; MAX_N_BATCH],
-    [u64; MAX_N_BATCH],
-    [u8; MAX_N_BATCH],
+    [FixedBytes<32>; MAX_L_BATCH],
+    [[U256; 2]; MAX_L_BATCH],
+    [u64; MAX_L_BATCH],
+    [u64; MAX_L_BATCH],
+    [u8; MAX_L_BATCH],
 );
 
-pub fn parse_pair_inputs(pi: &PubInputsDto) -> AppResult<PairInputs> {
-    Ok(PairInputs {
-        cm0: parse_b32(&pi.out_cm[0])?,
-        cm1: parse_b32(&pi.out_cm[1])?,
-        cv_dep0: [
-            parse_u256(&pi.out_cv_dep[0].x)?,
-            parse_u256(&pi.out_cv_dep[0].y)?,
-        ],
-        cv_dep1: [
-            parse_u256(&pi.out_cv_dep[1].x)?,
-            parse_u256(&pi.out_cv_dep[1].y)?,
-        ],
-    })
+pub fn parse_spend_inputs(pi: &PubInputsDto) -> AppResult<SpendInputs> {
+    let mut cms = [FixedBytes::<32>::ZERO; SPEND_LEAVES];
+    let mut cv_deps = [[U256::ZERO; 2]; SPEND_LEAVES];
+    for i in 0..SPEND_LEAVES {
+        cms[i] = parse_b32(&pi.out_cm[i])?;
+        cv_deps[i] = [
+            parse_u256(&pi.out_cv_dep[i].x)?,
+            parse_u256(&pi.out_cv_dep[i].y)?,
+        ];
+    }
+    Ok(SpendInputs { cms, cv_deps })
 }
 
-/// Build the padded arrays a single-pair pipeline feeds to the SNARK +
-/// calldata. `is_deposit[0]` is left at 0: leg-1 SNARK already proves
-/// conservation; the per-pair aggregate is intentionally skipped.
-pub fn build_padded_pair_arrays(inputs: &PairInputs) -> PaddedBatchArrays {
-    let mut cms_padded = [FixedBytes::<32>::ZERO; 2 * MAX_N_BATCH];
-    cms_padded[0] = inputs.cm0;
-    cms_padded[1] = inputs.cm1;
-    let mut cv_deps_padded = [[U256::ZERO, U256::ZERO]; 2 * MAX_N_BATCH];
-    cv_deps_padded[0] = inputs.cv_dep0;
-    cv_deps_padded[1] = inputs.cv_dep1;
+/// Build the padded arrays a spend feeds to the SNARK + calldata.
+/// `is_deposit` stays all-zero: the transact SNARK already proves
+/// conservation, so the per-leaf deposit binding is intentionally skipped.
+pub fn build_padded_spend_arrays(inputs: &SpendInputs) -> PaddedBatchArrays {
+    let mut cms_padded = [FixedBytes::<32>::ZERO; MAX_L_BATCH];
+    let mut cv_deps_padded = [[U256::ZERO, U256::ZERO]; MAX_L_BATCH];
+    cms_padded[..SPEND_LEAVES].copy_from_slice(&inputs.cms);
+    cv_deps_padded[..SPEND_LEAVES].copy_from_slice(&inputs.cv_deps);
     (
         cms_padded,
         cv_deps_padded,
-        [0u64; MAX_N_BATCH],
-        [0u64; MAX_N_BATCH],
-        [0u8; MAX_N_BATCH],
+        [0u64; MAX_L_BATCH],
+        [0u64; MAX_L_BATCH],
+        [0u8; MAX_L_BATCH],
     )
 }
 
-/// Run the tree-update SNARK for a single pair: derive `z`, build the
-/// witness, hand off to the prover. Caller already holds the mirror lock.
-pub async fn prove_pair(
+/// Run the tree-update SNARK for one spend: derive `z`, build the witness,
+/// hand off to the prover. Caller already holds the mirror lock.
+pub async fn prove_spend(
     prover: &Arc<dyn TreeUpdateBatchProver>,
     slot: &ReservedSlot,
     advanced: &AdvancedState,
-    inputs: &PairInputs,
+    inputs: &SpendInputs,
 ) -> AppResult<TreeUpdateBatchProof> {
-    let (cms_padded, cv_deps_padded, pa, pi_in, is_dep) = build_padded_pair_arrays(inputs);
+    let (cms_padded, cv_deps_padded, la, lpi, is_dep) = build_padded_spend_arrays(inputs);
     let z = fiat_shamir::compute_z(
         &slot.old_root,
         &advanced.new_root,
         slot.start_index,
-        1,
+        SPEND_LEAVES as u64,
         &cms_padded,
         &cv_deps_padded,
-        &pa,
-        &pi_in,
+        &la,
+        &lpi,
         &is_dep,
     );
-    let w = witness::build_n1(
-        slot,
-        advanced,
-        &inputs.cm0,
-        &inputs.cm1,
-        &inputs.cv_dep0,
-        &inputs.cv_dep1,
-        z,
-    );
+    let w = witness::build_spend(slot, advanced, &inputs.cms, &inputs.cv_deps, z);
     prover.prove(w).await
 }
 
 /// Encode the `TreeUpdateBatch` public-inputs struct that both spend and
-/// swap calldata builders embed identically (actualCount = 1, single
-/// active pair, rest zero-padded).
-pub fn build_tu_pi_for_pair(
+/// swap calldata builders embed identically (`actualCount = SPEND_LEAVES`,
+/// rest zero-padded).
+pub fn build_tu_pi_for_spend(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
     arrays: PaddedBatchArrays,
 ) -> IMasp::TreeUpdateBatch {
-    let (cms_padded, cv_deps_padded, pa, pi_in, is_dep) = arrays;
+    let (cms_padded, cv_deps_padded, la, lpi, is_dep) = arrays;
     build_tu_batch_pub_inputs(
         slot.start_index,
         &slot.old_root,
         &advanced.new_root,
         cms_padded,
         cv_deps_padded,
-        pa,
-        pi_in,
+        la,
+        lpi,
         is_dep,
-        1,
+        SPEND_LEAVES as u64,
     )
 }

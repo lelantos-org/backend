@@ -1,4 +1,4 @@
-// SSE stream of intent lifecycle events. Webapp subscribes per chain id;
+// SSE stream of deposit lifecycle events. Webapp subscribes per chain id;
 // `FlushPipeline` publishes via `EventBroadcaster` after each successful
 // flushBatch. Heartbeats keep the connection alive across reverse proxies.
 
@@ -17,7 +17,7 @@ pub struct StreamQuery {
     pub chain_id: i64,
 }
 
-pub async fn intents_stream(
+pub async fn deposits_stream(
     State(st): State<AppState>,
     Query(q): Query<StreamQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {

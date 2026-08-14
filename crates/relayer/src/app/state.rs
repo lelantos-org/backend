@@ -1,16 +1,16 @@
-use crate::adapters::calldata::MAX_N_BATCH;
+use crate::adapters::calldata::MAX_L_BATCH;
 use crate::adapters::rpc::RpcEndpoint;
 use crate::app::config::RelayerConfig;
 use crate::domain::error::AppError;
 use crate::domain::error::AppResult;
+use crate::services::deposit_mempool::DepositMempool;
 use crate::services::events::EventBroadcaster;
 use crate::services::fee_quote::{FeeQuoter, FeeToken};
 use crate::services::gas_estimator::GasEstimator;
 use crate::services::gas_witness::GasWitness;
-use crate::services::intent_mempool::IntentMempool;
 use crate::services::nullifier_guard::NullifierGuards;
 use crate::services::oracle::{CoinbaseOracle, PriceOracle};
-use crate::services::pipeline::{FlushPipeline, SpendPipeline, SwapPipeline};
+use crate::services::pipeline::{FlushPipeline, NativeRoute, SpendPipeline, SwapPipeline};
 use crate::services::prover::TreeUpdateBatchProver;
 use crate::services::submitter::Submitter;
 use crate::services::tree::TreeMirror;
@@ -29,7 +29,7 @@ pub struct AppState {
     /// Built only for chains where `swap_wrapper_address` is configured.
     /// HTTP `/v1/swap` looks up by `payload.chain_id`.
     pub swap_pipelines: Arc<HashMap<i64, Arc<SwapPipeline>>>,
-    /// Process-wide intent lifecycle pub/sub. SSE handler subscribes;
+    /// Process-wide deposit lifecycle pub/sub. SSE handler subscribes;
     /// `FlushPipeline` publishes after each successful `flushBatch`.
     pub events: Arc<EventBroadcaster>,
     /// DB pool. Used by `nullifier_guard` for `spent_nullifiers` lookups
@@ -100,6 +100,42 @@ pub async fn build_state(
             markup_bps: c.fee_markup_bps,
         });
 
+        // Optional native route. The adapter is the pool's caller for a
+        // native unshield, so it needs its own submitter target; the tree
+        // mirror and prover stay shared with every other entry point.
+        let native = match &c.native_adapter_address {
+            Some(hex) => {
+                let address = Address::from_str(hex).map_err(|e| {
+                    AppError::Internal(format!(
+                        "native_adapter_address chain {}: {}",
+                        c.chain_id, e
+                    ))
+                })?;
+                let native_submitter = Arc::new(
+                    Submitter::new(
+                        c.chain_id,
+                        rpc.clone(),
+                        &c.signer_key_hex,
+                        hex,
+                        c.receipt_timeout_s,
+                        c.receipt_poll_interval_ms,
+                    )
+                    .map_err(|e| {
+                        AppError::Internal(format!(
+                            "native submitter init chain {}: {}",
+                            c.chain_id, e
+                        ))
+                    })?,
+                );
+                info!(chain_id = c.chain_id, adapter = %address, "native adapter route ready");
+                Some(Arc::new(NativeRoute {
+                    address,
+                    submitter: native_submitter,
+                }))
+            }
+            None => None,
+        };
+
         let spend = SpendPipeline {
             chain_id: c.chain_id,
             mirror: mirror.clone(),
@@ -107,6 +143,7 @@ pub async fn build_state(
             prover: prover.clone(),
             fee_quoter: fee_quoter.clone(),
             gas_witness: gas_witness.clone(),
+            native,
         };
         spend_pipelines.insert(c.chain_id, Arc::new(spend));
 
@@ -147,8 +184,8 @@ pub async fn build_state(
             );
         }
 
-        let max_n = c.flush_max_n.clamp(1, MAX_N_BATCH);
-        let mempool = Arc::new(IntentMempool::new(pool.clone(), c.chain_id));
+        let max_n = c.flush_max_n.clamp(1, MAX_L_BATCH);
+        let mempool = Arc::new(DepositMempool::new(pool.clone(), c.chain_id));
         let flush = Arc::new(FlushPipeline {
             chain_id: c.chain_id,
             mirror,

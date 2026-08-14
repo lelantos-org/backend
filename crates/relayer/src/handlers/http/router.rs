@@ -12,7 +12,7 @@ pub fn build(state: AppState) -> Router {
         .route("/v1/spend/estimate", post(handlers::estimate_spend))
         .route("/v1/swap", post(handlers::submit_swap))
         .route("/v1/swap/estimate", post(handlers::estimate_swap))
-        .route("/v1/intents/stream", get(handlers::intents_stream))
+        .route("/v1/deposits/stream", get(handlers::deposits_stream))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -9,9 +9,9 @@ pub enum EventKind {
     RootAdvanced = 3,
     AssetMoved = 4,
     NullifierConsumed = 5,
-    IntentEscrowed = 6,
-    IntentFlushed = 7,
-    IntentCanceled = 8,
+    DepositEscrowed = 6,
+    DepositFlushed = 7,
+    DepositCanceled = 8,
 }
 
 impl EventKind {
@@ -22,9 +22,9 @@ impl EventKind {
             3 => Some(Self::RootAdvanced),
             4 => Some(Self::AssetMoved),
             5 => Some(Self::NullifierConsumed),
-            6 => Some(Self::IntentEscrowed),
-            7 => Some(Self::IntentFlushed),
-            8 => Some(Self::IntentCanceled),
+            6 => Some(Self::DepositEscrowed),
+            7 => Some(Self::DepositFlushed),
+            8 => Some(Self::DepositCanceled),
             _ => None,
         }
     }

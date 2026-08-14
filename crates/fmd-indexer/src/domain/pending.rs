@@ -16,10 +16,10 @@ use tracing::warn;
 /// tx once both halves are observed in the same batch — partial txs at the
 /// batch boundary are deferred to the next tick.
 ///
-/// New escrow flow: `flushBatch` emits `IntentFlushed × n` (lower
-/// log_indices) then `RootAdvanced`. Each IntentFlushed contributes 2
-/// notes whose cm/aux is sourced from a previously-emitted IntentEscrowed
-/// event (looked up via `escrowed_aux`).
+/// Escrow flow: `flushBatch` emits `DepositFlushed × n` (lower log_indices)
+/// then `RootAdvanced`. A deposit occupies exactly one leaf, so each
+/// `DepositFlushed` contributes one note whose cm/aux is sourced from a
+/// previously-emitted `DepositEscrowed` event (looked up via `escrowed`).
 pub struct PendingTx {
     pub start_index: u64,
     pub inserted: u64,
@@ -39,7 +39,7 @@ pub struct CommitPlan {
     pub last_block_number: i64,
 }
 
-/// Per-output FMD payload + cm, decoded from an `IntentEscrowed` event.
+/// Deposit-leaf FMD payload + cm, decoded from a `DepositEscrowed` event.
 /// Pre-resolved by `consume.rs` and passed in so `plan_commit` stays sync.
 #[derive(Clone)]
 pub struct EscrowedSlot {
@@ -53,16 +53,16 @@ pub struct EscrowedSlot {
     pub cv_dep_y: U256,
 }
 
-/// Map from intent_id (decimal string) → (slot0, slot1).
-pub type EscrowedMap = HashMap<String, [EscrowedSlot; 2]>;
+/// Map from deposit_id (decimal string) → that deposit's single leaf.
+pub type EscrowedMap = HashMap<String, EscrowedSlot>;
 
 /// Group raw events by tx_hash, decode, and produce a commit plan up to
 /// the first incomplete tx. Returns `None` when nothing is fully complete.
 ///
-/// `escrowed` holds pre-resolved IntentEscrowed payloads keyed by intent
-/// id. Any IntentFlushed referencing an intent missing from this map is
+/// `escrowed` holds pre-resolved DepositEscrowed payloads keyed by deposit
+/// id. Any DepositFlushed referencing a deposit missing from this map is
 /// treated as "data not yet ingested" → defer the entire tx (consumer
-/// will retry on next tick once the IntentEscrowed event is available).
+/// will retry on next tick once the DepositEscrowed event is available).
 pub fn plan_commit(
     rows: &[RawEventRow],
     chain_id: i64,
@@ -129,7 +129,7 @@ pub fn plan_commit(
                 } => {
                     // Block coordinates only: a tx hash in the log is a
                     // direct pointer from an operator's log stream into the
-                    // note -> intent -> payer/recipient join.
+                    // note -> deposit -> payer/recipient join.
                     if !p.root_seen {
                         warn!(
                             block_number = r.block_number,
@@ -179,35 +179,33 @@ pub fn plan_commit(
                     });
                     p.last_id = r.id;
                 }
-                DecodedEvent::IntentFlushed { id, .. } => {
+                DecodedEvent::DepositFlushed { id, .. } => {
                     let key = id.to_string();
-                    let Some(slots) = escrowed.get(&key) else {
-                        // IntentEscrowed not yet ingested → defer the whole tx.
+                    let Some(slot) = escrowed.get(&key) else {
+                        // DepositEscrowed not yet ingested → defer the whole tx.
                         tx_unresolved.insert(r.tx_hash.clone(), true);
                         continue;
                     };
-                    for slot in slots {
-                        if slot.ciphertext.len() < 2 {
-                            warn!("escrowed ciphertext too short for clueBits prefix");
-                            continue;
-                        }
-                        // leaf_index is provisional (0); RootAdvanced overwrites it.
-                        p.notes.push(NewNote {
-                            chain_id,
-                            block_number: r.block_number,
-                            tx_hash: r.tx_hash.clone(),
-                            log_index: r.log_index,
-                            cm: slot.cm.clone(),
-                            clue_rx: u256_to_bigdecimal(slot.clue_rx),
-                            clue_ry: u256_to_bigdecimal(slot.clue_ry),
-                            eph_pub_x: u256_to_bigdecimal(slot.eph_pub_x),
-                            eph_pub_y: u256_to_bigdecimal(slot.eph_pub_y),
-                            ciphertext: slot.ciphertext.clone(),
-                            leaf_index: 0,
-                            cv_dep_x: u256_to_bigdecimal(slot.cv_dep_x),
-                            cv_dep_y: u256_to_bigdecimal(slot.cv_dep_y),
-                        });
+                    if slot.ciphertext.len() < 2 {
+                        warn!("escrowed ciphertext too short for clueBits prefix");
+                        continue;
                     }
+                    // leaf_index is provisional (0); RootAdvanced overwrites it.
+                    p.notes.push(NewNote {
+                        chain_id,
+                        block_number: r.block_number,
+                        tx_hash: r.tx_hash.clone(),
+                        log_index: r.log_index,
+                        cm: slot.cm.clone(),
+                        clue_rx: u256_to_bigdecimal(slot.clue_rx),
+                        clue_ry: u256_to_bigdecimal(slot.clue_ry),
+                        eph_pub_x: u256_to_bigdecimal(slot.eph_pub_x),
+                        eph_pub_y: u256_to_bigdecimal(slot.eph_pub_y),
+                        ciphertext: slot.ciphertext.clone(),
+                        leaf_index: 0,
+                        cv_dep_x: u256_to_bigdecimal(slot.cv_dep_x),
+                        cv_dep_y: u256_to_bigdecimal(slot.cv_dep_y),
+                    });
                     p.last_id = r.id;
                 }
                 _ => {}

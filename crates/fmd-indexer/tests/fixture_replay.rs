@@ -184,13 +184,11 @@ fn root_advanced_log(
     build_log(ev.encode_log_data(), block_n, tx_byte, log_idx)
 }
 
-/// Emit one packed `NotesCreated(cm0, cm1, …)` log. The on-chain MASP emits
-/// exactly one such log per transact; the decoder fans it out into two
-/// `DecodedEvent::NoteCreated` entries downstream.
+/// Emit one `NotePayload` log. The on-chain MASP emits one per output leaf,
+/// each decoding to a single `DecodedEvent::NoteCreated`.
 #[allow(clippy::too_many_arguments)]
-fn notes_created_log(
-    cm0_byte: u8,
-    cm1_byte: u8,
+fn note_payload_log(
+    cm_byte: u8,
     clue_rx: U256,
     clue_ry: U256,
     clue_bits_u16: u16,
@@ -202,25 +200,16 @@ fn notes_created_log(
     let mut ciphertext = Vec::with_capacity(2 + body.len());
     ciphertext.extend_from_slice(&clue_bits_u16.to_be_bytes());
     ciphertext.extend_from_slice(&body);
-    let ct = Bytes::from(ciphertext);
 
     let ev = NotePayload {
-        cm0: B256::repeat_byte(cm0_byte),
-        cm1: B256::repeat_byte(cm1_byte),
-        clueRx0: clue_rx,
-        clueRy0: clue_ry,
-        ephPubX0: U256::from(0u64),
-        ephPubY0: U256::from(0u64),
-        ciphertext0: ct.clone(),
-        clueRx1: clue_rx,
-        clueRy1: clue_ry,
-        ephPubX1: U256::from(0u64),
-        ephPubY1: U256::from(0u64),
-        ciphertext1: ct,
-        cvDep0X: U256::from(0u64),
-        cvDep0Y: U256::from(0u64),
-        cvDep1X: U256::from(0u64),
-        cvDep1Y: U256::from(0u64),
+        cm: B256::repeat_byte(cm_byte),
+        clueRx: clue_rx,
+        clueRy: clue_ry,
+        ephPubX: U256::from(0u64),
+        ephPubY: U256::from(0u64),
+        ciphertext: Bytes::from(ciphertext),
+        cvDepX: U256::from(0u64),
+        cvDepY: U256::from(0u64),
     };
     build_log(ev.encode_log_data(), block_n, tx_byte, log_idx)
 }
@@ -298,9 +287,9 @@ fn gamma3_r() -> (U256, U256) {
     (fq_to_u256(p.x), fq_to_u256(p.y))
 }
 
-/// Insert a complete tx (RootAdvanced + one packed `NotesCreated`) for one
-/// chain. `cms` MUST be length 2 — matches the production `Transact(_,_,2,_)`
-/// shape; the on-chain pool always emits both outputs in a single log.
+/// Insert a complete tx (RootAdvanced + one `NotePayload` per output leaf)
+/// for one chain. The pool emits `RootAdvanced` first, then one note log per
+/// inserted leaf, so `inserted` must equal `cms.len()`.
 #[allow(clippy::too_many_arguments)]
 async fn insert_tx(
     pool: &database::DbPool,
@@ -316,27 +305,28 @@ async fn insert_tx(
     insert_log(
         pool,
         chain_id,
-        &root_advanced_log(start_index, 2, block_n, tx_byte, 0),
+        &root_advanced_log(start_index, cms.len() as u64, block_n, tx_byte, 0),
         EventKind::RootAdvanced,
     )
     .await;
-    insert_log(
-        pool,
-        chain_id,
-        &notes_created_log(
-            cms[0],
-            cms[1],
-            clue_rx,
-            clue_ry,
-            clue_bits,
-            vec![0u8; 8],
-            block_n,
-            tx_byte,
-            1,
-        ),
-        EventKind::NoteCreated,
-    )
-    .await;
+    for (i, cm_byte) in cms.iter().enumerate() {
+        insert_log(
+            pool,
+            chain_id,
+            &note_payload_log(
+                *cm_byte,
+                clue_rx,
+                clue_ry,
+                clue_bits,
+                vec![0u8; 8],
+                block_n,
+                tx_byte,
+                1 + i as u64,
+            ),
+            EventKind::NoteCreated,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

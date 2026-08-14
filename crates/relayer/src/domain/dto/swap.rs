@@ -1,8 +1,8 @@
-use crate::domain::dto::transact::{OutputAuxDto, ProofDto, PubInputsDto};
+use crate::domain::dto::transact::{OutputAuxDto, ProofDto, PubInputsDto, TRANSACT_OUT};
 use serde::Deserialize;
 
 /// Wallet-to-relayer wire format for `/v1/swap`. Mirrors
-/// `sdk/src/relayer.ts :: SubmitSwapPayload` (added in a follow-up SDK PR).
+/// `sdk/src/protocol/transact.ts :: SubmitSwapPayload`.
 ///
 /// The proof + pi + aux fields are identical to a `withdraw` spend whose
 /// `recipient` happens to be the SwapWrapper. The relayer reuses every
@@ -11,11 +11,11 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub struct SubmitSwapPayload {
     pub chain_id: i64,
-    /// Leg-1 transact_2x2 SNARK + PIs. `recipient` MUST equal the chain's
+    /// Leg-1 transact SNARK + PIs. `recipient` MUST equal the chain's
     /// configured `swap_wrapper_address`.
-    pub proof2x2: ProofDto,
+    pub proof: ProofDto,
     pub pub_inputs: PubInputsDto,
-    pub aux: [OutputAuxDto; 2],
+    pub aux: [OutputAuxDto; TRANSACT_OUT],
     pub swap: SwapBlob,
 }
 
@@ -31,10 +31,11 @@ pub struct SwapBlob {
     /// `abi.encode(uint24 fee, uint160 sqrtPriceLimitX96)` (64B); multi-hop
     /// uses `abi.encodePacked` path bytes. 0x-hex.
     pub route: String,
-    /// Slim deposit intent for the B note. `payer` MUST equal the
+    /// Slim deposit request for the B note. `payer` MUST equal the
     /// `swap_wrapper_address`.
-    pub intent_d: DepositIntentDto,
-    pub aux_d: [OutputAuxDto; 2],
+    pub deposit_d: DepositRequestDto,
+    /// One leaf per deposit, hence one aux payload.
+    pub aux_d: OutputAuxDto,
     pub token_in: String,
     pub token_out: String,
     /// Decimal U256 string. Must equal `pi_w.publicOut * scale`; the
@@ -48,21 +49,22 @@ pub struct SwapBlob {
     pub deadline: Option<String>,
 }
 
+/// `PubInputs.DepositRequest` mirror. One leaf: the request used to carry a
+/// second, zero-value pad leaf so a deposit matched a spend's two-leaf
+/// shape; the contract collapsed it, which also removed `rcvTotal`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct DepositIntentDto {
+pub struct DepositRequestDto {
     pub chain_id: u64,
     pub public_asset_id: u64,
     pub public_in: u64,
     pub payer: String,
     pub recipient: String,
-    pub out_cm: [String; 2],
-    /// Depositor-anchored Pedersen value commitments (Baby-Jubjub coords).
+    pub out_cm: String,
+    /// Depositor-anchored Pedersen value commitment (Baby-Jubjub coords).
     /// Bound on-chain into the leaf hash via `Poseidon(TAG_LEAF, cm, x, y)`.
-    pub cv_dep0: [String; 2],
-    pub cv_dep1: [String; 2],
-    /// `rcv_dep_0 + rcv_dep_1` (mod BJJ scalar order). Private witness for
-    /// the relayer's per-pair deposit aggregate; published off-chain via
-    /// `IntentEscrowed`.
-    pub rcv_total: String,
+    pub cv_dep: [String; 2],
+    /// The leaf's `rcv_dep`. Private witness for the batch circuit's
+    /// per-leaf deposit binding; published off-chain via `DepositEscrowed`.
+    pub rcv: String,
 }

@@ -124,29 +124,38 @@ diesel::table! {
 }
 
 diesel::table! {
-    intent_escrowed_events (chain_id, block_number, log_index) {
+    deposit_escrowed_events (chain_id, block_number, log_index) {
         chain_id -> Int8,
         block_number -> Int8,
         log_index -> Int4,
-        intent_id -> Numeric,
+        deposit_id -> Numeric,
         payer -> Bytea,
         recipient -> Bytea,
         public_asset_id -> Int8,
         public_in -> Numeric,
         fee_bps_at_submit -> Int4,
-        cm0 -> Bytea,
-        cm1 -> Bytea,
-        cv_dep0_x -> Numeric,
-        cv_dep0_y -> Numeric,
-        cv_dep1_x -> Numeric,
-        cv_dep1_y -> Numeric,
-        rcv_total -> Numeric,
+        cm -> Bytea,
+        cv_dep_x -> Numeric,
+        cv_dep_y -> Numeric,
+        rcv -> Numeric,
         aux -> Jsonb,
         submitted_at_block -> Int8,
         flushed_at_block -> Nullable<Int8>,
         canceled_at_block -> Nullable<Int8>,
         tx_hash -> Bytea,
         block_ts -> Int8,
+    }
+}
+
+diesel::table! {
+    screened_addresses (id) {
+        id -> Int8,
+        chain -> Text,
+        address -> Text,
+        risk -> Text,
+        source -> Text,
+        reason -> Nullable<Text>,
+        added_at -> Timestamptz,
     }
 }
 
@@ -164,5 +173,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     tree_advances,
     asset_flows,
     spent_nullifiers,
-    intent_escrowed_events,
+    deposit_escrowed_events,
+    screened_addresses,
 );

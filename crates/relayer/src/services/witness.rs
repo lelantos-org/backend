@@ -1,101 +1,99 @@
 // snarkjs-shaped `tree_update_batch.circom` witness builder.
 
-use crate::adapters::calldata::MAX_N_BATCH;
+use crate::adapters::calldata::MAX_L_BATCH;
 use crate::services::prover::TreeUpdateBatchWitness;
 use crate::services::tree::{AdvancedState, ReservedSlot};
 use alloy::primitives::{FixedBytes, U256};
 use fmd_crypto::tree::Field;
 
-/// Per-pair deposit binding inputs (flush path). One per active pair.
+/// One escrowed deposit leaf. The circuit pins
+/// `cv_dep == public_in · V^asset + rcv · H` for every slot flagged
+/// `is_deposit`, so each leaf carries its own binding — there is no
+/// per-pair aggregate to sum into.
 #[derive(Debug, Clone)]
-pub struct PairDeposit {
-    pub cv_dep0: [U256; 2],
-    pub cv_dep1: [U256; 2],
-    pub pair_asset: u64,
-    pub pair_public_in: u64,
-    pub rcv_total: U256,
+pub struct LeafDeposit {
+    pub cv_dep: [U256; 2],
+    pub leaf_asset: u64,
+    pub leaf_public_in: u64,
+    pub rcv: U256,
 }
 
-/// Spend-side witness (N=1, is_deposit=0). cms[0..2] = output cms; rest
-/// zero. Spend's transact_2x2 SNARK already proves conservation, so the
-/// per-pair aggregate is skipped (is_deposit[0] = 0).
-pub fn build_n1(
+/// Spend-side witness: `TRANSACT_OUT` leaves, all `is_deposit = 0`. The
+/// transact SNARK already proves conservation, so the per-leaf deposit
+/// binding is skipped and `rcv` stays zero.
+pub fn build_spend(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
-    cm0: &FixedBytes<32>,
-    cm1: &FixedBytes<32>,
-    cv_dep0: &[U256; 2],
-    cv_dep1: &[U256; 2],
+    cms_real: &[FixedBytes<32>],
+    cv_deps_real: &[[U256; 2]],
     z: String,
 ) -> TreeUpdateBatchWitness {
-    let mut cms: Vec<String> = vec!["0".to_string(); 2 * MAX_N_BATCH];
-    cms[0] = bytes32_to_dec(&cm0.0);
-    cms[1] = bytes32_to_dec(&cm1.0);
-    let mut cv_dep: Vec<[String; 2]> = vec![["0".to_string(), "0".to_string()]; 2 * MAX_N_BATCH];
-    cv_dep[0] = [u256_to_dec(&cv_dep0[0]), u256_to_dec(&cv_dep0[1])];
-    cv_dep[1] = [u256_to_dec(&cv_dep1[0]), u256_to_dec(&cv_dep1[1])];
-    let pair_asset = vec!["0".to_string(); MAX_N_BATCH];
-    let pair_public_in = vec!["0".to_string(); MAX_N_BATCH];
-    let is_deposit = vec!["0".to_string(); MAX_N_BATCH];
-    let rcv_total = vec!["0".to_string(); MAX_N_BATCH];
+    debug_assert_eq!(cms_real.len(), cv_deps_real.len());
+
+    let mut cms: Vec<String> = vec!["0".to_string(); MAX_L_BATCH];
+    for (i, cm) in cms_real.iter().enumerate() {
+        cms[i] = bytes32_to_dec(&cm.0);
+    }
+    let mut cv_dep: Vec<[String; 2]> = vec![["0".to_string(), "0".to_string()]; MAX_L_BATCH];
+    for (i, cv) in cv_deps_real.iter().enumerate() {
+        cv_dep[i] = [u256_to_dec(&cv[0]), u256_to_dec(&cv[1])];
+    }
+
     build_inner(
         slot,
         advanced,
-        1,
+        cms_real.len() as u64,
         cms,
         cv_dep,
-        pair_asset,
-        pair_public_in,
-        is_deposit,
-        rcv_total,
+        vec!["0".to_string(); MAX_L_BATCH],
+        vec!["0".to_string(); MAX_L_BATCH],
+        vec!["0".to_string(); MAX_L_BATCH],
+        vec!["0".to_string(); MAX_L_BATCH],
         z,
     )
 }
 
-/// Flush-side witness. `real_cms` length must equal `2 * actual_count`;
-/// `pairs` length must equal `actual_count`. All padding slots emit zero
-/// (cm, cv_dep, pair_asset, pair_public_in, is_deposit, rcv_total).
+/// Flush-side witness. One leaf per escrowed deposit, so `deposits.len()`
+/// is the leaf count. All padding slots emit zero (cm, cv_dep, leaf_asset,
+/// leaf_public_in, is_deposit, rcv).
 pub fn build_batch(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
     real_cms: &[FixedBytes<32>],
-    pairs: &[PairDeposit],
-    actual_count: u64,
+    deposits: &[LeafDeposit],
     z: String,
 ) -> TreeUpdateBatchWitness {
-    debug_assert_eq!(real_cms.len(), (2 * actual_count) as usize);
-    debug_assert_eq!(pairs.len(), actual_count as usize);
+    debug_assert_eq!(real_cms.len(), deposits.len());
 
-    let mut cms: Vec<String> = vec!["0".to_string(); 2 * MAX_N_BATCH];
+    let mut cms: Vec<String> = vec!["0".to_string(); MAX_L_BATCH];
     for (i, cm) in real_cms.iter().enumerate() {
         cms[i] = bytes32_to_dec(&cm.0);
     }
 
-    let mut cv_dep: Vec<[String; 2]> = vec![["0".to_string(), "0".to_string()]; 2 * MAX_N_BATCH];
-    let mut pair_asset: Vec<String> = vec!["0".to_string(); MAX_N_BATCH];
-    let mut pair_public_in: Vec<String> = vec!["0".to_string(); MAX_N_BATCH];
-    let mut is_deposit: Vec<String> = vec!["0".to_string(); MAX_N_BATCH];
-    let mut rcv_total: Vec<String> = vec!["0".to_string(); MAX_N_BATCH];
+    let mut cv_dep: Vec<[String; 2]> = vec![["0".to_string(), "0".to_string()]; MAX_L_BATCH];
+    let mut leaf_asset: Vec<String> = vec!["0".to_string(); MAX_L_BATCH];
+    let mut leaf_public_in: Vec<String> = vec!["0".to_string(); MAX_L_BATCH];
+    let mut is_deposit: Vec<String> = vec!["0".to_string(); MAX_L_BATCH];
+    let mut rcv: Vec<String> = vec!["0".to_string(); MAX_L_BATCH];
 
-    for (i, p) in pairs.iter().enumerate() {
-        cv_dep[2 * i] = [u256_to_dec(&p.cv_dep0[0]), u256_to_dec(&p.cv_dep0[1])];
-        cv_dep[2 * i + 1] = [u256_to_dec(&p.cv_dep1[0]), u256_to_dec(&p.cv_dep1[1])];
-        pair_asset[i] = p.pair_asset.to_string();
-        pair_public_in[i] = p.pair_public_in.to_string();
+    for (i, d) in deposits.iter().enumerate() {
+        cv_dep[i] = [u256_to_dec(&d.cv_dep[0]), u256_to_dec(&d.cv_dep[1])];
+        leaf_asset[i] = d.leaf_asset.to_string();
+        leaf_public_in[i] = d.leaf_public_in.to_string();
         is_deposit[i] = "1".to_string();
-        rcv_total[i] = u256_to_dec(&p.rcv_total);
+        rcv[i] = u256_to_dec(&d.rcv);
     }
 
     build_inner(
         slot,
         advanced,
-        actual_count,
+        deposits.len() as u64,
         cms,
         cv_dep,
-        pair_asset,
-        pair_public_in,
+        leaf_asset,
+        leaf_public_in,
         is_deposit,
-        rcv_total,
+        rcv,
         z,
     )
 }
@@ -107,10 +105,10 @@ fn build_inner(
     actual_count: u64,
     cms: Vec<String>,
     cv_dep: Vec<[String; 2]>,
-    pair_asset: Vec<String>,
-    pair_public_in: Vec<String>,
+    leaf_asset: Vec<String>,
+    leaf_public_in: Vec<String>,
     is_deposit: Vec<String>,
-    rcv_total: Vec<String>,
+    rcv: Vec<String>,
     z: String,
 ) -> TreeUpdateBatchWitness {
     TreeUpdateBatchWitness {
@@ -121,10 +119,10 @@ fn build_inner(
         actual_count: actual_count.to_string(),
         cms,
         cv_dep,
-        pair_asset,
-        pair_public_in,
+        leaf_asset,
+        leaf_public_in,
         is_deposit,
-        rcv_total,
+        rcv,
         frontier_in: slot
             .old_frontier
             .iter()

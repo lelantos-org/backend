@@ -20,7 +20,9 @@ pub struct ChainCfg {
     /// MASP pool address (target of `transact` calls).
     pub pool_address: String,
     /// Relayer signer key (32-byte hex). MUST match the on-chain bound
-    /// `relayer` address that wallets pin in their transact_2x2 proofs.
+    /// `relayer` address that wallets pin in their transact proofs. A
+    /// `withdrawNative` payload pins `native_adapter_address` instead — the
+    /// adapter is the pool's caller there.
     pub signer_key_hex: String,
     /// Receipt poll budget in seconds. Submission revert ⇒ in-memory tree
     /// rolls back two leaves and the HTTP caller gets 502.
@@ -32,14 +34,20 @@ pub struct ChainCfg {
     #[serde(default = "default_receipt_poll_interval_ms")]
     pub receipt_poll_interval_ms: u64,
     /// Cron interval (seconds) for the shield flush worker. The worker
-    /// polls `intent_escrowed_events` for unflushed intents, batches up
+    /// polls `deposit_escrowed_events` for unflushed deposits, batches up
     /// to `flush_max_n`, and submits one `flushBatch` tx.
     #[serde(default = "default_flush_interval_s")]
     pub flush_interval_s: u64,
-    /// Upper bound on per-flush batch size. Capped at the contract's
-    /// `MAX_N_BATCH = 8`.
+    /// Upper bound on per-flush batch size, counted in deposits. A deposit
+    /// is one leaf, so this is capped at the contract's `MAX_L_BATCH = 8`.
     #[serde(default = "default_flush_max_n")]
     pub flush_max_n: usize,
+    /// Optional. When set, enables `withdrawNative` for this chain: the
+    /// submitter targets this address, and the SNARK must name it as both
+    /// `recipient` and `relayer`. Mirrors `NativeAdapter.sol` deployed
+    /// alongside MASP, which is ERC-20 only.
+    #[serde(default)]
+    pub native_adapter_address: Option<String>,
     /// Optional. When set, enables `/v1/swap` for this chain. Submitter
     /// targets this address for swap calldata; spend ops still target
     /// `pool_address`. Mirrors `SwapWrapper.sol` deployed alongside MASP.
@@ -177,6 +185,11 @@ impl RelayerConfig {
                 shared::config_env::lookup("RELAYER", c.chain_id, "SWAP_WRAPPER_ADDRESS")
             {
                 c.swap_wrapper_address = Some(v);
+            }
+            if let Some(v) =
+                shared::config_env::lookup("RELAYER", c.chain_id, "NATIVE_ADAPTER_ADDRESS")
+            {
+                c.native_adapter_address = Some(v);
             }
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "NATIVE_SYMBOL") {
                 c.native_symbol = v;

@@ -3,53 +3,70 @@ use alloy::sol;
 
 sol! {
     #![sol(rpc)]
-    /// MASP + SwapWrapper ABIs. Field layout MUST match `contracts/src/MASP.sol`
-    /// + `contracts/src/lib/PubInputs.sol` + `contracts/src/swap/*.sol`.
-    /// Two interfaces in one `sol!` invocation so SwapWrapper.SwapArgs
-    /// can reference `IMasp.{Proof, Transact, TreeUpdateBatch, OutputAux,
-    /// DepositIntent}` directly without duplicating types.
+    /// MASP + SwapWrapper + NativeAdapter ABIs. Field layout MUST match
+    /// `contracts/src/MASP.sol` + `contracts/src/libs/PubInputs.sol` +
+    /// `contracts/src/swap/*.sol` + `contracts/src/native/NativeAdapter.sol`.
+    /// One `sol!` invocation so the wrapper and the adapter can reference
+    /// `IMasp.{Proof, Transact, TreeUpdateBatch, OutputAux, DepositRequest}`
+    /// directly without duplicating types.
     interface IMasp {
         struct Proof {
             uint256[2] a;
             uint256[2][2] b;
             uint256[2] c;
         }
+        /// `PubInputs.Transact` at the deployed 3-in/3-out shape. Changing
+        /// the arity requires a new circuit, ceremony and verifier.
         struct Transact {
             bytes32 merkleRoot;
-            bytes32[2] nullifier;
-            bytes32[2] outCm;
+            bytes32[3] nullifier;
+            bytes32[3] outCm;
             uint64 publicAssetId;
             uint64 publicIn;
             uint64 publicOut;
-            uint256[2][2] inCv;
-            uint256[2][2] outCv;
+            uint256[2][3] inCv;
+            uint256[2][3] outCv;
             address recipient;
             uint256 chainId;
             address payer;
             address relayer;
-            uint256[2][2] outCvDep;
+            uint256[2][3] outCvDep;
         }
+        /// `PubInputs.TreeUpdateBatch`. Every array is indexed by LEAF, not
+        /// by pair: `actualCount` is a leaf count in `[1, MAX_L_BATCH]`, so a
+        /// batch may commit an odd number of leaves. Slots beyond
+        /// `actualCount` must be zero, both in-circuit and on-chain.
         struct TreeUpdateBatch {
             bytes32 oldRoot;
             bytes32 newRoot;
             uint64 startIndex;
             uint64 actualCount;
-            bytes32[16] cms;
-            uint256[2][16] cvDeps;
-            uint64[8] pairAsset;
-            uint64[8] pairPublicIn;
+            bytes32[8] cms;
+            uint256[2][8] cvDeps;
+            uint64[8] leafAsset;
+            uint64[8] leafPublicIn;
             uint8[8] isDeposit;
         }
-        struct DepositIntent {
-            uint64 chainId;
+        /// `PubInputs.DepositRequest`. A deposit occupies exactly one leaf,
+        /// whose `cvDep` the batch circuit pins to `publicIn` units of
+        /// `publicAssetId` under blinder `rcv`.
+        struct DepositRequest {
+            uint256 chainId;
             uint64 publicAssetId;
             uint64 publicIn;
             address payer;
             address recipient;
-            bytes32[2] outCm;
-            uint256[2] cvDep0;
-            uint256[2] cvDep1;
-            uint256 rcvTotal;
+            bytes32 outCm;
+            uint256[2] cvDep;
+            uint256 rcv;
+        }
+        /// Digest fields the contract does not store, replayed at flush time
+        /// and verified against `escrowed[id]`. Sourced from the deposit's
+        /// `DepositEscrowed` event (`submittedAt` = its block number).
+        struct DepositMeta {
+            address payer;
+            uint32 submittedAt;
+            uint16 fbps;
         }
         struct OutputAux {
             uint256 clueRx;
@@ -66,36 +83,37 @@ sol! {
         }
 
         function currentRoot() external view returns (bytes32);
-        function escrowed(uint256 id)
-            external
-            view
-            returns (
-                bytes32 digest,
-                address payer,
-                uint32 submittedAt,
-                uint64 publicAssetId,
-                uint16 feeBpsAtSubmit
-            );
+        /// Escrow storage collapsed to a single digest; every other field
+        /// lives off-chain in `DepositMeta`.
+        function escrowed(uint256 id) external view returns (bytes32 digest);
 
-        function submitIntent(
-            DepositIntent calldata d,
+        function deposit(
+            DepositRequest calldata d,
             Permit2Sig calldata sig,
-            OutputAux[2] calldata aux
+            OutputAux calldata aux
+        ) external returns (uint256 id);
+
+        function depositAuthorized(
+            DepositRequest calldata d,
+            OutputAux calldata aux
         ) external returns (uint256 id);
 
         function flushBatch(
             uint256[] calldata ids,
+            DepositMeta[] calldata meta,
             Proof calldata tp,
             TreeUpdateBatch calldata tpi
         ) external;
 
-        function cancelIntent(
+        function cancelDeposit(
             uint256 id,
             uint48 publicIn,
-            bytes32 cm0,
-            bytes32 cm1,
-            uint256[2] calldata cvDep0,
-            uint256[2] calldata cvDep1
+            bytes32 cm,
+            uint256[2] calldata cvDep,
+            uint64 publicAssetId,
+            uint16 fbps,
+            address payer,
+            uint32 submittedAt
         ) external;
 
         function transfer(
@@ -103,7 +121,7 @@ sol! {
             Transact calldata pi,
             Proof calldata tp,
             TreeUpdateBatch calldata tpi,
-            OutputAux[2] calldata aux
+            OutputAux[3] calldata aux
         ) external;
 
         function withdraw(
@@ -111,44 +129,28 @@ sol! {
             Transact calldata pi,
             Proof calldata tp,
             TreeUpdateBatch calldata tpi,
-            OutputAux[2] calldata aux
+            OutputAux[3] calldata aux
         ) external;
 
-        function withdrawNative(
-            Proof calldata p,
-            Transact calldata pi,
-            Proof calldata tp,
-            TreeUpdateBatch calldata tpi,
-            OutputAux[2] calldata aux
-        ) external;
-
-        event IntentEscrowed(
+        event DepositEscrowed(
             uint256 indexed id,
             address indexed payer,
             address indexed recipient,
             uint64 publicAssetId,
             uint64 publicIn,
             uint16 feeBpsAtSubmit,
-            bytes32 cm0,
-            bytes32 cm1,
-            uint256 cvDep0X,
-            uint256 cvDep0Y,
-            uint256 cvDep1X,
-            uint256 cvDep1Y,
-            uint256 rcvTotal,
-            uint256 clueRx0,
-            uint256 clueRy0,
-            uint256 ephPubX0,
-            uint256 ephPubY0,
-            bytes ciphertext0,
-            uint256 clueRx1,
-            uint256 clueRy1,
-            uint256 ephPubX1,
-            uint256 ephPubY1,
-            bytes ciphertext1
+            bytes32 cm,
+            uint256 cvDepX,
+            uint256 cvDepY,
+            uint256 rcv,
+            uint256 clueRx,
+            uint256 clueRy,
+            uint256 ephPubX,
+            uint256 ephPubY,
+            bytes ciphertext
         );
-        event IntentFlushed(uint256 indexed id, bytes32 cm0, bytes32 cm1);
-        event IntentCanceled(uint256 indexed id, address indexed payer, uint256 refunded);
+        event DepositFlushed(uint256 indexed id, bytes32 cm);
+        event DepositCanceled(uint256 indexed id, address indexed payer, uint256 refunded);
     }
 
     /// SwapWrapper ABI. Field layout MUST match
@@ -168,11 +170,27 @@ sol! {
             IMasp.Transact pi_w;
             IMasp.Proof tp_w;
             IMasp.TreeUpdateBatch tpi_w;
-            IMasp.OutputAux[2] aux_w;
-            IMasp.DepositIntent intent_d;
-            IMasp.OutputAux[2] aux_d;
+            IMasp.OutputAux[3] aux_w;
+            IMasp.DepositRequest deposit_d;
+            /// One leaf per deposit, hence one aux payload; leg 1's withdraw
+            /// carries one per transact output.
+            IMasp.OutputAux aux_d;
         }
 
-        function swap(SwapArgs calldata a) external returns (uint256 actualOut, uint256 intentId);
+        function swap(SwapArgs calldata a) external returns (uint256 actualOut, uint256 depositId);
+    }
+
+    /// Native-coin bridge. MASP is ERC-20 only; unwrapping lives here.
+    /// `pi.recipient` AND `pi.relayer` must both be the adapter address —
+    /// the adapter drives `MASP.withdraw` itself and forwards the unwrapped
+    /// proceeds to `pi.payer`.
+    interface INativeAdapter {
+        function withdrawNative(
+            IMasp.Proof calldata p,
+            IMasp.Transact calldata pi,
+            IMasp.Proof calldata tp,
+            IMasp.TreeUpdateBatch calldata tpi,
+            IMasp.OutputAux[3] calldata aux
+        ) external returns (uint256 net);
     }
 }

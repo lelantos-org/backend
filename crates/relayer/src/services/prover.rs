@@ -30,19 +30,20 @@ pub struct TreeUpdateBatchWitness {
     pub new_root: String,
     pub start_index: String,
     pub actual_count: String,
-    /// `2 * MAX_N_BATCH` entries; padding (i ≥ 2*actual_count) MUST be "0".
+    /// `MAX_L_BATCH` entries, leaf-indexed; padding (i ≥ actual_count)
+    /// MUST be "0".
     pub cms: Vec<String>,
-    /// `2 * MAX_N_BATCH` Baby-Jubjub points (depositor-anchored value
+    /// `MAX_L_BATCH` Baby-Jubjub points (depositor-anchored value
     /// commitments). Padding entries MUST be "0".
     pub cv_dep: Vec<[String; 2]>,
-    /// `MAX_N_BATCH` per-pair publicAssetId. Padding "0".
-    pub pair_asset: Vec<String>,
-    /// `MAX_N_BATCH` per-pair publicIn. Padding "0".
-    pub pair_public_in: Vec<String>,
-    /// `MAX_N_BATCH` 0/1 flags. 1 = deposit pair (aggregate enforced).
+    /// `MAX_L_BATCH` per-leaf publicAssetId. Padding "0".
+    pub leaf_asset: Vec<String>,
+    /// `MAX_L_BATCH` per-leaf publicIn. Padding "0".
+    pub leaf_public_in: Vec<String>,
+    /// `MAX_L_BATCH` 0/1 flags. 1 = deposit leaf (binding enforced).
     pub is_deposit: Vec<String>,
-    /// `MAX_N_BATCH` private rcv_dep sums. Padding "0".
-    pub rcv_total: Vec<String>,
+    /// `MAX_L_BATCH` private per-leaf rcv_dep. Padding "0".
+    pub rcv: Vec<String>,
     pub frontier_in: Vec<[String; 3]>,
 }
 
@@ -195,17 +196,17 @@ fn circom_inputs(w: &TreeUpdateBatchWitness) -> AppResult<HashMap<String, Vec<Bi
     )?;
     signal("cms", &mut w.cms.iter().map(String::as_str))?;
     signal("cv_dep", &mut w.cv_dep.iter().flatten().map(String::as_str))?;
-    signal("pair_asset", &mut w.pair_asset.iter().map(String::as_str))?;
+    signal("leaf_asset", &mut w.leaf_asset.iter().map(String::as_str))?;
     signal(
-        "pair_public_in",
-        &mut w.pair_public_in.iter().map(String::as_str),
+        "leaf_public_in",
+        &mut w.leaf_public_in.iter().map(String::as_str),
     )?;
     signal("is_deposit", &mut w.is_deposit.iter().map(String::as_str))?;
     signal(
         "frontier_in",
         &mut w.frontier_in.iter().flatten().map(String::as_str),
     )?;
-    signal("rcv_total", &mut w.rcv_total.iter().map(String::as_str))?;
+    signal("rcv", &mut w.rcv.iter().map(String::as_str))?;
     Ok(inputs)
 }
 
@@ -246,12 +247,14 @@ fn fr_to_dec(x: &Fr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::calldata::MAX_N_BATCH;
+    use crate::adapters::calldata::MAX_L_BATCH;
+    use crate::domain::dto::TRANSACT_OUT;
     use crate::services::tree::{AdvancedState, ReservedSlot};
     use crate::services::witness;
     use alloy::primitives::{FixedBytes, U256};
 
-    /// An N=1 spend witness, the shape both single-pair pipelines produce.
+    /// A spend witness: `TRANSACT_OUT` leaves, no deposit binding — the
+    /// shape both single-spend pipelines produce.
     fn spend_witness() -> TreeUpdateBatchWitness {
         let slot = ReservedSlot {
             start_index: 4,
@@ -261,15 +264,13 @@ mod tests {
         let advanced = AdvancedState {
             new_root: [5u8; 32],
         };
-        witness::build_n1(
-            &slot,
-            &advanced,
-            &FixedBytes::<32>::from([6u8; 32]),
-            &FixedBytes::<32>::from([7u8; 32]),
-            &[U256::from(8u8), U256::from(9u8)],
-            &[U256::from(10u8), U256::from(11u8)],
-            "12".to_string(),
-        )
+        let cms: Vec<FixedBytes<32>> = (0..TRANSACT_OUT)
+            .map(|i| FixedBytes::<32>::from([6u8 + i as u8; 32]))
+            .collect();
+        let cv_deps: Vec<[U256; 2]> = (0..TRANSACT_OUT)
+            .map(|i| [U256::from(8u8 + i as u8), U256::from(9u8 + i as u8)])
+            .collect();
+        witness::build_spend(&slot, &advanced, &cms, &cv_deps, "12".to_string())
     }
 
     /// The circuit declares fixed-width arrays; a short or long signal is
@@ -287,12 +288,12 @@ mod tests {
         for scalar in ["z", "old_root", "new_root", "start_index", "actual_count"] {
             assert_eq!(width(scalar), 1, "{scalar}");
         }
-        assert_eq!(width("cms"), 2 * MAX_N_BATCH);
-        assert_eq!(width("cv_dep"), 2 * 2 * MAX_N_BATCH, "flattened BJJ points");
-        assert_eq!(width("pair_asset"), MAX_N_BATCH);
-        assert_eq!(width("pair_public_in"), MAX_N_BATCH);
-        assert_eq!(width("is_deposit"), MAX_N_BATCH);
-        assert_eq!(width("rcv_total"), MAX_N_BATCH);
+        assert_eq!(width("cms"), MAX_L_BATCH);
+        assert_eq!(width("cv_dep"), 2 * MAX_L_BATCH, "flattened BJJ points");
+        assert_eq!(width("leaf_asset"), MAX_L_BATCH);
+        assert_eq!(width("leaf_public_in"), MAX_L_BATCH);
+        assert_eq!(width("is_deposit"), MAX_L_BATCH);
+        assert_eq!(width("rcv"), MAX_L_BATCH);
         assert_eq!(width("frontier_in"), 3 * 10, "depth rows of 3 siblings");
     }
 
@@ -309,11 +310,11 @@ mod tests {
                 "cv_dep",
                 "frontier_in",
                 "is_deposit",
+                "leaf_asset",
+                "leaf_public_in",
                 "new_root",
                 "old_root",
-                "pair_asset",
-                "pair_public_in",
-                "rcv_total",
+                "rcv",
                 "start_index",
                 "z",
             ]
@@ -326,12 +327,12 @@ mod tests {
     fn padding_slots_are_zero() {
         let inputs = circom_inputs(&spend_witness()).unwrap();
         let zero = BigInt::from(0);
-        for (name, from) in [("cms", 2), ("cv_dep", 4)] {
+        for (name, from) in [("cms", TRANSACT_OUT), ("cv_dep", 2 * TRANSACT_OUT)] {
             for (i, v) in inputs[name].iter().enumerate().skip(from) {
                 assert_eq!(*v, zero, "{name}[{i}] should be padding");
             }
         }
-        for name in ["pair_asset", "pair_public_in", "is_deposit", "rcv_total"] {
+        for name in ["leaf_asset", "leaf_public_in", "is_deposit", "rcv"] {
             assert!(inputs[name].iter().all(|v| *v == zero), "{name}");
         }
     }

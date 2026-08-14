@@ -197,19 +197,6 @@ impl TreeMirror {
             .map_err(|e| AppError::Internal(e.to_string()))
     }
 
-    /// Snapshot the pre-insert state, then advance the tree by inserting the
-    /// pair of leaves `Poseidon(TAG_LEAF, cm_j, cv_dep_j_x, cv_dep_j_y)`.
-    /// Caller rolls back via `rollback(2)` on chain revert.
-    pub fn reserve_and_advance(
-        &mut self,
-        cm0: Field,
-        cm1: Field,
-        cv_dep0: &[U256; 2],
-        cv_dep1: &[U256; 2],
-    ) -> AppResult<(ReservedSlot, AdvancedState)> {
-        self.reserve_and_advance_batch(&[(cm0, *cv_dep0), (cm1, *cv_dep1)])
-    }
-
     /// Insert N `(cm, cv_dep)` pairs. The mirror hashes each pair into a
     /// leaf before insertion to stay in sync with the on-chain tree, which
     /// advances via SNARK-verified leaf roots.
@@ -339,28 +326,37 @@ mod tests {
         [U256::from(n), U256::from(n) + U256::from(1u8)]
     }
 
+    /// Two-leaf advance. Real spends insert `TRANSACT_OUT` leaves and a
+    /// flush one per deposit; two keeps the arithmetic in these tests easy
+    /// to read without changing what is under test.
+    fn advance2(
+        m: &mut TreeMirror,
+        cm0: Field,
+        cm1: Field,
+        cv0: [U256; 2],
+        cv1: [U256; 2],
+    ) -> AppResult<(ReservedSlot, AdvancedState)> {
+        m.reserve_and_advance_batch(&[(cm0, cv0), (cm1, cv1)])
+    }
+
     /// A mirror with `pairs` pairs already committed.
     fn mirror(pairs: u8) -> TreeMirror {
         let mut m = TreeMirror::new(CHAIN_ID).unwrap();
         for i in 0..pairs {
-            m.reserve_and_advance(cm(2 * i), cm(2 * i + 1), &cv(i), &cv(i + 1))
-                .unwrap();
+            advance2(&mut m, cm(2 * i), cm(2 * i + 1), cv(i), cv(i + 1)).unwrap();
         }
         m
     }
 
     fn reserve_one(m: &mut TreeMirror) -> AppResult<()> {
-        m.reserve_and_advance(cm(200), cm(201), &cv(9), &cv(10))
-            .map(|_| ())
+        advance2(m, cm(200), cm(201), cv(9), cv(10)).map(|_| ())
     }
 
     #[test]
     fn reserve_advances_by_two_leaves() {
         let mut m = mirror(1);
         assert_eq!(m.committed_count(), 2);
-        let (slot, advanced) = m
-            .reserve_and_advance(cm(10), cm(11), &cv(3), &cv(4))
-            .unwrap();
+        let (slot, advanced) = advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
         assert_eq!(slot.start_index, 2);
         assert_eq!(m.committed_count(), 4);
         assert_ne!(slot.old_root, advanced.new_root);
@@ -372,8 +368,7 @@ mod tests {
     fn unwind_rolls_back_a_clean_failure() {
         let mut m = mirror(1);
         let before = m.current_root().unwrap();
-        m.reserve_and_advance(cm(10), cm(11), &cv(3), &cv(4))
-            .unwrap();
+        advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
 
         let err = m.unwind(2, AppError::Reverted("tx reverted".into()));
 
@@ -389,8 +384,7 @@ mod tests {
     #[test]
     fn unwind_parks_on_an_unknown_outcome() {
         let mut m = mirror(1);
-        m.reserve_and_advance(cm(10), cm(11), &cv(3), &cv(4))
-            .unwrap();
+        advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
 
         let err = m.unwind(2, AppError::SubmitUnknown("no receipt".into()));
 

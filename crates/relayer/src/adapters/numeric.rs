@@ -10,7 +10,7 @@ use bigdecimal::BigDecimal;
 use bigdecimal::num_bigint::{Sign, ToBigInt};
 
 /// Non-negative integer `NUMERIC` → `U256`. Covers the BN254 coordinates,
-/// BJJ scalars, and intent amounts this crate reads.
+/// BJJ scalars, and deposit amounts this crate reads.
 ///
 /// Goes through `BigInt` rather than `to_string`, and tests `is_integer`
 /// rather than `as_bigint_and_exponent().1 == 0`. Both matter because an

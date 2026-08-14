@@ -1,21 +1,31 @@
 use serde::Deserialize;
 
+/// Input/output arity of the deployed transact circuit (`transact_3x3`).
+/// Mirrors `PubInputs.TRANSACT_IN` / `TRANSACT_OUT` and
+/// `sdk/src/core/shape.ts :: TRANSACT_3X3`.
+pub const TRANSACT_IN: usize = 3;
+pub const TRANSACT_OUT: usize = 3;
+
 /// Wallet-to-relayer wire format for the spend path. Mirrors
-/// `sdk/src/relayer.ts :: SubmitSpendPayload`. All field-element strings
-/// are decimal (snarkjs convention); addresses are 0x-hex.
+/// `sdk/src/protocol/transact.ts :: SubmitTransactPayload`. All
+/// field-element strings are decimal (snarkjs convention); addresses are
+/// 0x-hex.
 ///
-/// Shield path is server-initiated (relayer cron picks up `IntentEscrowed`
-/// events from the DB) — wallets do NOT POST shield intents through this
-/// HTTP surface.
+/// Shield path is server-initiated (relayer cron picks up `DepositEscrowed`
+/// events from the DB) — wallets do NOT POST deposits through this HTTP
+/// surface.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitSpendPayload {
     pub chain_id: i64,
     pub kind: SpendKind,
-    pub proof2x2: ProofDto,
-    /// 22 logical PIs in `MASP._compressPubInputs` order. transact_2x2 SNARK.
+    /// Groth16 proof for the deployed transact shape (`transact_3x3`).
+    pub proof: ProofDto,
+    /// 27 base logical PIs in `PubInputs.compress(Transact)` order. The
+    /// relayer derives the 9 clue slots and the aux digest from `aux`, so
+    /// they are absent here — 42 coefficients total at 3x3.
     pub pub_inputs: PubInputsDto,
-    pub aux: [OutputAuxDto; 2],
+    pub aux: [OutputAuxDto; TRANSACT_OUT],
 }
 
 /// Which spend entry-point to invoke.
@@ -25,6 +35,9 @@ pub enum SpendKind {
     Transfer,
     #[serde(rename = "withdraw")]
     Withdraw,
+    /// Routed to `NativeAdapter.withdrawNative`, not to MASP — the pool is
+    /// ERC-20 only. The SNARK must name the adapter as both `recipient`
+    /// and `relayer`.
     #[serde(rename = "withdrawNative")]
     WithdrawNative,
 }
@@ -41,19 +54,19 @@ pub struct ProofDto {
 #[serde(rename_all = "camelCase")]
 pub struct PubInputsDto {
     pub merkle_root: String,
-    pub nullifier: [String; 2],
-    pub out_cm: [String; 2],
+    pub nullifier: [String; TRANSACT_IN],
+    pub out_cm: [String; TRANSACT_OUT],
     pub public_asset_id: u64,
     pub public_in: u64,
     pub public_out: u64,
-    pub in_cv: [PointDto; 2],
-    pub out_cv: [PointDto; 2],
-    /// Per-output Pedersen value commitments anchored to the depositor's
-    /// blinding sums (`value_j · V^assetId + rcv_dep_j · H`). The spend
-    /// SNARK rebuilds the tree leaves over these same coords, and the
-    /// MASP `transfer/withdraw` entry-points cross-bind them to
-    /// `tpi.cvDeps[0..1]`. Wallet-supplied.
-    pub out_cv_dep: [PointDto; 2],
+    pub in_cv: [PointDto; TRANSACT_IN],
+    pub out_cv: [PointDto; TRANSACT_OUT],
+    /// Per-output Pedersen value commitments anchored to the spender's
+    /// blinders (`value_j · V^assetId + rcv_dep_j · H`). The spend SNARK
+    /// rebuilds the tree leaves over these same coords, and the MASP
+    /// `transfer/withdraw` entry-points cross-bind them to
+    /// `tpi.cvDeps[0..TRANSACT_OUT-1]`. Wallet-supplied.
+    pub out_cv_dep: [PointDto; TRANSACT_OUT],
     pub recipient: String,
     pub chain_id: u64,
     pub payer: String,

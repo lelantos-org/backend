@@ -1,5 +1,5 @@
 use crate::abi::{
-    AssetMoved, AssetRegistered, IntentCanceled, IntentEscrowed, IntentFlushed, NotePayload,
+    AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed, NotePayload,
     NullifierConsumed, RootAdvanced,
 };
 use alloy::primitives::{Address, B256, LogData, U256};
@@ -48,50 +48,38 @@ pub enum DecodedEvent {
     NullifierConsumed {
         nf: B256,
     },
-    IntentEscrowed {
+    DepositEscrowed {
         id: U256,
         payer: Address,
         recipient: Address,
         public_asset_id: u64,
         public_in: u64,
         fee_bps_at_submit: u16,
-        cm0: B256,
-        cm1: B256,
-        cv_dep0_x: U256,
-        cv_dep0_y: U256,
-        cv_dep1_x: U256,
-        cv_dep1_y: U256,
-        rcv_total: U256,
-        clue_rx0: U256,
-        clue_ry0: U256,
-        eph_pub_x0: U256,
-        eph_pub_y0: U256,
-        ciphertext0: Vec<u8>,
-        clue_rx1: U256,
-        clue_ry1: U256,
-        eph_pub_x1: U256,
-        eph_pub_y1: U256,
-        ciphertext1: Vec<u8>,
+        cm: B256,
+        cv_dep_x: U256,
+        cv_dep_y: U256,
+        rcv: U256,
+        clue_rx: U256,
+        clue_ry: U256,
+        eph_pub_x: U256,
+        eph_pub_y: U256,
+        ciphertext: Vec<u8>,
     },
-    IntentFlushed {
+    DepositFlushed {
         id: U256,
-        cm0: B256,
-        cm1: B256,
+        cm: B256,
     },
-    IntentCanceled {
+    DepositCanceled {
         id: U256,
         payer: Address,
         refunded: U256,
     },
 }
 
-/// Decode one source log into one or more `DecodedEvent`s.
+/// Decode one source log into a `DecodedEvent`.
 ///
-/// All event kinds yield exactly one entry except `EventKind::NoteCreated`,
-/// which fans the packed `NotePayload` log into two
-/// `DecodedEvent::NoteCreated` entries — one per output commitment. The slim
-/// `NotesCreated(cm0, cm1)` event is informational only and is not indexed
-/// by the backend.
+/// Every kind yields exactly one entry: `NotePayload` is emitted once per
+/// output leaf, so there is no fan-out to perform.
 pub fn decode(
     event_kind: EventKind,
     topics: &[Vec<u8>],
@@ -106,28 +94,16 @@ pub fn decode(
         EventKind::NoteCreated => {
             let ev = NotePayload::decode_log_data(&log, true)
                 .map_err(|e| DecodeError::Alloy(e.to_string()))?;
-            Ok(vec![
-                DecodedEvent::NoteCreated {
-                    cm: ev.cm0,
-                    clue_rx: ev.clueRx0,
-                    clue_ry: ev.clueRy0,
-                    eph_pub_x: ev.ephPubX0,
-                    eph_pub_y: ev.ephPubY0,
-                    ciphertext: ev.ciphertext0.to_vec(),
-                    cv_dep_x: ev.cvDep0X,
-                    cv_dep_y: ev.cvDep0Y,
-                },
-                DecodedEvent::NoteCreated {
-                    cm: ev.cm1,
-                    clue_rx: ev.clueRx1,
-                    clue_ry: ev.clueRy1,
-                    eph_pub_x: ev.ephPubX1,
-                    eph_pub_y: ev.ephPubY1,
-                    ciphertext: ev.ciphertext1.to_vec(),
-                    cv_dep_x: ev.cvDep1X,
-                    cv_dep_y: ev.cvDep1Y,
-                },
-            ])
+            Ok(vec![DecodedEvent::NoteCreated {
+                cm: ev.cm,
+                clue_rx: ev.clueRx,
+                clue_ry: ev.clueRy,
+                eph_pub_x: ev.ephPubX,
+                eph_pub_y: ev.ephPubY,
+                ciphertext: ev.ciphertext.to_vec(),
+                cv_dep_x: ev.cvDepX,
+                cv_dep_y: ev.cvDepY,
+            }])
         }
         EventKind::AssetRegistered => {
             let ev = AssetRegistered::decode_log_data(&log, true)
@@ -163,48 +139,39 @@ pub fn decode(
                 .map_err(|e| DecodeError::Alloy(e.to_string()))?;
             Ok(vec![DecodedEvent::NullifierConsumed { nf: ev.nf }])
         }
-        EventKind::IntentEscrowed => {
-            let ev = IntentEscrowed::decode_log_data(&log, true)
+        EventKind::DepositEscrowed => {
+            let ev = DepositEscrowed::decode_log_data(&log, true)
                 .map_err(|e| DecodeError::Alloy(e.to_string()))?;
-            Ok(vec![DecodedEvent::IntentEscrowed {
+            Ok(vec![DecodedEvent::DepositEscrowed {
                 id: ev.id,
                 payer: ev.payer,
                 recipient: ev.recipient,
                 public_asset_id: ev.publicAssetId,
                 public_in: ev.publicIn,
                 fee_bps_at_submit: ev.feeBpsAtSubmit,
-                cm0: ev.cm0,
-                cm1: ev.cm1,
-                cv_dep0_x: ev.cvDep0X,
-                cv_dep0_y: ev.cvDep0Y,
-                cv_dep1_x: ev.cvDep1X,
-                cv_dep1_y: ev.cvDep1Y,
-                rcv_total: ev.rcvTotal,
-                clue_rx0: ev.clueRx0,
-                clue_ry0: ev.clueRy0,
-                eph_pub_x0: ev.ephPubX0,
-                eph_pub_y0: ev.ephPubY0,
-                ciphertext0: ev.ciphertext0.to_vec(),
-                clue_rx1: ev.clueRx1,
-                clue_ry1: ev.clueRy1,
-                eph_pub_x1: ev.ephPubX1,
-                eph_pub_y1: ev.ephPubY1,
-                ciphertext1: ev.ciphertext1.to_vec(),
+                cm: ev.cm,
+                cv_dep_x: ev.cvDepX,
+                cv_dep_y: ev.cvDepY,
+                rcv: ev.rcv,
+                clue_rx: ev.clueRx,
+                clue_ry: ev.clueRy,
+                eph_pub_x: ev.ephPubX,
+                eph_pub_y: ev.ephPubY,
+                ciphertext: ev.ciphertext.to_vec(),
             }])
         }
-        EventKind::IntentFlushed => {
-            let ev = IntentFlushed::decode_log_data(&log, true)
+        EventKind::DepositFlushed => {
+            let ev = DepositFlushed::decode_log_data(&log, true)
                 .map_err(|e| DecodeError::Alloy(e.to_string()))?;
-            Ok(vec![DecodedEvent::IntentFlushed {
+            Ok(vec![DecodedEvent::DepositFlushed {
                 id: ev.id,
-                cm0: ev.cm0,
-                cm1: ev.cm1,
+                cm: ev.cm,
             }])
         }
-        EventKind::IntentCanceled => {
-            let ev = IntentCanceled::decode_log_data(&log, true)
+        EventKind::DepositCanceled => {
+            let ev = DepositCanceled::decode_log_data(&log, true)
                 .map_err(|e| DecodeError::Alloy(e.to_string()))?;
-            Ok(vec![DecodedEvent::IntentCanceled {
+            Ok(vec![DecodedEvent::DepositCanceled {
                 id: ev.id,
                 payer: ev.payer,
                 refunded: ev.refunded,
@@ -224,12 +191,12 @@ pub fn event_kind_from_topic0(topic0: &B256) -> Option<EventKind> {
         Some(EventKind::AssetMoved)
     } else if topic0 == &NullifierConsumed::SIGNATURE_HASH {
         Some(EventKind::NullifierConsumed)
-    } else if topic0 == &IntentEscrowed::SIGNATURE_HASH {
-        Some(EventKind::IntentEscrowed)
-    } else if topic0 == &IntentFlushed::SIGNATURE_HASH {
-        Some(EventKind::IntentFlushed)
-    } else if topic0 == &IntentCanceled::SIGNATURE_HASH {
-        Some(EventKind::IntentCanceled)
+    } else if topic0 == &DepositEscrowed::SIGNATURE_HASH {
+        Some(EventKind::DepositEscrowed)
+    } else if topic0 == &DepositFlushed::SIGNATURE_HASH {
+        Some(EventKind::DepositFlushed)
+    } else if topic0 == &DepositCanceled::SIGNATURE_HASH {
+        Some(EventKind::DepositCanceled)
     } else {
         None
     }
@@ -242,8 +209,8 @@ pub fn known_signatures() -> [B256; 8] {
         RootAdvanced::SIGNATURE_HASH,
         AssetMoved::SIGNATURE_HASH,
         NullifierConsumed::SIGNATURE_HASH,
-        IntentEscrowed::SIGNATURE_HASH,
-        IntentFlushed::SIGNATURE_HASH,
-        IntentCanceled::SIGNATURE_HASH,
+        DepositEscrowed::SIGNATURE_HASH,
+        DepositFlushed::SIGNATURE_HASH,
+        DepositCanceled::SIGNATURE_HASH,
     ]
 }

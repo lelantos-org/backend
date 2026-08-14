@@ -6127,6 +6127,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "risk-webserver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "database",
+ "diesel",
+ "diesel-async",
+ "dotenvy",
+ "mockall",
+ "moka",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shared",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "vergen-gix",
+]
+
+[[package]]
 name = "rkyv"
 version = "0.8.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"

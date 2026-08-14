@@ -14,7 +14,7 @@ pub struct Note {
     /// `body = ciphertext[2..]`.
     pub ciphertext: Vec<u8>,
     /// Leaf position in the canonical merkle tree. Set by fmd-indexer once
-    /// the matching `RootAdvanced` event is observed (cm0 = startIndex,
-    /// cm1 = startIndex + 1).
+    /// the matching `RootAdvanced` event is observed: the i-th note of the
+    /// tx sits at `startIndex + i`.
     pub leaf_index: i64,
 }

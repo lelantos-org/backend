@@ -30,13 +30,13 @@ pub trait RawEventsRepo: Send + Sync {
         limit: i64,
     ) -> Result<Vec<RawEventRow>>;
     async fn max_id(&self, chain_id: i64) -> Result<i64>;
-    /// Look up `IntentEscrowed` events by their `intent_id` (encoded as
+    /// Look up `DepositEscrowed` events by their `deposit_id` (encoded as
     /// the second topic of the log). Used by the consume pipeline to
-    /// resolve cm + aux when processing `IntentFlushed` events.
+    /// resolve cm + aux when processing `DepositFlushed` events.
     async fn fetch_escrowed_by_ids(
         &self,
         chain_id: i64,
-        intent_ids: &[Vec<u8>],
+        deposit_ids: &[Vec<u8>],
     ) -> Result<Vec<RawEventRow>>;
 }
 
@@ -93,9 +93,9 @@ impl RawEventsRepo for PostgresRawEventsRepo {
     async fn fetch_escrowed_by_ids(
         &self,
         chain_id: i64,
-        intent_ids: &[Vec<u8>],
+        deposit_ids: &[Vec<u8>],
     ) -> Result<Vec<RawEventRow>> {
-        if intent_ids.is_empty() {
+        if deposit_ids.is_empty() {
             return Ok(Vec::new());
         }
         let mut conn = self
@@ -103,8 +103,8 @@ impl RawEventsRepo for PostgresRawEventsRepo {
             .get()
             .await
             .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
-        // Postgres arrays are 1-based: topics[2] is the second topic (indexed intent id, 32B big-endian).
-        let kind = shared::entities::EventKind::IntentEscrowed.as_i16();
+        // Postgres arrays are 1-based: topics[2] is the second topic (indexed deposit id, 32B big-endian).
+        let kind = shared::entities::EventKind::DepositEscrowed.as_i16();
         let q = diesel::sql_query(
             "SELECT id, chain_id, block_number, block_hash, block_ts, tx_hash, log_index, event_kind, topics, data \
              FROM raw_events \
@@ -112,7 +112,7 @@ impl RawEventsRepo for PostgresRawEventsRepo {
         )
         .bind::<diesel::sql_types::BigInt, _>(chain_id)
         .bind::<diesel::sql_types::SmallInt, _>(kind)
-        .bind::<diesel::sql_types::Array<diesel::sql_types::Bytea>, _>(intent_ids.to_vec());
+        .bind::<diesel::sql_types::Array<diesel::sql_types::Bytea>, _>(deposit_ids.to_vec());
         let rows: Vec<RawEventRow> = q.load(&mut conn).await?;
         Ok(rows)
     }

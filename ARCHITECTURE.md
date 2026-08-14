@@ -14,6 +14,7 @@ fmd-indexer       FMD consume + filter
 explorer-indexer  asset / tree-advance indexer
 fmd-webserver     FMD HTTP API (notes, matches, subscriptions, tree)
 explorer-webserver explorer HTTP API (assets, flows, tree-advances)
+risk-webserver    read-only address screening API (banned / high-risk lookup)
 relayer           tree-advance prover + submitter
 
 integration-tests cross-crate end-to-end via testcontainers

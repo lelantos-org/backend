@@ -8,6 +8,7 @@
 #   explorer    postgres + ingester + explorer-indexer + explorer-webserver
 #   relayer     postgres + anvil + relayer
 #   metaquoter  metaquoter only (DB-less; talks to external RPCs)
+#   risk        postgres + risk-webserver (address screening)
 #   all         everything (incl. anvil + automatic deploy + fund)
 #
 # Common: `just up` (= `docker compose --profile all up`). Re-runs deploy
@@ -16,13 +17,14 @@
 # ───────────────────────────────────────────────────────────── anchors ──
 
 # Profile groupings — change once, propagates to every service in the group.
-x-profiles-pg:        &profiles-pg        [db, ingester, fmd, explorer, relayer, all, prod]
+x-profiles-pg:        &profiles-pg        [db, ingester, fmd, explorer, relayer, risk, all, prod]
 x-profiles-anvil:     &profiles-anvil     [anvil, all]
 x-profiles-ingester:  &profiles-ingester  [ingester, fmd, explorer, all, prod]
 x-profiles-fmd:       &profiles-fmd       [fmd, all, prod]
 x-profiles-explorer:  &profiles-explorer  [explorer, all, prod]
 x-profiles-relayer:   &profiles-relayer   [relayer, all, prod]
 x-profiles-mq:        &profiles-mq        [metaquoter, all, prod]
+x-profiles-risk:      &profiles-risk      [risk, all, prod]
 x-profiles-deploy:    &profiles-deploy    [all]
 
 # Build config for every Rust backend that uses backend/Dockerfile.
@@ -188,6 +190,22 @@ services:
         healthcheck:
             <<: *tcp-healthcheck
             test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3002' >/dev/null 2>&1"]
+
+    # Read-only address screening. Owns `screened_addresses` and migrates it
+    # itself — no indexer writes that table.
+    risk-webserver:
+        <<: *backend-base
+        profiles: *profiles-risk
+        build: { <<: *rust-build, args: { PACKAGE: risk-webserver } }
+        image: lelantos/risk-webserver:dev
+        environment:
+            <<: *backend-env
+            RISK_BIND_ADDR: 0.0.0.0:3004
+            CACHE_TTL_S: "60"
+        ports: ["3004:3004"]
+        healthcheck:
+            <<: *tcp-healthcheck
+            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3004' >/dev/null 2>&1"]
 
     # ── relayer (dedicated Dockerfile; circuits mounted from ./circuits) ─
     relayer:

@@ -1,6 +1,8 @@
 use alloy::primitives::{Address, B256, U256};
 use alloy::sol_types::SolEvent;
-use chain_types::abi::{AssetMoved, AssetRegistered, NotePayload, RootAdvanced};
+use chain_types::abi::{
+    AssetMoved, AssetRegistered, DepositEscrowed, DepositFlushed, NotePayload, RootAdvanced,
+};
 use chain_types::decode::{DecodedEvent, decode, event_kind_from_topic0, known_signatures};
 use shared::entities::EventKind;
 
@@ -70,40 +72,30 @@ fn asset_moved_roundtrip() {
 }
 
 #[test]
-fn notes_created_fanout_roundtrip() {
-    let cm0 = B256::repeat_byte(0xab);
-    let cm1 = B256::repeat_byte(0xcd);
-    let ct0 = vec![0x00, 0x05, 0x42, 0x42];
-    let ct1 = vec![0x00, 0x07, 0x99];
+fn note_payload_roundtrip() {
+    let cm = B256::repeat_byte(0xab);
+    let ct = vec![0x00, 0x05, 0x42, 0x42];
 
     let ev = NotePayload {
-        cm0,
-        cm1,
-        clueRx0: U256::from(111u64),
-        clueRy0: U256::from(222u64),
-        ephPubX0: U256::from(333u64),
-        ephPubY0: U256::from(444u64),
-        ciphertext0: ct0.clone().into(),
-        clueRx1: U256::from(555u64),
-        clueRy1: U256::from(666u64),
-        ephPubX1: U256::from(777u64),
-        ephPubY1: U256::from(888u64),
-        ciphertext1: ct1.clone().into(),
-        cvDep0X: U256::from(1001u64),
-        cvDep0Y: U256::from(1002u64),
-        cvDep1X: U256::from(1003u64),
-        cvDep1Y: U256::from(1004u64),
+        cm,
+        clueRx: U256::from(111u64),
+        clueRy: U256::from(222u64),
+        ephPubX: U256::from(333u64),
+        ephPubY: U256::from(444u64),
+        ciphertext: ct.clone().into(),
+        cvDepX: U256::from(1001u64),
+        cvDepY: U256::from(1002u64),
     };
     let log = ev.encode_log_data();
     let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
     let data = log.data.to_vec();
 
     let decoded = decode(EventKind::NoteCreated, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 2, "fan-out yields two NoteCreated entries");
+    assert_eq!(decoded.len(), 1, "one log per output leaf");
 
     match &decoded[0] {
         DecodedEvent::NoteCreated {
-            cm,
+            cm: c,
             clue_rx,
             clue_ry,
             eph_pub_x,
@@ -112,38 +104,106 @@ fn notes_created_fanout_roundtrip() {
             cv_dep_x,
             cv_dep_y,
         } => {
-            assert_eq!(*cm, cm0);
+            assert_eq!(*c, cm);
             assert_eq!(*clue_rx, U256::from(111u64));
             assert_eq!(*clue_ry, U256::from(222u64));
             assert_eq!(*eph_pub_x, U256::from(333u64));
             assert_eq!(*eph_pub_y, U256::from(444u64));
-            assert_eq!(*ciphertext, ct0);
+            assert_eq!(*ciphertext, ct);
             assert_eq!(*cv_dep_x, U256::from(1001u64));
             assert_eq!(*cv_dep_y, U256::from(1002u64));
         }
-        _ => panic!("wrong variant at idx 0"),
+        _ => panic!("wrong variant"),
     }
-    match &decoded[1] {
-        DecodedEvent::NoteCreated {
-            cm,
+}
+
+#[test]
+fn deposit_escrowed_roundtrip() {
+    let payer = Address::repeat_byte(0x01);
+    let recipient = Address::repeat_byte(0x02);
+    let cm = B256::repeat_byte(0xef);
+    let ct = vec![0x00, 0x09, 0x77, 0x88];
+
+    let ev = DepositEscrowed {
+        id: U256::from(9u64),
+        payer,
+        recipient,
+        publicAssetId: 3,
+        publicIn: 250_000,
+        feeBpsAtSubmit: 30,
+        cm,
+        cvDepX: U256::from(2001u64),
+        cvDepY: U256::from(2002u64),
+        rcv: U256::from(2003u64),
+        clueRx: U256::from(11u64),
+        clueRy: U256::from(12u64),
+        ephPubX: U256::from(13u64),
+        ephPubY: U256::from(14u64),
+        ciphertext: ct.clone().into(),
+    };
+    let log = ev.encode_log_data();
+    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
+    let data = log.data.to_vec();
+
+    let decoded = decode(EventKind::DepositEscrowed, &topics, &data).expect("decode");
+    assert_eq!(decoded.len(), 1);
+    match &decoded[0] {
+        DecodedEvent::DepositEscrowed {
+            id,
+            payer: p,
+            recipient: r,
+            public_asset_id,
+            public_in,
+            fee_bps_at_submit,
+            cm: c,
+            cv_dep_x,
+            cv_dep_y,
+            rcv,
             clue_rx,
             clue_ry,
             eph_pub_x,
             eph_pub_y,
             ciphertext,
-            cv_dep_x,
-            cv_dep_y,
         } => {
-            assert_eq!(*cm, cm1);
-            assert_eq!(*clue_rx, U256::from(555u64));
-            assert_eq!(*clue_ry, U256::from(666u64));
-            assert_eq!(*eph_pub_x, U256::from(777u64));
-            assert_eq!(*eph_pub_y, U256::from(888u64));
-            assert_eq!(*ciphertext, ct1);
-            assert_eq!(*cv_dep_x, U256::from(1003u64));
-            assert_eq!(*cv_dep_y, U256::from(1004u64));
+            assert_eq!(*id, U256::from(9u64));
+            assert_eq!(*p, payer);
+            assert_eq!(*r, recipient);
+            assert_eq!(*public_asset_id, 3);
+            assert_eq!(*public_in, 250_000);
+            assert_eq!(*fee_bps_at_submit, 30);
+            assert_eq!(*c, cm);
+            assert_eq!(*cv_dep_x, U256::from(2001u64));
+            assert_eq!(*cv_dep_y, U256::from(2002u64));
+            assert_eq!(*rcv, U256::from(2003u64));
+            assert_eq!(*clue_rx, U256::from(11u64));
+            assert_eq!(*clue_ry, U256::from(12u64));
+            assert_eq!(*eph_pub_x, U256::from(13u64));
+            assert_eq!(*eph_pub_y, U256::from(14u64));
+            assert_eq!(*ciphertext, ct);
         }
-        _ => panic!("wrong variant at idx 1"),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn deposit_flushed_roundtrip() {
+    let cm = B256::repeat_byte(0x5a);
+    let ev = DepositFlushed {
+        id: U256::from(4u64),
+        cm,
+    };
+    let log = ev.encode_log_data();
+    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
+    let data = log.data.to_vec();
+
+    let decoded = decode(EventKind::DepositFlushed, &topics, &data).expect("decode");
+    assert_eq!(decoded.len(), 1);
+    match &decoded[0] {
+        DecodedEvent::DepositFlushed { id, cm: c } => {
+            assert_eq!(*id, U256::from(4u64));
+            assert_eq!(*c, cm);
+        }
+        _ => panic!("wrong variant"),
     }
 }
 

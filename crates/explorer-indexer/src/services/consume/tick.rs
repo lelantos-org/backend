@@ -10,15 +10,15 @@ use tracing::{debug, warn};
 
 pub const NAME: &str = "explorer";
 
-/// Public stats + intent-escrow ledger. NoteCreated is FMD-zone
+/// Public stats + deposit-escrow ledger. NoteCreated is FMD-zone
 /// (fmd-indexer consumes it). NullifierConsumed lives there too.
 const KINDS: [i16; 6] = [
     EventKind::AssetRegistered as i16,
     EventKind::RootAdvanced as i16,
     EventKind::AssetMoved as i16,
-    EventKind::IntentEscrowed as i16,
-    EventKind::IntentFlushed as i16,
-    EventKind::IntentCanceled as i16,
+    EventKind::DepositEscrowed as i16,
+    EventKind::DepositFlushed as i16,
+    EventKind::DepositCanceled as i16,
 ];
 
 pub struct ConsumeCtx {
@@ -124,44 +124,25 @@ async fn dispatch(
         }
         DecodedEvent::NoteCreated { .. } => Ok(()),
         DecodedEvent::NullifierConsumed { .. } => Ok(()),
-        DecodedEvent::IntentEscrowed {
+        DecodedEvent::DepositEscrowed {
             id,
             payer,
             recipient,
             public_asset_id,
             public_in,
             fee_bps_at_submit,
-            cm0,
-            cm1,
-            cv_dep0_x,
-            cv_dep0_y,
-            cv_dep1_x,
-            cv_dep1_y,
-            rcv_total,
-            clue_rx0,
-            clue_ry0,
-            eph_pub_x0,
-            eph_pub_y0,
-            ciphertext0,
-            clue_rx1,
-            clue_ry1,
-            eph_pub_x1,
-            eph_pub_y1,
-            ciphertext1,
+            cm,
+            cv_dep_x,
+            cv_dep_y,
+            rcv,
+            clue_rx,
+            clue_ry,
+            eph_pub_x,
+            eph_pub_y,
+            ciphertext,
         } => {
-            let aux = events::encode_aux(
-                clue_rx0,
-                clue_ry0,
-                eph_pub_x0,
-                eph_pub_y0,
-                &ciphertext0,
-                clue_rx1,
-                clue_ry1,
-                eph_pub_x1,
-                eph_pub_y1,
-                &ciphertext1,
-            );
-            events::intent_escrowed(
+            let aux = events::encode_aux(clue_rx, clue_ry, eph_pub_x, eph_pub_y, &ciphertext);
+            events::deposit_escrowed(
                 &ctx.pool,
                 chain_id,
                 row,
@@ -171,22 +152,19 @@ async fn dispatch(
                 public_asset_id,
                 public_in,
                 fee_bps_at_submit,
-                cm0,
-                cm1,
-                cv_dep0_x,
-                cv_dep0_y,
-                cv_dep1_x,
-                cv_dep1_y,
-                rcv_total,
+                cm,
+                cv_dep_x,
+                cv_dep_y,
+                rcv,
                 aux,
             )
             .await
         }
-        DecodedEvent::IntentFlushed { id, .. } => {
-            events::intent_flushed(&ctx.pool, chain_id, row, id).await
+        DecodedEvent::DepositFlushed { id, .. } => {
+            events::deposit_flushed(&ctx.pool, chain_id, row, id).await
         }
-        DecodedEvent::IntentCanceled { id, .. } => {
-            events::intent_canceled(&ctx.pool, chain_id, row, id).await
+        DecodedEvent::DepositCanceled { id, .. } => {
+            events::deposit_canceled(&ctx.pool, chain_id, row, id).await
         }
     }
 }

@@ -44,7 +44,9 @@ async fn fmd_consume_pairs_root_advanced_with_note_created() {
         &pool, CHAIN_ID, 100, 1700000000, &tx, 0, 0, 2, old_root, new_root,
     )
     .await;
-    insert_notes_created_event(&pool, CHAIN_ID, 100, 1700000000, &tx, 1, cm0, cm1).await;
+    // One `NotePayload` log per output leaf, in leaf order.
+    insert_note_payload_event(&pool, CHAIN_ID, 100, 1700000000, &tx, 1, cm0).await;
+    insert_note_payload_event(&pool, CHAIN_ID, 100, 1700000000, &tx, 2, cm1).await;
 
     let cursors = Arc::new(fmd_indexer::repositories::cursor::PostgresCursorRepo::new(
         pool.clone(),
@@ -282,35 +284,26 @@ async fn insert_root_advanced_event(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_notes_created_event(
+async fn insert_note_payload_event(
     pool: &database::DbPool,
     chain_id: i64,
     block_number: i64,
     block_ts: i64,
     tx_hash: &[u8],
     log_index: i32,
-    cm0: B256,
-    cm1: B256,
+    cm: B256,
 ) {
     // 2-byte clueBits prefix + 4-byte body.
     let ciphertext: alloy::primitives::Bytes = vec![0x00, 0x00, 0xde, 0xad, 0xbe, 0xef].into();
     let ev = NotePayload {
-        cm0,
-        cm1,
-        clueRx0: U256::from(0u64),
-        clueRy0: U256::from(0u64),
-        ephPubX0: U256::from(0u64),
-        ephPubY0: U256::from(0u64),
-        ciphertext0: ciphertext.clone(),
-        clueRx1: U256::from(0u64),
-        clueRy1: U256::from(0u64),
-        ephPubX1: U256::from(0u64),
-        ephPubY1: U256::from(0u64),
-        ciphertext1: ciphertext,
-        cvDep0X: U256::from(0u64),
-        cvDep0Y: U256::from(0u64),
-        cvDep1X: U256::from(0u64),
-        cvDep1Y: U256::from(0u64),
+        cm,
+        clueRx: U256::from(0u64),
+        clueRy: U256::from(0u64),
+        ephPubX: U256::from(0u64),
+        ephPubY: U256::from(0u64),
+        ciphertext,
+        cvDepX: U256::from(0u64),
+        cvDepY: U256::from(0u64),
     };
     let log = ev.encode_log_data();
     insert_raw_event(

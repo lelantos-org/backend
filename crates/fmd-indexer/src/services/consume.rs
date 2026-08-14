@@ -8,7 +8,7 @@ use crate::repositories::spent_nullifiers::SpentNullifiersRepo;
 use alloy::primitives::U256;
 use alloy::sol_types::SolEvent;
 use async_trait::async_trait;
-use chain_types::abi::IntentEscrowed;
+use chain_types::abi::DepositEscrowed;
 use shared::entities::EventKind;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ const KINDS: [i16; 4] = [
     EventKind::NoteCreated as i16,
     EventKind::RootAdvanced as i16,
     EventKind::NullifierConsumed as i16,
-    EventKind::IntentFlushed as i16,
+    EventKind::DepositFlushed as i16,
 ];
 
 #[async_trait]
@@ -53,30 +53,30 @@ impl ConsumeServiceImpl {
         }
     }
 
-    /// Collect intent_ids referenced by IntentFlushed events, look up their
-    /// originating IntentEscrowed events, decode cm + aux for both output
-    /// slots, and return the lookup map keyed by intent_id (decimal).
+    /// Collect deposit_ids referenced by DepositFlushed events, look up their
+    /// originating DepositEscrowed events, decode the leaf's cm + aux, and
+    /// return the lookup map keyed by deposit_id (decimal).
     async fn resolve_escrowed(&self, chain_id: i64, rows: &[RawEventRow]) -> Result<EscrowedMap> {
-        let kind_flushed = EventKind::IntentFlushed.as_i16();
-        // IntentFlushed indexed topic1 = id (32B big-endian).
-        let mut intent_topics: Vec<Vec<u8>> = Vec::new();
+        let kind_flushed = EventKind::DepositFlushed.as_i16();
+        // DepositFlushed indexed topic1 = id (32B big-endian).
+        let mut deposit_topics: Vec<Vec<u8>> = Vec::new();
         for r in rows {
             if r.event_kind != kind_flushed {
                 continue;
             }
             if r.topics.len() >= 2 {
-                intent_topics.push(r.topics[1].clone());
+                deposit_topics.push(r.topics[1].clone());
             }
         }
-        if intent_topics.is_empty() {
+        if deposit_topics.is_empty() {
             return Ok(HashMap::new());
         }
-        intent_topics.sort();
-        intent_topics.dedup();
+        deposit_topics.sort();
+        deposit_topics.dedup();
 
         let escrowed_rows = self
             .raw_events
-            .fetch_escrowed_by_ids(chain_id, &intent_topics)
+            .fetch_escrowed_by_ids(chain_id, &deposit_topics)
             .await?;
         let mut out: EscrowedMap = HashMap::new();
         for r in escrowed_rows {
@@ -87,37 +87,25 @@ impl ConsumeServiceImpl {
                     .collect(),
                 r.data.clone().into(),
             );
-            let ev = match IntentEscrowed::decode_log_data(&log, true) {
+            let ev = match DepositEscrowed::decode_log_data(&log, true) {
                 Ok(ev) => ev,
                 Err(e) => {
-                    warn!(chain_id, error = %e, "decode IntentEscrowed failed; skipping");
+                    warn!(chain_id, error = %e, "decode DepositEscrowed failed; skipping");
                     continue;
                 }
             };
             let key = U256::from(ev.id).to_string();
-            let slots = [
-                EscrowedSlot {
-                    cm: ev.cm0.0.to_vec(),
-                    clue_rx: ev.clueRx0,
-                    clue_ry: ev.clueRy0,
-                    eph_pub_x: ev.ephPubX0,
-                    eph_pub_y: ev.ephPubY0,
-                    ciphertext: ev.ciphertext0.to_vec(),
-                    cv_dep_x: ev.cvDep0X,
-                    cv_dep_y: ev.cvDep0Y,
-                },
-                EscrowedSlot {
-                    cm: ev.cm1.0.to_vec(),
-                    clue_rx: ev.clueRx1,
-                    clue_ry: ev.clueRy1,
-                    eph_pub_x: ev.ephPubX1,
-                    eph_pub_y: ev.ephPubY1,
-                    ciphertext: ev.ciphertext1.to_vec(),
-                    cv_dep_x: ev.cvDep1X,
-                    cv_dep_y: ev.cvDep1Y,
-                },
-            ];
-            out.insert(key, slots);
+            let slot = EscrowedSlot {
+                cm: ev.cm.0.to_vec(),
+                clue_rx: ev.clueRx,
+                clue_ry: ev.clueRy,
+                eph_pub_x: ev.ephPubX,
+                eph_pub_y: ev.ephPubY,
+                ciphertext: ev.ciphertext.to_vec(),
+                cv_dep_x: ev.cvDepX,
+                cv_dep_y: ev.cvDepY,
+            };
+            out.insert(key, slot);
         }
         Ok(out)
     }
