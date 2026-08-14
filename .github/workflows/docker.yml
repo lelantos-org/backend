@@ -23,7 +23,7 @@ permissions:
 jobs:
   detect-changes:
     name: Detect Changes
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_changes: ${{ steps.set-matrix.outputs.has_changes }}
