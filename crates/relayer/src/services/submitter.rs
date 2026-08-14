@@ -7,7 +7,7 @@
 // and the connection pool lives in `RpcEndpoint`.
 
 use crate::adapters::rpc::RpcEndpoint;
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::{AppError, AppResult, revert_reason};
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
@@ -90,15 +90,20 @@ impl Submitter {
             .input(data.into());
 
         // eth_call probe surfaces revert data that `send_transaction` would
-        // otherwise hide. Only the revert path is logged; success is implied
-        // by the subsequent send_transaction path.
-        if let Err(e) = provider.call(&tx.clone().from(self.signer_address)).await {
-            warn!(error = %e, "eth_call probe reverted; send_transaction will likely fail");
-        }
+        // otherwise hide behind a gas-estimation failure. Keep the reason: it
+        // is the only place the rejecting guard is legible, and the send that
+        // follows reports the same rejection as an opaque RPC error.
+        let probe_revert = match provider.call(&tx.clone().from(self.signer_address)).await {
+            Ok(_) => None,
+            Err(e) => {
+                warn!(error = %e, "eth_call probe reverted; send_transaction will likely fail");
+                Some(e.to_string())
+            }
+        };
         let pending = provider
             .send_transaction(tx)
             .await
-            .map_err(|e| AppError::Rpc(format!("send_transaction: {}", e)))?
+            .map_err(|e| classify_send_failure(probe_revert.as_deref(), &e.to_string()))?
             .with_required_confirmations(1)
             .with_timeout(Some(Duration::from_secs(self.receipt_timeout_s)));
         let tx_hash = *pending.tx_hash();
@@ -129,5 +134,74 @@ impl Submitter {
             block_number,
             gas_used: receipt.gas_used as u64,
         })
+    }
+}
+
+/// Decide what a `send_transaction` failure actually was.
+///
+/// A contract guard that rejects the payload surfaces here as a gas-estimation
+/// failure — RPC-shaped, but not an RPC fault. Prefer the probe's message,
+/// which states the revert plainly; otherwise sniff the send error for the
+/// same marker, since the probe can succeed against a state the transaction is
+/// later priced against.
+fn classify_send_failure(probe_revert: Option<&str>, send_err: &str) -> AppError {
+    let rejected = |detail: &str| {
+        revert_reason(detail).map(|reason| AppError::ContractRejected {
+            reason,
+            detail: detail.to_string(),
+        })
+    };
+    probe_revert
+        .and_then(rejected)
+        .or_else(|| rejected(send_err))
+        .unwrap_or_else(|| AppError::Rpc(format!("send_transaction: {}", send_err)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The secret an RPC URL usually carries.
+    const NODE_URL: &str = "https://mainnet.example.com/v3/deadbeefsecretkey";
+
+    fn probe_error() -> String {
+        format!(
+            "server returned an error response for {NODE_URL}: error code 3: \
+             execution reverted: MockSwapRouter02: too little received, data: \"0x08c379a0\""
+        )
+    }
+
+    #[test]
+    fn a_probe_revert_is_a_contract_rejection_the_caller_can_act_on() {
+        let err = classify_send_failure(Some(&probe_error()), "gas estimation failed");
+        assert!(matches!(err, AppError::ContractRejected { .. }));
+        assert!(err.status().is_client_error(), "got {}", err.status());
+        assert!(err.client_message().contains("too little received"));
+    }
+
+    /// The whole point of the variant: the reason reaches the caller while the
+    /// node URL that carried it does not.
+    #[test]
+    fn the_rejection_reason_reaches_the_caller_but_the_node_url_does_not() {
+        let err = classify_send_failure(Some(&probe_error()), "gas estimation failed");
+        let msg = err.client_message();
+        assert!(!msg.contains("example.com"), "leaked host: {msg}");
+        assert!(!msg.contains("deadbeefsecretkey"), "leaked key: {msg}");
+    }
+
+    #[test]
+    fn a_revert_the_probe_missed_is_still_a_contract_rejection() {
+        let err = classify_send_failure(None, &probe_error());
+        assert!(matches!(err, AppError::ContractRejected { .. }));
+    }
+
+    /// A probe that failed for transport reasons says nothing about the
+    /// payload, so it must not be reported as the caller's fault.
+    #[test]
+    fn a_transport_failure_stays_an_rpc_error() {
+        let transport = format!("error sending request for url {NODE_URL}");
+        let err = classify_send_failure(Some(&transport), &transport);
+        assert!(matches!(err, AppError::Rpc(_)));
+        assert_eq!(err.client_message(), "internal error");
     }
 }

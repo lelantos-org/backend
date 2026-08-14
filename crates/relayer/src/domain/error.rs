@@ -33,12 +33,47 @@ pub enum AppError {
     StaleEstimate(String),
     #[error("internal: {0}")]
     Internal(String),
+    /// A submission a contract guard rejected before it could be mined —
+    /// caught by the `eth_call` pre-flight, so nothing was broadcast and no
+    /// gas was spent.
+    ///
+    /// Distinct from [`AppError::Reverted`], which is a transaction that made
+    /// it on-chain and failed there. The difference matters to the caller:
+    /// this one is their payload to fix, and they cannot fix it without being
+    /// told which guard refused. It surfaces as a gas-estimation failure, so
+    /// without this variant it lands in [`AppError::Rpc`] — a 500 whose body
+    /// is deliberately scrubbed, leaving "your adapter is not allowlisted"
+    /// indistinguishable from "the relayer is broken".
+    #[error("rejected by contract: {detail}")]
+    ContractRejected {
+        /// The contract's own revert text, safe to echo — see
+        /// [`revert_reason`].
+        reason: String,
+        /// Full node error, for logs only. May embed the RPC URL.
+        detail: String,
+    },
+}
+
+/// The chain's revert reason, if `err` carries one.
+///
+/// Returns only the text from `execution reverted` onward. Everything before
+/// that marker is node and transport detail — which is exactly where an RPC
+/// URL, and with it an API key, would appear. What follows is the contract's
+/// own message and its ABI-encoded data. A transport failure has no marker at
+/// all and yields `None`, so it can never be mistaken for a revert.
+pub fn revert_reason(err: &str) -> Option<String> {
+    const MARKER: &str = "execution reverted";
+    /// Long enough for a revert string plus its selector, short enough that a
+    /// pathological node response cannot be used to flood a caller.
+    const MAX: usize = 200;
+
+    Some(err[err.find(MARKER)?..].trim().chars().take(MAX).collect())
 }
 
 impl AppError {
     pub fn status(&self) -> StatusCode {
         match self {
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::BadRequest(_) | AppError::ContractRejected { .. } => StatusCode::BAD_REQUEST,
             AppError::UnknownChain(_) => StatusCode::NOT_FOUND,
             AppError::NullifierAlreadySpent(_)
             | AppError::NullifierInFlight(_)
@@ -64,6 +99,8 @@ impl AppError {
             | AppError::NullifierAlreadySpent(_)
             | AppError::NullifierInFlight(_)
             | AppError::StaleEstimate(_) => self.to_string(),
+            // Only `reason` — never `detail`, which is the raw node error.
+            AppError::ContractRejected { reason, .. } => format!("rejected by contract: {reason}"),
             AppError::Reverted(_) => "submit reverted".into(),
             AppError::SubmitUnknown(_) => {
                 "submit outcome unknown; check the chain before retrying".into()
