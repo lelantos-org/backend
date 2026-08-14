@@ -630,6 +630,52 @@ async fn chain_locks_are_scoped_by_chain_and_namespace() {
     );
 }
 
+/// A freshly acquired lock must report itself alive.
+///
+/// `is_leader` demotes on `!is_alive()`, so a check that cannot succeed makes
+/// every holder release the lock it just took: fmd-indexer flaps between
+/// leader and standby on alternate ticks, and ingester — which stops for good
+/// on lock loss — halts after its first poll. The other lock tests all take a
+/// lock and inspect it from *another* connection, so none of them touch this
+/// path.
+#[tokio::test]
+async fn a_held_lock_reports_itself_alive() {
+    let (_pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+    let key = database::advisory::chain_key(database::advisory::NS_FMD_CONSUME, CHAIN_A);
+
+    let mut lock = ChainLock::try_acquire(url, key)
+        .await
+        .unwrap()
+        .expect("uncontended lock");
+    assert!(
+        lock.is_alive().await,
+        "a live session must not read as dead"
+    );
+    // Idempotent: the tick loop calls this on every pass.
+    assert!(lock.is_alive().await, "still alive on a second check");
+}
+
+/// The leadership loop over a real connection: acquire, stay leader across
+/// consecutive ticks, and only demote once the lock is genuinely gone.
+#[tokio::test]
+async fn leadership_survives_consecutive_ticks() {
+    let (_pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+    let locks = ChainLocks::enabled(url);
+
+    assert!(
+        locks.is_leader(CHAIN_A).await.unwrap(),
+        "first tick acquires"
+    );
+    for tick in 2..=5 {
+        assert!(
+            locks.is_leader(CHAIN_A).await.unwrap(),
+            "tick {tick} must keep leadership, not flap to standby"
+        );
+    }
+}
+
 #[tokio::test]
 async fn standby_replica_does_no_work_until_the_leader_releases() {
     let (pool, _serial) = fresh_pool().await;

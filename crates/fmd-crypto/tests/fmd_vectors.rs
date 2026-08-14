@@ -7,6 +7,23 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct VectorFile {
     vectors: Vec<Vector>,
+    expansion: Vec<Expansion>,
+}
+
+/// A clue-key expansion vector: the detection scalars the wallet derives from
+/// its root secret, and a clue a sender built from the published clue key
+/// alone. The detection scalars stay plain `Fr` on the wire, so this crate
+/// needs no expansion logic — only proof that what the wallet POSTs detects
+/// what the sender flagged.
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct Expansion {
+    label: String,
+    gamma: u8,
+    dk_x: Vec<String>,
+    fk_X: Vec<Point>,
+    clue_encoded: String,
+    detect_self: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +185,66 @@ fn batch_matches_scalar() {
             .map(|dk| test_clue(dk, r, bits, gamma))
             .collect();
         assert_eq!(batch, scalar, "{}: batch vs scalar mismatch", v.label);
+    }
+}
+
+/// The expanded halves must still satisfy `X_i = x_i · B`, same invariant the
+/// raw-key vectors assert. If the wallet's expansion and the sender's ever
+/// diverge, every clue silently stops matching.
+#[test]
+fn expansion_dk_to_fk_consistency() {
+    let g = base8_circom();
+    for v in load().expansion {
+        for (i, sk_dec) in v.dk_x.iter().enumerate() {
+            let computed = scalar_mul(g, fr_from_dec(sk_dec));
+            assert_eq!(
+                computed.x,
+                fq_from_dec(&v.fk_X[i].x),
+                "{}: X[{}].x",
+                v.label,
+                i
+            );
+            assert_eq!(
+                computed.y,
+                fq_from_dec(&v.fk_X[i].y),
+                "{}: X[{}].y",
+                v.label,
+                i
+            );
+        }
+    }
+}
+
+/// Cross-language check on the v4 key derivation: a clue built in TS from the
+/// published clue key must be detected by this crate using the TS-expanded
+/// detection scalars, and not by a key expanded from a different root.
+#[test]
+fn expansion_detect_matches() {
+    for v in load().expansion {
+        let encoded = h2b(&v.clue_encoded);
+        let gamma = v.gamma as usize;
+        assert_eq!(encoded[0], v.gamma, "{}: gamma byte", v.label);
+
+        let r = unpack(&encoded[1..33]).unwrap_or_else(|e| panic!("{}: unpack {:?}", v.label, e));
+        let bits: u16 = match &encoded[33..] {
+            [b] => *b as u16,
+            [lo, hi] => u16::from_le_bytes([*lo, *hi]),
+            _ => panic!("{}: unexpected clue_bits length", v.label),
+        };
+
+        let dk: Vec<Fr> = v.dk_x.iter().map(|s| fr_from_dec(s)).collect();
+        assert_eq!(
+            test_clue(&dk, r, bits, gamma),
+            v.detect_self,
+            "{}: own detection key",
+            v.label
+        );
+
+        // No negative case here. The foreign key in the vector is expanded
+        // from `other_root`, and expansion is wallet-side by design — this
+        // crate cannot derive it. Perturbing a scalar is not a substitute:
+        // it flips one of gamma bits, so it still matches half the time. The
+        // negative is pinned on the TS side, where the expansion lives.
     }
 }
 

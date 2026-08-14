@@ -1,4 +1,4 @@
-//! FMD per `lelantos.fmd.v3` (poseidon + Legendre symbol scheme).
+//! FMD per `lelantos.fmd.v4` (poseidon + Legendre symbol scheme).
 
 mod coords;
 mod detect;
@@ -14,7 +14,7 @@ pub use coords::{
 };
 pub use detect::{TAG_FMD_BIT, test_clue, test_clue_batch};
 
-pub const DOMAIN: &str = "lelantos.fmd.v3";
+pub const DOMAIN: &str = "lelantos.fmd.v4";
 
 #[derive(Debug, Error)]
 pub enum ClueError {

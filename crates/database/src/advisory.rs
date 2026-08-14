@@ -90,7 +90,12 @@ impl ChainLock {
     /// which is the exact failure the lock exists to prevent. Callers must
     /// check this before each unit of work and drop the `ChainLock` on false.
     pub async fn is_alive(&mut self) -> bool {
-        diesel::sql_query("SELECT 1 AS one")
+        // The cast is load-bearing: a bare `1` is `integer` in Postgres, and
+        // deserializing a 4-byte int4 into the `BigInt`/i64 below fails. That
+        // error is indistinguishable here from a dead connection, so an
+        // uncast literal makes this return false on a perfectly healthy
+        // session — every holder demotes itself on its first check.
+        diesel::sql_query("SELECT 1::bigint AS one")
             .get_result::<Alive>(&mut self.conn)
             .await
             .is_ok_and(|r| r.one == 1)

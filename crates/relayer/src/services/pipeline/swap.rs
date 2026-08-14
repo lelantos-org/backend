@@ -93,9 +93,13 @@ impl SwapPipeline {
     }
 
     fn validate(&self, payload: &SubmitSwapPayload) -> AppResult<()> {
+        // The wrapper calls `MASP.withdraw` for leg 1, so it — not this
+        // relayer's signer — is the pool's `msg.sender`, and the pool checks
+        // `pi.relayer == msg.sender`. Binding to the signer here rejects every
+        // correctly-built swap with a 400.
         let binding = TransactBinding {
             chain_id: self.chain_id,
-            relayer: self.submitter.signer_address,
+            relayer: self.wrapper_address,
         };
         validate_swap_shape(payload, self.wrapper_address, binding)
     }
@@ -285,22 +289,23 @@ mod tests {
 
     const CHAIN_ID: i64 = 31337;
 
-    fn relayer() -> Address {
-        Address::from([0x99u8; 20])
-    }
-
     /// Payload as a well-behaved wallet would send it, plus a mutation.
+    ///
+    /// Leg 1 is bound to the wrapper throughout: it is the contract that
+    /// calls `MASP.withdraw`, so it is the pool's `msg.sender` and therefore
+    /// the address `pi.relayer` must name. Binding these to the relayer's own
+    /// signer instead is what made every real swap 400.
     fn checked(mutate: impl FnOnce(&mut SubmitSwapPayload)) -> AppResult<()> {
         let w = wrapper();
         let mut p = fake_payload(&w.to_string());
-        p.pub_inputs.relayer = relayer().to_string();
+        p.pub_inputs.relayer = w.to_string();
         mutate(&mut p);
         validate_swap_shape(
             &p,
             w,
             TransactBinding {
                 chain_id: CHAIN_ID,
-                relayer: relayer(),
+                relayer: w,
             },
         )
     }
@@ -358,8 +363,9 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
-    /// The transact proof pins a relayer address; another relayer's
-    /// submission cannot satisfy it, so it must not reach the prover.
+    /// The transact proof pins the caller; a proof naming anyone other than
+    /// the wrapper cannot satisfy `pi.relayer == msg.sender`, so it must not
+    /// reach the prover.
     #[test]
     fn validate_rejects_a_proof_bound_to_another_relayer() {
         let err =
