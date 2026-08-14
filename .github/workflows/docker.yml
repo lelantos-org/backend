@@ -118,7 +118,7 @@ jobs:
     name: Docker (${{ matrix.docker.image }})
     needs: detect-changes
     if: needs.detect-changes.outputs.has_changes == 'true'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     env:
       REGISTRY_URL: ghcr.io
       REPOSITORY: ${{ github.repository }}

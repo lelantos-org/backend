@@ -35,11 +35,13 @@ Screening is POST rather than GET-with-path-param even though it is a read: `Tra
 
 ## Populating the list
 
-By SQL — there is no write API.
+Migration `2026-08-14-000021_seed_ofac_sdn_addresses` seeds 100 OFAC SDN EVM addresses (`source = 'ofac_sdn'`). That is a point-in-time snapshot and nothing refreshes it — see the migration header.
+
+Beyond that, by SQL — there is no write API.
 
 ```sql
 INSERT INTO screened_addresses (chain, address, risk, source, reason)
-VALUES ('evm', '0x8589427373d6d84e98730d7795d8f6f8731fda16', 'banned', 'ofac_sdn', 'SDN list');
+VALUES ('evm', '0x000000000000000000000000000000000000dead', 'high', 'internal', 'manual review');
 ```
 
 ⚠️ Rows must store the **normalized** form that `domain::address::normalize` produces — `chain` lowercased, and for `chain = 'evm'` the address as lowercase `0x`-hex. Lookups are exact `=` matches, so a row inserted with a checksummed (mixed-case) EVM address will never be found.
