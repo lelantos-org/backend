@@ -511,6 +511,9 @@ async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
 
     // The inputs the client used to hash itself are no longer on the wire.
     for gone in ["cmHex", "cvDepX", "cvDepY"] {
-        assert!(entry.get(gone).is_none(), "{gone} should no longer be served");
+        assert!(
+            entry.get(gone).is_none(),
+            "{gone} should no longer be served"
+        );
     }
 }
