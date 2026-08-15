@@ -11,26 +11,12 @@ use crate::app::cache::TreeMirror;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::TreeStateOut;
 use crate::repositories::notes;
+use crate::services::field::{bigdec_to_field, field_to_hex};
 use crate::services::poseidon::leaf_hash;
 use database::DbPool;
 use fmd_crypto::tree::{Field, MerkleTree};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-fn bigdec_to_field(v: &bigdecimal::BigDecimal) -> AppResult<Field> {
-    use bigdecimal::num_bigint::Sign;
-    let (bi, _) = v.as_bigint_and_exponent();
-    if bi.sign() == Sign::Minus {
-        return Err(AppError::Internal("negative cv_dep".into()));
-    }
-    let bytes = bi.to_bytes_be().1;
-    if bytes.len() > 32 {
-        return Err(AppError::Internal("cv_dep > 32 bytes".into()));
-    }
-    let mut f = [0u8; 32];
-    f[32 - bytes.len()..].copy_from_slice(&bytes);
-    Ok(f)
-}
 
 const DEPTH: usize = 10;
 
@@ -44,10 +30,6 @@ fn vec_to_field(v: &[u8]) -> AppResult<Field> {
     let mut f = [0u8; 32];
     f.copy_from_slice(v);
     Ok(f)
-}
-
-fn field_to_hex(f: &Field) -> String {
-    format!("0x{}", hex::encode(f))
 }
 
 /// Hash `rows` into leaves and append them to `tree`.

@@ -14,7 +14,7 @@ pub struct NoteOut {
     pub clue_bits_hex: String,
     pub ciphertext_hex: String,
     /// Sender's ECDH ephemeral public point (Baby-Jubjub coordinates as
-    /// decimal field-element strings). Receiver feeds these into
+    /// `0x`-prefixed 32-byte field elements). Receiver feeds these into
     /// `decryptNote` to recover the note plaintext.
     pub eph_pub_x: String,
     pub eph_pub_y: String,

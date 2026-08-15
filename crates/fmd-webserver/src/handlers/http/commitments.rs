@@ -13,7 +13,8 @@ use utoipa::ToSchema;
 pub struct CommitmentEntry {
     pub leaf_index: i64,
     pub cm_hex: String,
-    /// Decimal field-element strings for Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y).
+    /// `0x`-prefixed 32-byte field elements for
+    /// Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y).
     pub cv_dep_x: String,
     pub cv_dep_y: String,
 }

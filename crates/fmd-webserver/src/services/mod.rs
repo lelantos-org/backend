@@ -1,4 +1,5 @@
 pub mod commitments;
+pub mod field;
 pub mod matches;
 pub mod notes;
 pub mod nullifiers;

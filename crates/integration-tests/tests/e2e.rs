@@ -439,3 +439,73 @@ async fn spawn_fmd_webserver(pool: &database::DbPool) -> String {
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     format!("http://{addr}")
 }
+
+/// Curve coordinates ship as `0x`-prefixed hex, not decimal.
+///
+/// The prefix is load-bearing, not cosmetic. The SDK decodes these with a
+/// helper that accepts decimal *or* `0x`-hex, so a bare-hex value whose digits
+/// all happen to be decimal would be parsed as a completely different number,
+/// silently. Serving the prefix keeps that helper unambiguous.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn commitment_chunk_serves_prefixed_hex_coordinates() {
+    use bigdecimal::BigDecimal;
+    use fmd_indexer::repositories::notes::{NewNote, NotesRepo, PostgresNotesRepo};
+    use std::str::FromStr;
+
+    let _guard = serial_lock().await;
+    let pool = boot_pool().await;
+
+    // A value whose hex form is all decimal digits — the exact input that a
+    // bare-hex wire format would mis-decode on the client.
+    // 305419896 == 0x12345678, and "12345678" is also a valid decimal literal
+    // for a different number entirely.
+    let cv_x = BigDecimal::from_str("305419896").unwrap();
+    // A full-width element, to pin the zero-padding and the 64-char width.
+    let cv_y = BigDecimal::from_str(
+        "21888242871839275222246405745257275088548364400416034343698204186575808495616",
+    )
+    .unwrap();
+
+    let repo = PostgresNotesRepo::new(pool.clone());
+    repo.insert_batch(&[NewNote {
+        chain_id: CHAIN_ID,
+        block_number: 1,
+        tx_hash: vec![0xaa; 32],
+        log_index: 0,
+        cm: vec![0xbb; 32],
+        clue_rx: BigDecimal::from(0),
+        clue_ry: BigDecimal::from(0),
+        eph_pub_x: BigDecimal::from(7),
+        eph_pub_y: BigDecimal::from(0),
+        ciphertext: vec![0x00, 0x07],
+        leaf_index: 0,
+        cv_dep_x: cv_x,
+        cv_dep_y: cv_y,
+    }])
+    .await
+    .unwrap();
+
+    let base = spawn_fmd_webserver(&pool).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/v1/chains/{CHAIN_ID}/commitments/chunks/0"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let entry = &body["entries"][0];
+    assert_eq!(
+        entry["cvDepX"].as_str().unwrap(),
+        "0x0000000000000000000000000000000000000000000000000000000012345678",
+        "must be 0x-prefixed and left-padded to 32 bytes"
+    );
+    assert_eq!(
+        entry["cvDepY"].as_str().unwrap(),
+        "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000",
+        "full-width element keeps all 64 hex chars"
+    );
+    // cm keeps its existing bare-hex form; it is decoded by a hex-only helper.
+    assert_eq!(entry["cmHex"].as_str().unwrap(), hex::encode([0xbb; 32]));
+}
