@@ -1,5 +1,6 @@
-# Ingester multichain config. Mounted at /etc/ingester.toml in the container.
-# Override per-deployment.
+# Ingester — PROD template. Selected with STACK_ENV=prod; config/dev/ is the
+# default. Override per-deployment via INGESTER_CHAIN_<id>_{RPC_URL,
+# POOL_ADDRESS,START_BLOCK} — those only apply to chains declared below.
 
 database_url = "postgres://postgres:postgres@postgres:5432/postgres"
 

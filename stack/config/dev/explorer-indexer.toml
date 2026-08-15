@@ -1,0 +1,16 @@
+# Explorer indexer — DEV (local anvil stack).
+# Mounted at /etc/explorer-indexer.toml. See config/prod/ for the deployment
+# template.
+#
+# The explorer indexer is chain-agnostic: it consumes rows the ingester has
+# already written, so it has no [[chains]] block and no RPC of its own.
+# Fields below are the complete set (see ExplorerIndexerConfig).
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+
+# Poll interval for new raw events. Tight in dev so the explorer keeps up
+# with anvil's 1s blocks.
+tick_ms = 500
+
+# Max raw events consumed per tick.
+batch = 500

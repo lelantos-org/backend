@@ -1,6 +1,6 @@
 use crate::app::AppState;
 use crate::domain::error::{AppError, AppResult};
-use crate::domain::responses::MatchOut;
+use crate::domain::responses::{MatchOut, MatchesPage};
 use crate::repositories::matches;
 use crate::services::field::bigdec_to_hex;
 use std::sync::Arc;
@@ -15,13 +15,18 @@ fn clue_bits_hex(ciphertext: &[u8]) -> String {
     )
 }
 
+/// `backfilled_through` rides in the cached value, so it can be up to the
+/// cache TTL behind the row. That staleness is safe in the only direction
+/// that matters: clients clamp their cursor to it, and a value that is too
+/// low re-delivers rows rather than skipping them.
 #[tracing::instrument(skip(st))]
 pub async fn list(
     st: &AppState,
     subscription_id: i64,
+    backfilled_through: i64,
     after: i64,
     limit: i64,
-) -> AppResult<Arc<Vec<MatchOut>>> {
+) -> AppResult<Arc<MatchesPage>> {
     let key = (subscription_id, after, limit);
     let pool = st.pool.clone();
     st.cache
@@ -44,7 +49,10 @@ pub async fn list(
                     })
                 })
                 .collect::<AppResult<Vec<_>>>()?;
-            Ok::<_, AppError>(Arc::new(out))
+            Ok::<_, AppError>(Arc::new(MatchesPage {
+                backfilled_through_note_id: backfilled_through,
+                matches: out,
+            }))
         })
         .await
         .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))

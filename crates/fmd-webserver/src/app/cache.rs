@@ -1,4 +1,4 @@
-use crate::domain::responses::{MatchOut, NoteOut};
+use crate::domain::responses::{MatchesPage, NoteOut};
 use crate::services::commitments::ChunkResponse;
 use crate::services::nullifiers::ChunkResponse as NullifierChunkResponse;
 use fmd_crypto::tree::MerkleTree;
@@ -29,7 +29,7 @@ pub struct AppCache {
     /// No TTL: the mirror is advanced in place, never discarded.
     pub tree: Cache<i64, Arc<Mutex<TreeMirror>>>,
     pub notes_pages: Cache<NotesPageKey, Arc<Vec<NoteOut>>>,
-    pub matches_pages: Cache<MatchesPageKey, Arc<Vec<MatchOut>>>,
+    pub matches_pages: Cache<MatchesPageKey, Arc<MatchesPage>>,
     /// Complete commitment chunks — immutable once full (1024 leaves), hence
     /// the long TTL. Capacity 64 keeps recently-completed chunks hot (highest
     /// server traffic, not yet CDN-cached); older ones fall back to the CDN's

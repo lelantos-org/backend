@@ -1,0 +1,38 @@
+# Relayer — DEV (local anvil stack). Mounted at /etc/relayer.toml.
+#
+# Active by default; STACK_ENV=prod selects config/prod/relayer.toml instead.
+#
+# `apply_env_overlay` only rewrites chains that ALREADY EXIST here, so this
+# 31337 block is what makes the RELAYER_CHAIN_31337_* vars written by
+# scripts/deploy-contracts.sh take effect. Delete it and the deploy output is
+# silently discarded.
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+listen_addr = "0.0.0.0:3003"
+
+[[chains]]
+chain_id = 31337
+# Overridden by RELAYER_CHAIN_31337_RPC_URL.
+rpc_url = "http://anvil:8545"
+# Overridden by RELAYER_CHAIN_31337_POOL_ADDRESS (the deployed MASP).
+pool_address = "0x0000000000000000000000000000000000000000"
+# Anvil deterministic account #1 — public test key, no secret. MASP enforces
+# `pubInputs.relayer == msg.sender`, so this must match the address wallets
+# pin as `relayerAddress` (0x70997970C51812dc3A010C7d01b50e0d17dc79C8).
+# A placeholder zero key is NOT usable here: it fails secp256k1 validation in
+# `Submitter::new` and aborts startup. Override with
+# RELAYER_CHAIN_31337_SIGNER_KEY.
+signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+receipt_timeout_s = 60
+flush_interval_s = 5
+flush_max_n = 8
+
+# swap_wrapper_address / native_adapter_address are injected by deploy.sh via
+# RELAYER_CHAIN_31337_{SWAP_WRAPPER,NATIVE_ADAPTER}_ADDRESS; left unset here so
+# the matching endpoints stay disabled until a deploy has actually run.
+
+[prover]
+# Mounted from backend/stack/circuits/ (populated by `just fetch-circuits`).
+wasm_path = "/circuits/tree_update_batch.wasm"
+r1cs_path = "/circuits/tree_update_batch.r1cs"
+zkey_path = "/circuits/tree_update_batch_final.zkey"

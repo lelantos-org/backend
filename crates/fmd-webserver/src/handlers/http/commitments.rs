@@ -12,11 +12,9 @@ use utoipa::ToSchema;
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentEntry {
     pub leaf_index: i64,
-    pub cm_hex: String,
-    /// `0x`-prefixed 32-byte field elements for
-    /// Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y).
-    pub cv_dep_x: String,
-    pub cv_dep_y: String,
+    /// `Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)` as a `0x`-prefixed 32-byte
+    /// field element — the Merkle leaf, ready to insert.
+    pub leaf_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -50,9 +48,7 @@ pub async fn get_commitment_chunk(
             .iter()
             .map(|e| CommitmentEntry {
                 leaf_index: e.leaf_index,
-                cm_hex: e.cm_hex.clone(),
-                cv_dep_x: e.cv_dep_x.clone(),
-                cv_dep_y: e.cv_dep_y.clone(),
+                leaf_hash: e.leaf_hash.clone(),
             })
             .collect(),
         is_complete: chunk.is_complete,

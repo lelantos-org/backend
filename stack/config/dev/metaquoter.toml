@@ -1,0 +1,22 @@
+# MetaQuoter — DEV (local anvil stack). Mounted at /etc/metaquoter.toml.
+#
+# Active by default; STACK_ENV=prod selects config/prod/metaquoter.toml, which
+# carries the real mainnet/Base/Arbitrum venue list.
+#
+# `apply_env_overlay` only rewrites chains that ALREADY EXIST here, so this
+# 31337 block is what makes the METAQUOTER_CHAIN_31337_* vars written by
+# scripts/deploy-contracts.sh take effect. Delete it and the deploy output is
+# silently discarded.
+
+listen_addr = "0.0.0.0:8081"
+race_deadline_ms = 1500
+
+[[chains]]
+chain_id = 31337
+# Overridden by METAQUOTER_CHAIN_31337_RPC_URL.
+rpc_url = "http://anvil:8545"
+# Both overridden by METAQUOTER_CHAIN_31337_{UNIV3_QUOTER,UNIV3_ADAPTER} from
+# the DeployTestSwap output. Zero until a deploy has run.
+univ3_quoter = "0x0000000000000000000000000000000000000000"
+univ3_adapter = "0x0000000000000000000000000000000000000000"
+masp_fee_bps = 0

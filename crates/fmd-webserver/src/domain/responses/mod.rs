@@ -3,7 +3,7 @@ pub mod notes;
 pub mod subscriptions;
 pub mod tree;
 
-pub use matches::MatchOut;
+pub use matches::{MatchOut, MatchesPage};
 pub use notes::NoteOut;
 pub use subscriptions::SubscriptionOut;
 pub use tree::TreeStateOut;

@@ -13,12 +13,17 @@
 #
 # Common: `just up` (= `docker compose --profile all up`). Re-runs deploy
 # step on every up; addresses propagate via the `addresses` named volume.
+#
+# Config selection: service TOMLs are mounted from config/${STACK_ENV}/, which
+# defaults to `dev` (anvil/31337 placeholders that the deploy one-shot fills
+# in). `STACK_ENV=prod just up` swaps in config/prod/ — the mainnet templates,
+# which expect real signer keys in the environment.
 
 # ───────────────────────────────────────────────────────────── anchors ──
 
 # Profile groupings — change once, propagates to every service in the group.
 x-profiles-pg:        &profiles-pg        [db, ingester, fmd, explorer, relayer, risk, all, prod]
-x-profiles-anvil:     &profiles-anvil     [anvil, all]
+x-profiles-anvil:     &profiles-anvil     [anvil, relayer, all]
 x-profiles-ingester:  &profiles-ingester  [ingester, fmd, explorer, all, prod]
 x-profiles-fmd:       &profiles-fmd       [fmd, all, prod]
 x-profiles-explorer:  &profiles-explorer  [explorer, all, prod]
@@ -76,6 +81,11 @@ services:
             POSTGRES_PASSWORD: postgres
             POSTGRES_DB: postgres
         ports: ["5432:5432"]
+        # Without this the image falls back to an anonymous volume, so the
+        # declared `postgres-data` volume was dead config and `just stop` /
+        # `just up` cycles accumulated orphaned volumes.
+        volumes:
+            - postgres-data:/var/lib/postgresql/data
         healthcheck:
             test: ["CMD-SHELL", "pg_isready -U postgres"]
             interval: 2s
@@ -120,11 +130,15 @@ services:
             FUND_NATIVE: 100ether
             FUND_WETH: "100000000000000000000"     # 100 e18
             FUND_ERC20: "1000000000000000000000000" # 1 e24
+            # `DEBUG=1 just up` for verbose deploy output, TRACE=1 for `set -x`.
+            DEBUG: "${DEBUG:-0}"
+            TRACE: "${TRACE:-0}"
         volumes:
             - ../../contracts:/contracts
-            - ./deploy/deploy.sh:/deploy.sh:ro
+            # Whole dir, not just the one script — it sources scripts/lib.sh.
+            - ./scripts:/scripts:ro
             - addresses:/addresses
-        entrypoint: [/deploy.sh]
+        entrypoint: [/scripts/deploy-contracts.sh]
         networks: [backend]
 
     # ── backends (generic Dockerfile, /usr/local/bin/app) ──────────────
@@ -137,7 +151,7 @@ services:
             <<: *backend-env
             INGESTER_CONFIG: /etc/ingester.toml
         volumes:
-            - ./deploy/ingester.toml:/etc/ingester.toml:ro
+            - ./config/${STACK_ENV:-dev}/ingester.toml:/etc/ingester.toml:ro
             - addresses:/addresses:ro
 
     fmd-indexer:
@@ -160,7 +174,7 @@ services:
             <<: *backend-env
             EXPLORER_INDEXER_CONFIG: /etc/explorer-indexer.toml
         volumes:
-            - ./deploy/explorer-indexer.toml:/etc/explorer-indexer.toml:ro
+            - ./config/${STACK_ENV:-dev}/explorer-indexer.toml:/etc/explorer-indexer.toml:ro
             - addresses:/addresses:ro
 
     fmd-webserver:
@@ -226,7 +240,7 @@ services:
             RELAYER_CHAIN_42161_SIGNER_KEY: "${RELAYER_CHAIN_42161_SIGNER_KEY:-}"
             RELAYER_CHAIN_31337_SIGNER_KEY: "${RELAYER_CHAIN_31337_SIGNER_KEY:-}"
         volumes:
-            - ./deploy/relayer.toml:/etc/relayer.toml:ro
+            - ./config/${STACK_ENV:-dev}/relayer.toml:/etc/relayer.toml:ro
             - ./circuits:/circuits:ro
             - addresses:/addresses:ro
         ports: ["3003:3003"]
@@ -234,10 +248,11 @@ services:
             <<: *tcp-healthcheck
             test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3003' >/dev/null 2>&1"]
 
-    # ── metaquoter (DB-less; talks to external RPCs only) ──────────────
+    # ── metaquoter (DB-less; talks to RPCs only) ───────────────────────
     # Sources /addresses/addresses.env at startup like the other backends so
     # `METAQUOTER_CHAIN_31337_{RPC_URL,UNIV3_QUOTER,UNIV3_ADAPTER}` written
-    # by the deploy one-shot overlays the placeholder anvil chain block.
+    # by the deploy one-shot overlays the placeholder anvil chain block in
+    # config/dev/metaquoter.toml.
     metaquoter:
         restart: unless-stopped
         profiles: *profiles-mq
@@ -250,7 +265,7 @@ services:
             METAQUOTER_CONFIG: /etc/metaquoter.toml
         entrypoint: *addresses-entrypoint
         volumes:
-            - ./deploy/metaquoter.toml:/etc/metaquoter.toml:ro
+            - ./config/${STACK_ENV:-dev}/metaquoter.toml:/etc/metaquoter.toml:ro
             - addresses:/addresses:ro
         ports: ["8081:8081"]
         networks: [backend]

@@ -45,6 +45,18 @@ pub async fn id_for_token(st: &AppState, token: &TokenHash) -> AppResult<i64> {
         .ok_or_else(not_found)
 }
 
+/// Internal id plus the backfill watermark behind a capability token.
+///
+/// `/v1/matches` needs both: the id to select rows, the watermark so the
+/// client knows how far its resume cursor may safely advance. See
+/// `MatchesPage`.
+pub async fn cursor_state_for_token(st: &AppState, token: &TokenHash) -> AppResult<(i64, i64)> {
+    subscriptions::find_by_token(&st.pool, token)
+        .await?
+        .map(|row| (row.id, row.backfilled_through_note_id))
+        .ok_or_else(not_found)
+}
+
 /// Total note count, memoised for the cache TTL. See `AppCache::note_count`
 /// for why this must not hit the database per request.
 async fn note_count(st: &AppState) -> AppResult<i64> {

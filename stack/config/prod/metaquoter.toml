@@ -1,5 +1,7 @@
-# MetaQuoter config. Mounted at /etc/metaquoter.toml in the container.
-# Override per-deployment via env: METAQUOTER_CHAIN_<id>_RPC_URL etc.
+# MetaQuoter — PROD template. Selected with STACK_ENV=prod; config/dev/ is the
+# default. Override per-deployment via METAQUOTER_CHAIN_<id>_{RPC_URL,
+# UNIV3_QUOTER,UNIV3_ADAPTER,MASP_FEE_BPS} — those only apply to chains
+# declared below.
 
 listen_addr = "0.0.0.0:8081"
 race_deadline_ms = 1500

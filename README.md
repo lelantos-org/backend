@@ -229,9 +229,42 @@ just up               # everything (profile=all)
 just up-profile fmd   # single profile: db | anvil | ingester | fmd | explorer | relayer | metaquoter | risk
 just logs <service>   # tail one service
 just down             # stop + wipe volumes
+just --list           # everything else
 ```
 
-The relayer needs circuit artifacts; `just up` fetches them automatically (`just fetch-circuits` to run manually). Service configs live in `stack/deploy/*.toml`.
+The relayer needs circuit artifacts; `just up` fetches them automatically (`just fetch-circuits` to run manually).
+
+### Layout
+
+```
+stack/
+  config/dev/     service TOMLs for the local anvil stack   (mounted by default)
+  config/prod/    deployment templates, real chains         (STACK_ENV=prod)
+  scripts/        deploy-contracts.sh, fetch-circuits.sh, lib.sh
+  circuits/       downloaded proving artifacts (gitignored)
+```
+
+`STACK_ENV` picks which `config/<env>/` directory the services mount, defaulting to `dev`:
+
+```sh
+just up                    # config/dev/  — anvil, chain 31337
+STACK_ENV=prod just up      # config/prod/ — mainnet templates
+```
+
+The dev configs declare a chain `31337` block whose addresses are placeholders. The `deploy` one-shot deploys the contracts to anvil and writes `addresses.env`, which every backend sources at startup to overlay the real addresses. That overlay (`apply_env_overlay`) only rewrites chains **already declared** in the TOML — removing the `31337` block silently discards the deploy output rather than erroring.
+
+### Debugging
+
+```sh
+just env               # resolved PROFILE / STACK_ENV / active config dir
+just check             # validate compose (both envs), scripts and every TOML
+just addresses         # dump addresses.env written by the deploy one-shot
+just deploy-logs       # contract addresses, funding, and errors from `deploy`
+just show-config <svc> # the TOML a running service actually mounted
+DEBUG=1 just up        # verbose script output (TRACE=1 also enables `set -x`)
+```
+
+`scripts/deploy-contracts.sh` keeps its full forge output in the container at `/tmp/forge.log` and the parsed address table at `/tmp/addresses.parsed`. Its paths are env-overridable (`CONTRACTS_DIR`, `WORK_DIR`, `OUT_FILE`, `CHAIN_ID`), so it can also be run outside the container against any RPC.
 
 ## License
 

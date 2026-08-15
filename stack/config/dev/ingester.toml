@@ -1,0 +1,24 @@
+# Ingester — DEV (local anvil stack). Mounted at /etc/ingester.toml.
+#
+# Active by default; STACK_ENV=prod selects config/prod/ingester.toml instead.
+#
+# `apply_env_overlay` only rewrites chains that ALREADY EXIST here, so this
+# 31337 block is what makes the INGESTER_CHAIN_31337_* vars written by
+# scripts/deploy-contracts.sh take effect. Delete it and the deploy output is
+# silently discarded.
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+
+[[chains]]
+chain_id = 31337
+# Overridden by INGESTER_CHAIN_31337_RPC_URL.
+rpc_url = "http://anvil:8545"
+# Overridden by INGESTER_CHAIN_31337_POOL_ADDRESS (the deployed MASP).
+pool_address = "0x0000000000000000000000000000000000000000"
+start_block = 0
+# Single-node anvil never reorgs, so index straight up to the tip.
+reorg_depth = 0
+block_poll_ms = 500
+backfill_threshold = 50
+backfill_concurrency = 2
+chunk_blocks = 1000

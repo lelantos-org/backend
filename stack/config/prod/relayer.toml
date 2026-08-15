@@ -1,5 +1,10 @@
-# Relayer config. Mounted at /etc/relayer.toml in the container.
-# Override secrets via env: RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,SIGNER_KEY}.
+# Relayer — PROD template. Selected with STACK_ENV=prod; config/dev/ is the
+# default. Override secrets via env: RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,
+# SIGNER_KEY} — those only apply to chains declared below.
+#
+# REQUIRED: the placeholder signer_key_hex below is all zeroes, which fails
+# secp256k1 validation in Submitter::new and aborts startup. This config does
+# not boot unless RELAYER_CHAIN_42161_SIGNER_KEY is set to a real key.
 
 database_url = "postgres://postgres:postgres@postgres:5432/postgres"
 listen_addr = "0.0.0.0:3003"

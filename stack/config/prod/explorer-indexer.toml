@@ -1,0 +1,14 @@
+# Explorer indexer — PROD template.
+# Selected with STACK_ENV=prod. Point database_url at the real cluster.
+#
+# The explorer indexer is chain-agnostic: it consumes rows the ingester has
+# already written, so it has no [[chains]] block and no RPC of its own.
+# Fields below are the complete set (see ExplorerIndexerConfig).
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+
+# Poll interval for new raw events.
+tick_ms = 1000
+
+# Max raw events consumed per tick.
+batch = 500

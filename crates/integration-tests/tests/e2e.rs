@@ -440,14 +440,19 @@ async fn spawn_fmd_webserver(pool: &database::DbPool) -> String {
     format!("http://{addr}")
 }
 
-/// Curve coordinates ship as `0x`-prefixed hex, not decimal.
+/// The chunk feed serves one pre-hashed leaf per entry, as `0x`-prefixed hex.
 ///
-/// The prefix is load-bearing, not cosmetic. The SDK decodes these with a
-/// helper that accepts decimal *or* `0x`-hex, so a bare-hex value whose digits
-/// all happen to be decimal would be parsed as a completely different number,
-/// silently. Serving the prefix keeps that helper unambiguous.
+/// Two properties, both load-bearing. The prefix is not cosmetic: the SDK
+/// decodes field elements with a helper that accepts decimal *or* `0x`-hex, so
+/// a bare-hex value whose digits all happen to be decimal would parse as a
+/// completely different number, silently.
+///
+/// And the raw inputs must be gone. `cm`/`cv_dep` existed only for clients to
+/// hash into the leaf themselves; serving them alongside `leafHash` would be
+/// three field elements where one does, tripling the largest feed in a cold
+/// sync for data nothing reads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn commitment_chunk_serves_prefixed_hex_coordinates() {
+async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
     use bigdecimal::BigDecimal;
     use fmd_indexer::repositories::notes::{NewNote, NotesRepo, PostgresNotesRepo};
     use std::str::FromStr;
@@ -496,16 +501,16 @@ async fn commitment_chunk_serves_prefixed_hex_coordinates() {
         .unwrap();
 
     let entry = &body["entries"][0];
-    assert_eq!(
-        entry["cvDepX"].as_str().unwrap(),
-        "0x0000000000000000000000000000000000000000000000000000000012345678",
-        "must be 0x-prefixed and left-padded to 32 bytes"
+    let leaf = entry["leafHash"].as_str().expect("leafHash is served");
+    assert!(leaf.starts_with("0x"), "must be 0x-prefixed: {leaf}");
+    assert_eq!(leaf.len(), 66, "0x + 64 hex chars, left-padded: {leaf}");
+    assert!(
+        leaf[2..].chars().all(|c| c.is_ascii_hexdigit()),
+        "must be hex: {leaf}"
     );
-    assert_eq!(
-        entry["cvDepY"].as_str().unwrap(),
-        "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000",
-        "full-width element keeps all 64 hex chars"
-    );
-    // cm keeps its existing bare-hex form; it is decoded by a hex-only helper.
-    assert_eq!(entry["cmHex"].as_str().unwrap(), hex::encode([0xbb; 32]));
+
+    // The inputs the client used to hash itself are no longer on the wire.
+    for gone in ["cmHex", "cvDepX", "cvDepY"] {
+        assert!(entry.get(gone).is_none(), "{gone} should no longer be served");
+    }
 }

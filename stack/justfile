@@ -2,8 +2,20 @@ set shell := ["bash", "-ceuo", "pipefail"]
 
 export FOUNDRY_DISABLE_NIGHTLY_WARNING := "1"
 
+# Compose profile to act on. Override: `just PROFILE=fmd up`.
 PROFILE := "all"
-CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.6.4")
+
+# Which config/<env>/ directory the services mount their TOMLs from.
+# `dev` = anvil/31337 placeholders filled in by the deploy one-shot.
+# `prod` = mainnet templates; expects real signer keys in the environment.
+export STACK_ENV := env_var_or_default("STACK_ENV", "dev")
+
+# DEBUG=1 adds verbose detail to the stack scripts (host + deploy container);
+# TRACE=1 additionally turns on `set -x`.
+export DEBUG := env_var_or_default("DEBUG", "0")
+export TRACE := env_var_or_default("TRACE", "0")
+
+CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.8.0")
 DC := "docker compose"
 
 default:
@@ -11,8 +23,10 @@ default:
 
 # ── circuits ────────────────────────────────────────────────────────────
 
-# Fetch tree_update_batch artifacts from @lelantos-org/circuits GH release
-# into ./circuits/, mounted into the relayer container at /circuits:ro.
+# Artifacts land in ./circuits/ and are mounted into the relayer at
+# /circuits:ro. Cached by tag via ./circuits/.version.
+
+# Fetch tree_update_batch circuit artifacts from the circuits GH release.
 fetch-circuits:
     CIRCUITS_VERSION={{CIRCUITS_VERSION}} ./scripts/fetch-circuits.sh
 
@@ -51,11 +65,32 @@ stop:
 restart SVC:
     {{DC}} restart {{SVC}}
 
-# Re-run forge deploy against the running anvil (new nonce → new addresses).
+# A running container keeps the environment it started with, so the backends
+# must be restarted to pick up the new addresses.env.
+
+# Re-run the forge deploy against the running anvil (new nonce → new addresses).
 redeploy:
     {{DC}} --profile {{PROFILE}} up --force-recreate --no-deps deploy
+    @running="$({{DC}} --profile {{PROFILE}} ps --services --status running \
+        | grep -Ex 'ingester|relayer|metaquoter' | tr '\n' ' ')"; \
+    if [ -n "$running" ]; then \
+        echo "restarting to re-source addresses.env: $running"; \
+        {{DC}} restart $running; \
+    else \
+        echo "no address-consuming backends running"; \
+    fi
 
 # ── inspection ──────────────────────────────────────────────────────────
+
+# Resolved settings + which config dir is active.
+env:
+    @echo "PROFILE={{PROFILE}} STACK_ENV={{STACK_ENV}} DEBUG={{DEBUG}} TRACE={{TRACE}}"
+    @echo "configs mounted from ./config/{{STACK_ENV}}/:"
+    @ls -1 ./config/{{STACK_ENV}}/
+
+# Fully resolved compose config (anchors expanded, vars interpolated).
+config:
+    {{DC}} --profile {{PROFILE}} config
 
 # List services + status for the active profile.
 ps:
@@ -69,6 +104,17 @@ logs SVC:
 logs-all:
     {{DC}} --profile {{PROFILE}} logs -f
 
+# Output of the last deploy one-shot (contract addresses, funding, errors).
+deploy-logs:
+    {{DC}} logs deploy
+
+# This is what every backend sources at startup — check here first when a
+# service behaves as if a contract address were missing.
+
+# Dump addresses.env as written by the deploy one-shot.
+addresses:
+    {{DC}} run --rm --no-deps --entrypoint cat deploy /addresses/addresses.env
+
 # psql shell into the running postgres.
 db-shell:
     {{DC}} exec postgres psql -U postgres -d postgres
@@ -76,3 +122,24 @@ db-shell:
 # Shell into a service container.
 sh SVC:
     {{DC}} exec {{SVC}} /bin/sh
+
+# Effective TOML a service actually mounted (post STACK_ENV selection).
+show-config SVC:
+    {{DC}} exec {{SVC}} sh -c 'cat /etc/{{SVC}}.toml'
+
+# ── checks ──────────────────────────────────────────────────────────────
+
+# Validate compose + shell scripts + every config TOML, for both envs.
+check:
+    @echo "== compose (STACK_ENV=dev)"
+    STACK_ENV=dev {{DC}} --profile all config -q
+    @echo "== compose (STACK_ENV=prod)"
+    STACK_ENV=prod {{DC}} --profile all config -q
+    @echo "== shell scripts"
+    bash -n ./scripts/fetch-circuits.sh
+    sh -n ./scripts/deploy-contracts.sh
+    @echo "== config TOMLs"
+    @for f in ./config/*/*.toml; do \
+        python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$f" \
+            && echo "  ok $f" || exit 1; \
+    done

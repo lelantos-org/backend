@@ -27,6 +27,23 @@ pub fn bigdec_to_field(v: &bigdecimal::BigDecimal) -> AppResult<Field> {
     Ok(f)
 }
 
+/// Big-endian 32-byte field element from a `BYTEA` column, left-padded.
+///
+/// Postgres does not pad `BYTEA`, so a commitment with leading zero bytes
+/// comes back short. Widening on the left preserves the value; taking the
+/// bytes as-is would shift it.
+pub fn bytes_to_field(v: &[u8]) -> AppResult<Field> {
+    if v.len() > 32 {
+        return Err(AppError::Internal(format!(
+            "field element > 32 bytes: {} bytes",
+            v.len()
+        )));
+    }
+    let mut f = [0u8; 32];
+    f[32 - v.len()..].copy_from_slice(v);
+    Ok(f)
+}
+
 /// Fixed-width `0x` + 64 hex chars, zero-padded on the left.
 pub fn field_to_hex(f: &Field) -> String {
     format!("0x{}", hex::encode(f))
@@ -82,6 +99,21 @@ mod tests {
             &f,
         ));
         assert_eq!(back, v);
+    }
+
+    #[test]
+    fn left_pads_a_short_bytea() {
+        // Postgres returns BYTEA unpadded, so a commitment with leading zeros
+        // arrives short. Padding on the right would multiply it by 2^8n.
+        assert_eq!(bytes_to_field(&[1, 2]).unwrap()[30..], [1, 2]);
+        assert_eq!(bytes_to_field(&[1, 2]).unwrap()[..30], [0u8; 30]);
+        assert_eq!(bytes_to_field(&[]).unwrap(), [0u8; 32]);
+        assert_eq!(bytes_to_field(&[7u8; 32]).unwrap(), [7u8; 32]);
+    }
+
+    #[test]
+    fn rejects_a_bytea_wider_than_a_field_element() {
+        assert!(bytes_to_field(&[0u8; 33]).is_err());
     }
 
     #[test]

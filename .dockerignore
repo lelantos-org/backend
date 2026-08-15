@@ -1,4 +1,7 @@
 target/
+# ~200MB of circuit artifacts (zkey/r1cs/wasm). Never baked into an image —
+# the relayer mounts them at runtime from stack/circuits/ → /circuits:ro.
+stack/circuits/
 .git/
 .github/
 .claude/
