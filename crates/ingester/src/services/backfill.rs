@@ -60,8 +60,8 @@ impl BackfillService {
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
-            let timestamps = self.rpc.fetch_block_timestamps(&block_numbers).await?;
-            let rows = logs_to_rows(chain_id, logs, &timestamps);
+            let block_meta = self.rpc.fetch_block_meta(&block_numbers).await?;
+            let rows = logs_to_rows(chain_id, logs, &block_meta);
             self.ingest.commit_batch(chain_id, &rows, ce as i64).await?;
             info!(chain_id, cs, ce, inserted = rows.len(), "backfill chunk");
         }

@@ -17,7 +17,7 @@ use chain_types::abi::NotePayload;
 use database::advisory::{ChainLock, NS_INGESTER, chain_key};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-use ingester::adapters::rpc::{ChainRpc, DynRpc};
+use ingester::adapters::rpc::{BlockMeta, ChainRpc, DynRpc};
 use ingester::app::config::ChainConfig;
 use ingester::app::state::WorkerDeps;
 use ingester::domain::error::IngesterError;
@@ -146,15 +146,23 @@ impl ChainRpc for MockRpc {
         }
         Ok(out)
     }
-    async fn fetch_block_timestamps(
+    async fn fetch_block_meta(
         &self,
         blocks: &[u64],
-    ) -> Result<HashMap<u64, u64>, IngesterError> {
+    ) -> Result<HashMap<u64, BlockMeta>, IngesterError> {
         let s = self.state.lock().unwrap();
         let mut out = HashMap::new();
         for &b in blocks {
             if let Some((_, _, ts, _)) = s.blocks.iter().find(|(n, _, _, _)| *n == b) {
-                out.insert(b, *ts);
+                // Synthetic chain behaves like Ethereum: block.number is the
+                // block's own height.
+                out.insert(
+                    b,
+                    BlockMeta {
+                        timestamp: *ts,
+                        evm_block_number: b,
+                    },
+                );
             }
         }
         Ok(out)

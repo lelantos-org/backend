@@ -10,6 +10,9 @@ pub struct RawEventRow {
     pub id: i64,
     pub chain_id: i64,
     pub block_number: i64,
+    /// Solidity's `block.number` for this block; NULL for rows ingested before
+    /// the column existed. Differs from `block_number` only on Arbitrum.
+    pub evm_block_number: Option<i64>,
     pub block_hash: Vec<u8>,
     pub block_ts: i64,
     pub tx_hash: Vec<u8>,

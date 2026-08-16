@@ -5,6 +5,7 @@ diesel::table! {
         id -> Int8,
         chain_id -> Int8,
         block_number -> Int8,
+        evm_block_number -> Nullable<Int8>,
         block_hash -> Bytea,
         block_ts -> Int8,
         tx_hash -> Bytea,

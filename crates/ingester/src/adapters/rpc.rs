@@ -1,7 +1,7 @@
 use crate::domain::error::{IngesterError, RpcError};
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::eth::{BlockNumberOrTag, Filter, Log};
+use alloy::rpc::types::eth::{Filter, Log};
 use alloy::transports::http::{Client, Http};
 use async_trait::async_trait;
 use chain_types::decode::known_signatures;
@@ -18,10 +18,24 @@ pub trait ChainRpc: Send + Sync {
         from: u64,
         to: u64,
     ) -> Result<Vec<Log>, IngesterError>;
-    async fn fetch_block_timestamps(
+    async fn fetch_block_meta(
         &self,
         blocks: &[u64],
-    ) -> Result<HashMap<u64, u64>, IngesterError>;
+    ) -> Result<HashMap<u64, BlockMeta>, IngesterError>;
+}
+
+/// Per-block facts the ingester needs beyond the log itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockMeta {
+    pub timestamp: u64,
+    /// What Solidity's `block.number` returns inside this block.
+    ///
+    /// Equal to the block's own height on Ethereum and OP-stack chains. On
+    /// Arbitrum it is the *L1* height instead, which is what MASP hashes into
+    /// the deposit digest — replaying the L2 height there reverts
+    /// `DigestMismatch`. Taken from the block's non-standard `l1BlockNumber`
+    /// field when the node reports one.
+    pub evm_block_number: u64,
 }
 
 pub type DynRpc = Arc<dyn ChainRpc>;
@@ -81,31 +95,49 @@ impl ChainRpc for HttpRpc {
             .map_err(|e| IngesterError::from(classify(e)))
     }
 
-    async fn fetch_block_timestamps(
+    async fn fetch_block_meta(
         &self,
         block_numbers: &[u64],
-    ) -> Result<HashMap<u64, u64>, IngesterError> {
+    ) -> Result<HashMap<u64, BlockMeta>, IngesterError> {
         use futures::stream::{FuturesUnordered, StreamExt};
         let mut futs = FuturesUnordered::new();
         for &n in block_numbers {
             let p = self.inner.clone();
             futs.push(async move {
-                let blk = p
-                    .get_block_by_number(BlockNumberOrTag::Number(n), false)
+                // Raw request rather than the typed getter: `l1BlockNumber` is
+                // an Arbitrum extension that alloy's `Header` drops.
+                let blk: Option<serde_json::Value> = p
+                    .raw_request("eth_getBlockByNumber".into(), (format!("0x{n:x}"), false))
                     .await
                     .map_err(|e| IngesterError::from(classify(e)))?;
-                let ts = blk
-                    .ok_or(IngesterError::Rpc(RpcError::BlockMissing(n)))?
-                    .header
-                    .timestamp;
-                Ok::<(u64, u64), IngesterError>((n, ts))
+                let blk = blk.ok_or(IngesterError::Rpc(RpcError::BlockMissing(n)))?;
+
+                let timestamp = hex_u64(&blk, "timestamp")
+                    .ok_or(IngesterError::Rpc(RpcError::BlockMissing(n)))?;
+                // Absent on every non-Arbitrum chain, where the block's own
+                // height is what the EVM reports.
+                let evm_block_number = hex_u64(&blk, "l1BlockNumber").unwrap_or(n);
+
+                Ok::<(u64, BlockMeta), IngesterError>((
+                    n,
+                    BlockMeta {
+                        timestamp,
+                        evm_block_number,
+                    },
+                ))
             });
         }
         let mut out = HashMap::new();
         while let Some(r) = futs.next().await {
-            let (n, ts) = r?;
-            out.insert(n, ts);
+            let (n, meta) = r?;
+            out.insert(n, meta);
         }
         Ok(out)
     }
+}
+
+/// Read a `0x`-prefixed quantity from a JSON block object.
+fn hex_u64(v: &serde_json::Value, key: &str) -> Option<u64> {
+    let s = v.get(key)?.as_str()?;
+    u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()
 }

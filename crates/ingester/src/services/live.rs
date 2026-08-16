@@ -72,8 +72,8 @@ impl LiveService for LiveServiceImpl {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        let timestamps = self.rpc.fetch_block_timestamps(&block_numbers).await?;
-        let rows = logs_to_rows(chain_id, logs, &timestamps);
+        let block_meta = self.rpc.fetch_block_meta(&block_numbers).await?;
+        let rows = logs_to_rows(chain_id, logs, &block_meta);
 
         if let Some(rewind_to) = self.reorg.detect(chain_id, &rows).await? {
             warn!(chain_id, rewind_to, "reorg detected");

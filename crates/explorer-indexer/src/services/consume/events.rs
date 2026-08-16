@@ -91,7 +91,11 @@ pub async fn deposit_escrowed(
             cv_dep_y: u256_to_bigdecimal(cv_dep_y),
             rcv: u256_to_bigdecimal(rcv),
             aux,
-            submitted_at_block: row.block_number,
+            // The digest the contract stored hashes `uint32(block.number)`,
+            // which on Arbitrum is the L1 height rather than `row.block_number`.
+            // Rows ingested before `evm_block_number` existed fall back — correct
+            // on every chain except Arbitrum, whose rows need an explicit repair.
+            submitted_at_block: row.evm_block_number.unwrap_or(row.block_number),
             tx_hash: row.tx_hash.clone(),
             block_ts: row.block_ts,
         },

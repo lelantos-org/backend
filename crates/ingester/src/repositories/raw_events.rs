@@ -29,6 +29,7 @@ pub trait RawEventRepo: Send + Sync {
 struct RawEventRow<'a> {
     chain_id: i64,
     block_number: i64,
+    evm_block_number: Option<i64>,
     block_hash: &'a [u8],
     block_ts: i64,
     tx_hash: &'a [u8],
@@ -58,6 +59,7 @@ impl RawEventRepo for PostgresRawEventRepo {
             .iter()
             .map(|r| RawEventRow {
                 chain_id: r.chain_id,
+                evm_block_number: Some(r.evm_block_number),
                 block_number: r.block_number,
                 block_hash: &r.block_hash,
                 block_ts: r.block_ts,
