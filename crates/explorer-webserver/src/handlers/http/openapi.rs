@@ -1,4 +1,6 @@
-use crate::domain::responses::{AssetOut, ChainFlowOut, CountPoint, FlowPoint, TreeAdvanceOut};
+use crate::domain::responses::{
+    AssetOut, ChainFlowOut, CountPoint, FlowPoint, KindCounts, TreeAdvanceOut, TxKind, TxOut,
+};
 use crate::handlers::http as handlers;
 use crate::handlers::http::health::HealthOut;
 use utoipa::OpenApi;
@@ -13,6 +15,8 @@ use utoipa::OpenApi;
         handlers::tree_advances::tx_counts,
         handlers::tree_advances::chain_flows_24h,
         handlers::asset_flows::asset_flows,
+        handlers::transactions::recent_transactions,
+        handlers::transactions::tx_kinds,
     ),
     components(schemas(
         AssetOut,
@@ -20,13 +24,17 @@ use utoipa::OpenApi;
         CountPoint,
         ChainFlowOut,
         FlowPoint,
-        HealthOut
+        HealthOut,
+        TxOut,
+        TxKind,
+        KindCounts
     )),
     tags(
         (name = "health", description = "Health and build info"),
         (name = "assets", description = "Assets"),
         (name = "tree-advances", description = "Tree advances"),
         (name = "asset-flows", description = "Per-token deposit/withdraw flows"),
+        (name = "transactions", description = "Classified transactions: deposit / pending / transfer / withdraw"),
     )
 )]
 pub struct ApiDoc;

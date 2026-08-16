@@ -45,11 +45,19 @@ pub async fn insert(pool: &DbPool, row: NewDepositEscrowed) -> Result<usize, Exp
         .await?)
 }
 
+/// Record the flush, including *which transaction* did it.
+///
+/// The tx hash is what separates a `flushBatch` from a `transfer` downstream:
+/// both advance the tree and move no tokens, so without it a flush is
+/// indistinguishable from an internal transfer. Block number alone is not
+/// enough — one block can hold both.
 pub async fn mark_flushed(
     pool: &DbPool,
     chain_id: i64,
     deposit_id: BigDecimal,
     flushed_at_block: i64,
+    flushed_at_ts: i64,
+    flushed_tx_hash: Vec<u8>,
 ) -> Result<usize, ExplorerIndexerError> {
     let mut conn = pool
         .get()
@@ -60,7 +68,11 @@ pub async fn mark_flushed(
             .filter(deposit_escrowed_events::chain_id.eq(chain_id))
             .filter(deposit_escrowed_events::deposit_id.eq(deposit_id)),
     )
-    .set(deposit_escrowed_events::flushed_at_block.eq(Some(flushed_at_block)))
+    .set((
+        deposit_escrowed_events::flushed_at_block.eq(Some(flushed_at_block)),
+        deposit_escrowed_events::flushed_at_ts.eq(Some(flushed_at_ts)),
+        deposit_escrowed_events::flushed_tx_hash.eq(Some(flushed_tx_hash)),
+    ))
     .execute(&mut conn)
     .await?)
 }

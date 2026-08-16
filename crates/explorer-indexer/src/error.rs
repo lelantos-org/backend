@@ -8,6 +8,8 @@ pub enum ExplorerIndexerError {
     Db(String),
     #[error("query: {0}")]
     Query(#[from] diesel::result::Error),
+    #[error("rpc: {0}")]
+    Rpc(String),
 }
 
 impl From<database::CursorError> for ExplorerIndexerError {

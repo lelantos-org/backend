@@ -1,3 +1,4 @@
+use crate::adapters::PriceClient;
 use crate::app::cache::AppCache;
 use crate::app::config::ExplorerWebserverConfig;
 use database::DbPool;
@@ -8,4 +9,5 @@ pub struct AppState {
     pub pool: DbPool,
     pub cfg: Arc<ExplorerWebserverConfig>,
     pub cache: AppCache,
+    pub prices: Arc<PriceClient>,
 }

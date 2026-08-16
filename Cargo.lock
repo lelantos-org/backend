@@ -2755,6 +2755,7 @@ dependencies = [
  "futures",
  "hex",
  "moka",
+ "reqwest",
  "serde",
  "serde_json",
  "shared",

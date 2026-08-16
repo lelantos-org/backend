@@ -170,14 +170,18 @@ async fn insert_log(pool: &database::DbPool, chain_id: i64, log: &Log, kind: Eve
         .unwrap();
 }
 
+/// No chains and no metadata RPC: the decimals sweep is a no-op here, so
+/// these tests exercise event consumption alone.
 fn empty_ctx(pool: database::DbPool) -> ConsumeCtx {
     ConsumeCtx {
         pool,
         cfg: Arc::new(ExplorerIndexerConfig {
             database_url: String::new(),
+            chains: Vec::new(),
             tick_ms: 1000,
             batch: 500,
         }),
+        token_meta: Arc::new(std::collections::HashMap::new()),
     }
 }
 

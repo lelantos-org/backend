@@ -66,6 +66,41 @@ pub struct ChainCfg {
     /// Accepted fee tokens for `/v1/spend/estimate` and `/v1/swap/estimate`.
     #[serde(default)]
     pub accepted_fee_tokens: Vec<FeeTokenCfg>,
+    /// Wallet-facing description, served verbatim by `/chains`.
+    #[serde(default)]
+    pub public: ChainPublicCfg,
+}
+
+/// What a wallet needs in order to talk to this chain, and nothing the relayer
+/// itself reads.
+///
+/// It lives here because the relayer is the only service that already
+/// enumerates every chain, which makes it the natural registry to boot a
+/// wallet from: a deployment can add a chain without rebuilding any frontend.
+///
+/// Every field is optional so existing configs keep booting. A client that
+/// finds one absent falls back to its own build-time configuration, which is
+/// exactly the single-chain behaviour that predates this.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ChainPublicCfg {
+    /// Human label; also what `wallet_addEthereumChain` registers.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Browser-reachable RPC.
+    ///
+    /// Deliberately separate from `ChainCfg::rpc_url`, which is the relayer's
+    /// own endpoint and is typically cluster-internal — serving that one to a
+    /// browser would hand out an unreachable URL.
+    #[serde(default)]
+    pub rpc_url: Option<String>,
+    /// Merkle depth of the deployed pool.
+    #[serde(default)]
+    pub tree_depth: Option<u32>,
+    #[serde(default)]
+    pub permit2_address: Option<String>,
+    /// Block-explorer base, for transaction links.
+    #[serde(default)]
+    pub explorer_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

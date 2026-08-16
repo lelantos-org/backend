@@ -1,8 +1,9 @@
 use crate::adapters::calldata::MAX_L_BATCH;
 use crate::adapters::rpc::RpcEndpoint;
-use crate::app::config::RelayerConfig;
+use crate::app::config::{ChainCfg, ChainPublicCfg, RelayerConfig};
 use crate::domain::error::AppError;
 use crate::domain::error::AppResult;
+use crate::domain::responses::ChainConfigOut;
 use crate::services::deposit_mempool::DepositMempool;
 use crate::services::events::EventBroadcaster;
 use crate::services::fee_quote::{FeeQuoter, FeeToken};
@@ -37,6 +38,48 @@ pub struct AppState {
     pub pool: DbPool,
     /// Nullifier admission control. See `services::nullifier_guard`.
     pub nullifiers: Arc<NullifierGuards>,
+    /// Wallet-facing description of each chain, resolved once at boot and
+    /// served by `/chains`. Holds only what a client may see — never the
+    /// signer key or the relayer's internal RPC.
+    pub descriptors: Arc<HashMap<i64, ChainDescriptor>>,
+}
+
+/// The half of `ChainCfg` that is safe to publish.
+///
+/// Built at boot rather than read per request so the handler cannot reach the
+/// rest of the config, and so a malformed address fails startup instead of a
+/// wallet's first call.
+pub struct ChainDescriptor {
+    pub native_adapter_address: Option<String>,
+    pub swap_wrapper_address: Option<String>,
+    pub public: ChainPublicCfg,
+}
+
+impl ChainDescriptor {
+    fn from_cfg(c: &ChainCfg) -> Self {
+        Self {
+            native_adapter_address: c.native_adapter_address.clone(),
+            swap_wrapper_address: c.swap_wrapper_address.clone(),
+            public: c.public.clone(),
+        }
+    }
+}
+
+/// Owned by the descriptor rather than assembled in the handler: it is the
+/// only place that knows which parts of a `ChainCfg` may be published, so
+/// adding a field to the config cannot leak into `/chains` by accident.
+impl From<&ChainDescriptor> for ChainConfigOut {
+    fn from(d: &ChainDescriptor) -> Self {
+        Self {
+            native_adapter_address: d.native_adapter_address.clone(),
+            swap_wrapper_address: d.swap_wrapper_address.clone(),
+            chain_name: d.public.name.clone(),
+            rpc_url: d.public.rpc_url.clone(),
+            tree_depth: d.public.tree_depth,
+            permit2_address: d.public.permit2_address.clone(),
+            explorer_url: d.public.explorer_url.clone(),
+        }
+    }
 }
 
 pub async fn build_state(
@@ -52,6 +95,11 @@ pub async fn build_state(
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
     let nullifiers = Arc::new(NullifierGuards::new(cfg.chains.iter().map(|c| c.chain_id)));
+    let descriptors: HashMap<i64, ChainDescriptor> = cfg
+        .chains
+        .iter()
+        .map(|c| (c.chain_id, ChainDescriptor::from_cfg(c)))
+        .collect();
     for c in &cfg.chains {
         let rpc = RpcEndpoint::new(&c.rpc_url)
             .map_err(|e| AppError::Internal(format!("rpc endpoint chain {}: {}", c.chain_id, e)))?;
@@ -231,6 +279,7 @@ pub async fn build_state(
         events,
         pool,
         nullifiers,
+        descriptors: Arc::new(descriptors),
     })
 }
 
@@ -261,4 +310,52 @@ async fn validate_fee_token_pairs(
         "fee token oracle pairs validated"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChainConfigOut, ChainDescriptor, ChainPublicCfg};
+
+    /// The conversion hand-copies seven fields, which is exactly the shape of
+    /// change where one gets dropped and a wallet silently falls back to its
+    /// own default instead of the deployment's value.
+    #[test]
+    fn test_chain_config_out_carries_every_described_field() {
+        let d = ChainDescriptor {
+            native_adapter_address: Some("0xNATIVE".to_string()),
+            swap_wrapper_address: Some("0xSWAP".to_string()),
+            public: ChainPublicCfg {
+                name: Some("anvil".to_string()),
+                rpc_url: Some("http://localhost:8545".to_string()),
+                tree_depth: Some(10),
+                permit2_address: Some("0xPERMIT2".to_string()),
+                explorer_url: Some("http://explorer".to_string()),
+            },
+        };
+
+        let out = ChainConfigOut::from(&d);
+
+        assert_eq!(out.native_adapter_address.as_deref(), Some("0xNATIVE"));
+        assert_eq!(out.swap_wrapper_address.as_deref(), Some("0xSWAP"));
+        assert_eq!(out.chain_name.as_deref(), Some("anvil"));
+        assert_eq!(out.rpc_url.as_deref(), Some("http://localhost:8545"));
+        assert_eq!(out.tree_depth, Some(10));
+        assert_eq!(out.permit2_address.as_deref(), Some("0xPERMIT2"));
+        assert_eq!(out.explorer_url.as_deref(), Some("http://explorer"));
+    }
+
+    /// An operator who has not filled the block in yields an empty record, not
+    /// a partly-invented one.
+    #[test]
+    fn test_chain_config_out_is_empty_when_nothing_is_described() {
+        let out = ChainConfigOut::from(&ChainDescriptor {
+            native_adapter_address: None,
+            swap_wrapper_address: None,
+            public: ChainPublicCfg::default(),
+        });
+
+        assert_eq!(out.chain_name, None);
+        assert_eq!(out.rpc_url, None);
+        assert_eq!(out.tree_depth, None);
+    }
 }

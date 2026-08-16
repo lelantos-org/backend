@@ -8,10 +8,12 @@ mod tick;
 
 pub use tick::{ConsumeCtx, tick_chain};
 
+use crate::adapters::DynTokenMetadata;
 use crate::config::ExplorerIndexerConfig;
 use crate::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[async_trait]
@@ -23,17 +25,27 @@ pub trait ConsumeService: Send + Sync {
 pub struct ConsumeServiceImpl {
     pub pool: DbPool,
     pub cfg: Arc<ExplorerIndexerConfig>,
+    pub token_meta: Arc<HashMap<i64, DynTokenMetadata>>,
 }
 
 impl ConsumeServiceImpl {
-    pub fn new(pool: DbPool, cfg: Arc<ExplorerIndexerConfig>) -> Self {
-        Self { pool, cfg }
+    pub fn new(
+        pool: DbPool,
+        cfg: Arc<ExplorerIndexerConfig>,
+        token_meta: Arc<HashMap<i64, DynTokenMetadata>>,
+    ) -> Self {
+        Self {
+            pool,
+            cfg,
+            token_meta,
+        }
     }
 
     fn ctx(&self) -> ConsumeCtx {
         ConsumeCtx {
             pool: self.pool.clone(),
             cfg: self.cfg.clone(),
+            token_meta: self.token_meta.clone(),
         }
     }
 }

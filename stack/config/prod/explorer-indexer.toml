@@ -1,8 +1,14 @@
 # Explorer indexer — PROD template.
 # Selected with STACK_ENV=prod. Point database_url at the real cluster.
 #
-# The explorer indexer is chain-agnostic: it consumes rows the ingester has
-# already written, so it has no [[chains]] block and no RPC of its own.
+# The explorer indexer consumes rows the ingester has already written, so it
+# needs no RPC to index. The [[chains]] block exists for one thing only:
+# reading ERC20 `decimals()` for registered assets. `AssetRegistered` does not
+# carry decimals, and `scale` is a circuit capacity parameter rather than a
+# decimals normalizer, so without this the explorer cannot render a token
+# amount. A chain omitted here still indexes; its assets keep
+# `decimals = NULL` and the API reports no amount for them.
+#
 # Fields below are the complete set (see ExplorerIndexerConfig).
 
 database_url = "postgres://postgres:postgres@postgres:5432/postgres"
@@ -12,3 +18,14 @@ tick_ms = 1000
 
 # Max raw events consumed per tick.
 batch = 500
+
+# Keep [[chains]] last: in TOML every bare key after a table header belongs to
+# that table, so a scalar moved below this line would silently become part of
+# the chain entry instead of the top-level config.
+#
+# One block per chain the explorer serves. `apply_env_overlay` only rewrites
+# chains that ALREADY EXIST here, so a chain with no block gets no decimals
+# regardless of what EXPLORER_INDEXER_CHAIN_<id>_RPC_URL is set to.
+# [[chains]]
+# chain_id = 1
+# rpc_url = "https://eth.example"   # or EXPLORER_INDEXER_CHAIN_1_RPC_URL

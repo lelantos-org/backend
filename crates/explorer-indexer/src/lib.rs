@@ -4,6 +4,7 @@
 //! service (`ConsumeServiceImpl`) implementing `shared::tick::TickService`.
 //! Must NOT depend on `fmd-crypto` (privacy gate).
 
+pub mod adapters;
 pub mod config;
 pub mod error;
 pub mod repositories;

@@ -104,12 +104,16 @@ async fn explorer_consume_writes_tree_advances() {
 
     let cfg = Arc::new(explorer_indexer::config::ExplorerIndexerConfig {
         database_url: String::new(),
+        chains: Vec::new(),
         tick_ms: 1000,
         batch: 500,
     });
+    // No chains and no metadata RPC: the decimals sweep is a no-op, so this
+    // covers event consumption only.
     let ctx = explorer_indexer::services::consume::ConsumeCtx {
         pool: pool.clone(),
         cfg,
+        token_meta: Arc::new(std::collections::HashMap::new()),
     };
     explorer_indexer::services::consume::tick_chain(&ctx, CHAIN_ID, 100)
         .await
@@ -516,4 +520,170 @@ async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
             "{gone} should no longer be served"
         );
     }
+}
+
+/// A subscription's match feed must be scoped to the chain the caller asks
+/// for.
+///
+/// `subscriptions` has no `chain_id` — `detection_key` is globally UNIQUE — so
+/// one subscription spans every chain a deployment serves, and `matches` tags
+/// each row instead. Because the detection key is chain-independent, a note
+/// from the wrong chain still trial-decrypts against the caller's `ivk`: the
+/// wallet stores it, inflates its balance, and cannot spend it, since the
+/// `leaf_index` points into a different Merkle tree. Nothing surfaces until a
+/// spend fails, which is why this is pinned by a test rather than left to
+/// review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn list_matches_returns_only_the_requested_chains_notes() {
+    use database::schema::{matches, notes, subscriptions};
+
+    let _guard = serial_lock().await;
+    let pool = boot_pool().await;
+
+    const CHAIN_A: i64 = 31337;
+    const CHAIN_B: i64 = 8453;
+
+    let mut conn = pool.get().await.unwrap();
+
+    let sub_id: i64 = diesel::insert_into(subscriptions::table)
+        .values((
+            subscriptions::detection_key.eq(vec![0x11u8; 32]),
+            subscriptions::gamma.eq(1i32),
+        ))
+        .returning(subscriptions::id)
+        .get_result(&mut conn)
+        .await
+        .expect("insert subscription");
+
+    // One note per chain, both matched to the same subscription.
+    let mut note_ids = Vec::new();
+    for (i, chain) in [CHAIN_A, CHAIN_B].iter().enumerate() {
+        let note_id: i64 = diesel::insert_into(notes::table)
+            .values((
+                notes::chain_id.eq(chain),
+                notes::block_number.eq(100i64 + i as i64),
+                notes::tx_hash.eq(vec![i as u8; 32]),
+                notes::log_index.eq(i as i32),
+                notes::cm.eq(vec![0xc0 + i as u8; 32]),
+                notes::clue_rx.eq(bigdecimal::BigDecimal::from(1)),
+                notes::clue_ry.eq(bigdecimal::BigDecimal::from(2)),
+                notes::eph_pub_x.eq(bigdecimal::BigDecimal::from(3)),
+                notes::eph_pub_y.eq(bigdecimal::BigDecimal::from(4)),
+                notes::ciphertext.eq(vec![0x00, 0x1f, 0xaa, 0xbb]),
+                notes::leaf_index.eq(i as i64),
+                notes::cv_dep_x.eq(bigdecimal::BigDecimal::from(5)),
+                notes::cv_dep_y.eq(bigdecimal::BigDecimal::from(6)),
+            ))
+            .returning(notes::id)
+            .get_result(&mut conn)
+            .await
+            .expect("insert note");
+
+        diesel::insert_into(matches::table)
+            .values((
+                matches::subscription_id.eq(sub_id),
+                matches::note_id.eq(note_id),
+                matches::chain_id.eq(chain),
+            ))
+            .execute(&mut conn)
+            .await
+            .expect("insert match");
+
+        note_ids.push(note_id);
+    }
+
+    let a =
+        fmd_webserver::repositories::matches::list_for_subscription(&pool, sub_id, CHAIN_A, 0, 100)
+            .await
+            .expect("list chain A");
+    assert_eq!(
+        a.iter().map(|m| m.chain_id).collect::<Vec<_>>(),
+        vec![CHAIN_A],
+        "chain A feed must not carry chain B's note"
+    );
+    assert_eq!(a[0].note_id, note_ids[0]);
+
+    let b =
+        fmd_webserver::repositories::matches::list_for_subscription(&pool, sub_id, CHAIN_B, 0, 100)
+            .await
+            .expect("list chain B");
+    assert_eq!(
+        b.iter().map(|m| m.chain_id).collect::<Vec<_>>(),
+        vec![CHAIN_B]
+    );
+    assert_eq!(b[0].note_id, note_ids[1]);
+}
+
+/// A partial metadata write must not clear the column it does not carry.
+///
+/// `AssetMetadata` is an `AsChangeset` whose `None` fields diesel skips, which
+/// is what lets the backfill store whichever of `decimals` / `symbol` it
+/// resolved this tick. Were `None` written as NULL instead, a token whose
+/// `symbol()` reverts — legal in ERC-20, and some tokens return `bytes32` —
+/// would erase decimals that had already been read, and the sweep would
+/// rediscover the row forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn asset_metadata_write_leaves_the_column_it_omits_alone() {
+    use database::schema::assets;
+    use explorer_indexer::repositories::assets as repo;
+
+    let _guard = serial_lock().await;
+    let pool = boot_pool().await;
+
+    const CHAIN: i64 = 31337;
+    let mut conn = pool.get().await.unwrap();
+    diesel::insert_into(assets::table)
+        .values((
+            assets::chain_id.eq(CHAIN),
+            assets::asset_id_u64.eq(1i64),
+            assets::token.eq(vec![0xaa; 20]),
+            assets::scale.eq(bigdecimal::BigDecimal::from(10_000_000_000i64)),
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("insert asset");
+
+    // Two ticks that each resolve only one column.
+    repo::set_metadata(
+        &pool,
+        CHAIN,
+        1,
+        repo::AssetMetadata {
+            decimals: Some(18),
+            symbol: None,
+        },
+    )
+    .await
+    .expect("store decimals");
+    repo::set_metadata(
+        &pool,
+        CHAIN,
+        1,
+        repo::AssetMetadata {
+            decimals: None,
+            symbol: Some("WETH".to_string()),
+        },
+    )
+    .await
+    .expect("store symbol");
+
+    let (decimals, symbol): (Option<i16>, Option<String>) = assets::table
+        .filter(assets::chain_id.eq(CHAIN))
+        .filter(assets::asset_id_u64.eq(1i64))
+        .select((assets::decimals, assets::symbol))
+        .first(&mut conn)
+        .await
+        .expect("read back");
+
+    assert_eq!(decimals, Some(18), "symbol write must not clear decimals");
+    assert_eq!(symbol.as_deref(), Some("WETH"));
+
+    // Both resolved, so the sweep must stop returning it.
+    let pending = repo::missing_metadata(&pool, CHAIN, 16)
+        .await
+        .expect("sweep");
+    assert!(
+        pending.iter().all(|p| p.asset_id_u64 != 1),
+        "a fully described asset must leave the backfill queue"
+    );
 }

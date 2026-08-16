@@ -4,6 +4,7 @@ use crate::domain::error::AppResult;
 use crate::domain::responses::MatchesPage;
 use crate::handlers::http::auth::CapabilityToken;
 use crate::services;
+use crate::services::matches::ListRequest;
 use axum::Json;
 use axum::extract::{Query, State};
 use std::sync::Arc;
@@ -30,6 +31,16 @@ pub async fn list_matches(
         services::subscriptions::cursor_state_for_token(&st, token.hash()).await?;
     let (after, limit) = dto::page(q.after, q.limit);
     Ok(Json(
-        services::matches::list(&st, subscription_id, backfilled_through, after, limit).await?,
+        services::matches::list(
+            &st,
+            ListRequest {
+                subscription_id,
+                chain_id: q.chain_id,
+                backfilled_through,
+                after,
+                limit,
+            },
+        )
+        .await?,
     ))
 }

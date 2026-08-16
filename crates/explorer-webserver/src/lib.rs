@@ -4,6 +4,7 @@
 //! assets, asset flows, tree advances. Error type from `shared::http`.
 //! Must NOT depend on `fmd-crypto` (privacy gate).
 
+pub mod adapters;
 pub mod app;
 pub mod domain;
 pub mod handlers;

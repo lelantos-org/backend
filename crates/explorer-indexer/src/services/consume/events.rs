@@ -106,7 +106,15 @@ pub async fn deposit_flushed(
     row: &RawEventRow,
     id: U256,
 ) -> Result<(), ExplorerIndexerError> {
-    deposit_events::mark_flushed(pool, chain_id, u256_to_bigdecimal(id), row.block_number).await?;
+    deposit_events::mark_flushed(
+        pool,
+        chain_id,
+        u256_to_bigdecimal(id),
+        row.block_number,
+        row.block_ts,
+        row.tx_hash.clone(),
+    )
+    .await?;
     Ok(())
 }
 

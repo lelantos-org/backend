@@ -62,33 +62,114 @@ pub async fn tx_counts(
         .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
 }
 
+const HOURS: usize = 24;
+
+/// Oldest hour bucket of the window, and the slot-0 anchor the SQL projects
+/// against. Anchored on the hour containing `now_ts` so that hour lands in
+/// slot 23: anchoring on `now_ts - 86_400` instead spans 25 distinct hours,
+/// and the newest one has nowhere to go but slot 23 alongside the hour
+/// before it.
+fn window_start(now_ts: i64) -> i64 {
+    let current_hour = now_ts.div_euclid(3600) * 3600;
+    current_hour - (HOURS as i64 - 1) * 3600
+}
+
+/// One entry per chain, hottest first. Rows outside the window are dropped,
+/// not clamped — a clamped slot adds a foreign hour's count to an edge
+/// bucket, which reads as real activity in that hour.
+fn fold_chain_flows(rows: Vec<tree_advances::ChainFlow24hRow>) -> Vec<ChainFlowOut> {
+    let mut map: BTreeMap<i64, ChainFlowOut> = BTreeMap::new();
+    for r in rows {
+        let Ok(slot) = usize::try_from(r.slot) else {
+            continue;
+        };
+        if slot >= HOURS {
+            continue;
+        }
+        let entry = map.entry(r.chain_id).or_insert_with(|| ChainFlowOut {
+            chain_id: r.chain_id,
+            inflow: 0,
+            outflow: 0,
+            hourly_in: vec![0; HOURS],
+            hourly_out: vec![0; HOURS],
+            tx_count: 0,
+        });
+        entry.hourly_in[slot] += r.count;
+        entry.tx_count += r.count;
+    }
+    let mut out: Vec<ChainFlowOut> = map.into_values().collect();
+    out.sort_by_key(|b| std::cmp::Reverse(b.tx_count));
+    out
+}
+
 pub async fn chain_flows_24h(st: &AppState, now_ts: i64) -> AppResult<Arc<Vec<ChainFlowOut>>> {
-    let since = now_ts - 86_400;
-    let hour_start = (since / 3600) * 3600;
+    let hour_start = window_start(now_ts);
     let pool = st.pool.clone();
     st.cache
         .chain_flows_24h
         .try_get_with(hour_start, async move {
             let rows = tree_advances::chain_flows_24h(&pool, hour_start).await?;
-
-            let mut map: BTreeMap<i64, ChainFlowOut> = BTreeMap::new();
-            for r in rows {
-                let entry = map.entry(r.chain_id).or_insert_with(|| ChainFlowOut {
-                    chain_id: r.chain_id,
-                    inflow: 0,
-                    outflow: 0,
-                    hourly_in: vec![0; 24],
-                    hourly_out: vec![0; 24],
-                    tx_count: 0,
-                });
-                let slot = r.slot.clamp(0, 23) as usize;
-                entry.hourly_in[slot] += r.count;
-                entry.tx_count += r.count;
-            }
-            let mut out: Vec<ChainFlowOut> = map.into_values().collect();
-            out.sort_by_key(|b| std::cmp::Reverse(b.tx_count));
-            Ok::<_, AppError>(Arc::new(out))
+            Ok::<_, AppError>(Arc::new(fold_chain_flows(rows)))
         })
         .await
         .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repositories::tree_advances::ChainFlow24hRow;
+
+    fn row(chain_id: i64, slot: i32, count: i64) -> ChainFlow24hRow {
+        ChainFlow24hRow {
+            chain_id,
+            slot,
+            count,
+        }
+    }
+
+    #[test]
+    fn window_spans_exactly_24_hours_ending_at_the_current_one() {
+        // 12:34:56 UTC on some day.
+        let now: i64 = 1_786_812_896;
+        let start = window_start(now);
+        assert_eq!(start % 3600, 0);
+        let current_hour = now.div_euclid(3600) * 3600;
+        assert_eq!((current_hour - start) / 3600, HOURS as i64 - 1);
+    }
+
+    #[test]
+    fn the_current_hour_lands_in_the_last_slot() {
+        let now: i64 = 1_786_812_896;
+        let current_hour = now.div_euclid(3600) * 3600;
+        let slot = (current_hour - window_start(now)) / 3600;
+        assert_eq!(slot, 23);
+    }
+
+    #[test]
+    fn folds_counts_into_their_own_slots() {
+        let out = fold_chain_flows(vec![row(1, 0, 5), row(1, 23, 7)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].hourly_in[0], 5);
+        assert_eq!(out[0].hourly_in[23], 7);
+        assert_eq!(out[0].tx_count, 12);
+    }
+
+    #[test]
+    fn drops_slots_outside_the_window() {
+        // A block timestamped ahead of the node clock must not inflate the
+        // newest bucket.
+        let out = fold_chain_flows(vec![row(1, 23, 7), row(1, 24, 99), row(1, -1, 99)]);
+        assert_eq!(out[0].hourly_in[23], 7);
+        assert_eq!(out[0].tx_count, 7);
+    }
+
+    #[test]
+    fn orders_chains_by_descending_tx_count() {
+        let out = fold_chain_flows(vec![row(1, 0, 1), row(2, 0, 9)]);
+        assert_eq!(
+            out.iter().map(|c| c.chain_id).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
 }

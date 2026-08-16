@@ -1,10 +1,13 @@
 use super::events;
+use crate::adapters::DynTokenMetadata;
 use crate::config::ExplorerIndexerConfig;
 use crate::error::{ExplorerIndexerError, Result};
-use crate::repositories::{asset_flows, raw_events, tree_advances};
+use crate::repositories::{asset_flows, assets, raw_events, tree_advances};
+use alloy::primitives::Address;
 use chain_types::decode::{self, DecodedEvent};
 use database::{CursorRepo, DbPool, PostgresCursorRepo, UpsertCursor};
 use shared::entities::EventKind;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -24,6 +27,74 @@ const KINDS: [i16; 6] = [
 pub struct ConsumeCtx {
     pub pool: DbPool,
     pub cfg: Arc<ExplorerIndexerConfig>,
+    /// Per-chain ERC20 metadata reader. Chains without one keep
+    /// `assets.decimals = NULL`.
+    pub token_meta: Arc<HashMap<i64, DynTokenMetadata>>,
+}
+
+/// How many assets one tick will try to resolve. The registry is small and
+/// only grows on `AssetRegistered`, so this is a throttle on retry storms
+/// when an RPC is down, not a paging mechanism.
+const METADATA_PER_TICK: i64 = 16;
+
+/// Fill in `decimals` and `symbol` for assets that do not have them yet.
+///
+/// Runs outside the event path on purpose: `AssetRegistered` carries neither,
+/// and doing the RPC reads inline would let a flaky endpoint stall event
+/// consumption or, worse, drop the values permanently. Sweeping instead means
+/// a failed read is simply retried next tick, and it repairs rows that predate
+/// these columns.
+///
+/// Each column is fetched only when absent and written only when resolved, so
+/// a token whose `symbol()` reverts still gets its decimals, and neither read
+/// can clear the other's stored value.
+async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
+    let Some(rpc) = ctx.token_meta.get(&chain_id) else {
+        return;
+    };
+    let pending = match assets::missing_metadata(&ctx.pool, chain_id, METADATA_PER_TICK).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(chain_id, "metadata backfill query failed: {}", e);
+            return;
+        }
+    };
+    for row in pending {
+        let asset_id_u64 = row.asset_id_u64;
+        let Ok(bytes) = <[u8; 20]>::try_from(row.token.as_slice()) else {
+            warn!(chain_id, asset_id_u64, "token is not a 20-byte address");
+            continue;
+        };
+        let token = Address::from(bytes);
+        let mut meta = assets::AssetMetadata::default();
+
+        if row.decimals.is_none() {
+            match rpc.decimals(token).await {
+                Ok(d) => meta.decimals = Some(i16::from(d)),
+                // Left NULL and retried next tick rather than defaulted:
+                // assuming 18 would silently misreport every amount.
+                Err(e) => warn!(chain_id, asset_id_u64, "decimals() failed: {}", e),
+            }
+        }
+        if row.symbol.is_none() {
+            match rpc.symbol(token).await {
+                Ok(s) => meta.symbol = Some(s),
+                Err(e) => warn!(chain_id, asset_id_u64, "symbol() failed: {}", e),
+            }
+        }
+
+        if meta.is_empty() {
+            continue;
+        }
+        if let Err(e) = assets::set_metadata(&ctx.pool, chain_id, asset_id_u64, meta).await {
+            warn!(
+                chain_id,
+                asset_id_u64, "storing asset metadata failed: {}", e
+            );
+        } else {
+            debug!(chain_id, asset_id_u64, "asset metadata resolved");
+        }
+    }
 }
 
 pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<()> {
@@ -37,6 +108,9 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<(
 
     let rows = raw_events::batch_after(&ctx.pool, chain_id, after, &KINDS, batch).await?;
     if rows.is_empty() {
+        // Still sweep: a previous attempt may have failed, and an idle chain
+        // is exactly when there is room to retry.
+        fill_missing_metadata(ctx, chain_id).await;
         return Ok(());
     }
 
@@ -62,6 +136,8 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<(
         last_id = row.id;
         last_block = row.block_number;
     }
+
+    fill_missing_metadata(ctx, chain_id).await;
 
     if root_advanced_seen && let Err(e) = tree_advances::refresh_hourly_mv(&ctx.pool).await {
         warn!(chain_id, "tree_advances_hourly refresh failed: {}", e);

@@ -1,6 +1,6 @@
 use crate::app::AppState;
-use crate::domain::dto::{ListTreeAdvancesQuery, TxCountsQuery};
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::dto::{self, ListTreeAdvancesQuery, TxCountsQuery};
+use crate::domain::error::AppResult;
 use crate::domain::responses::{ChainFlowOut, CountPoint, TreeAdvanceOut};
 use crate::services;
 use axum::Json;
@@ -12,15 +12,18 @@ use std::sync::Arc;
     path = "/v1/tree-advances",
     tag = "tree-advances",
     params(ListTreeAdvancesQuery),
-    responses((status = 200, body = [TreeAdvanceOut]))
+    responses(
+        (status = 200, body = [TreeAdvanceOut]),
+        (status = 400, description = "sinceStartIndex without chainId")
+    )
 )]
 pub async fn list_tree_advances(
     State(st): State<AppState>,
     Query(q): Query<ListTreeAdvancesQuery>,
 ) -> AppResult<Json<Arc<Vec<TreeAdvanceOut>>>> {
-    let limit = q.limit.unwrap_or(100).min(1000);
+    let (chain_id, since_start_index, limit) = q.page()?;
     Ok(Json(
-        services::tree_advances::list(&st, q.chain_id, q.since_start_index, limit).await?,
+        services::tree_advances::list(&st, chain_id, since_start_index, limit).await?,
     ))
 }
 
@@ -35,12 +38,7 @@ pub async fn tx_counts(
     State(st): State<AppState>,
     Query(q): Query<TxCountsQuery>,
 ) -> AppResult<Json<Arc<Vec<CountPoint>>>> {
-    let bucket = q.bucket_sec.unwrap_or(3600);
-    if bucket <= 0 || bucket % 3600 != 0 {
-        return Err(AppError::BadRequest(
-            "bucketSec must be a positive multiple of 3600".into(),
-        ));
-    }
+    let bucket = dto::bucket_sec(q.bucket_sec)?;
     Ok(Json(
         services::tree_advances::tx_counts(&st, q.chain_id, bucket, q.since_ts).await?,
     ))

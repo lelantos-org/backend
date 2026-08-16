@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use crate::app::cache::MatchesPageKey;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::{MatchOut, MatchesPage};
 use crate::repositories::matches;
@@ -15,24 +16,53 @@ fn clue_bits_hex(ciphertext: &[u8]) -> String {
     )
 }
 
+/// One request for a page of matches.
+///
+/// Grouped rather than passed as five positional `i64`s, which no compiler
+/// check distinguishes: swapping `after` with `limit`, or `chain_id` with
+/// `backfilled_through`, would type-check and quietly serve wrong data.
+#[derive(Debug, Clone, Copy)]
+pub struct ListRequest {
+    pub subscription_id: i64,
+    /// Scopes the feed. A subscription is not chain-scoped, so without this
+    /// the caller receives notes from every chain it matched on.
+    pub chain_id: i64,
+    /// Highest note id known to be backfilled for this subscription.
+    pub backfilled_through: i64,
+    pub after: i64,
+    pub limit: i64,
+}
+
+impl ListRequest {
+    fn cache_key(&self) -> MatchesPageKey {
+        MatchesPageKey {
+            subscription_id: self.subscription_id,
+            chain_id: self.chain_id,
+            after: self.after,
+            limit: self.limit,
+        }
+    }
+}
+
 /// `backfilled_through` rides in the cached value, so it can be up to the
 /// cache TTL behind the row. That staleness is safe in the only direction
 /// that matters: clients clamp their cursor to it, and a value that is too
 /// low re-delivers rows rather than skipping them.
 #[tracing::instrument(skip(st))]
-pub async fn list(
-    st: &AppState,
-    subscription_id: i64,
-    backfilled_through: i64,
-    after: i64,
-    limit: i64,
-) -> AppResult<Arc<MatchesPage>> {
-    let key = (subscription_id, after, limit);
+pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>> {
+    let key = req.cache_key();
     let pool = st.pool.clone();
     st.cache
         .matches_pages
         .try_get_with(key, async move {
-            let rows = matches::list_for_subscription(&pool, subscription_id, after, limit).await?;
+            let rows = matches::list_for_subscription(
+                &pool,
+                req.subscription_id,
+                req.chain_id,
+                req.after,
+                req.limit,
+            )
+            .await?;
             let out: Vec<MatchOut> = rows
                 .into_iter()
                 .map(|m| {
@@ -50,7 +80,7 @@ pub async fn list(
                 })
                 .collect::<AppResult<Vec<_>>>()?;
             Ok::<_, AppError>(Arc::new(MatchesPage {
-                backfilled_through_note_id: backfilled_through,
+                backfilled_through_note_id: req.backfilled_through,
                 matches: out,
             }))
         })

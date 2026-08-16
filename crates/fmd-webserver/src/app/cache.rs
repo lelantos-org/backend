@@ -20,7 +20,22 @@ pub struct TreeMirror {
 }
 
 pub type NotesPageKey = (Option<i64>, i64, i64);
-pub type MatchesPageKey = (i64, i64, i64);
+/// Identity of one cached page of matches.
+///
+/// A named struct rather than a 4-tuple of `i64`: transposing two positions
+/// would silently serve the wrong page, and `chain_id` in particular must not
+/// be droppable by accident — one subscription spans every chain it matched
+/// on, so a key without it hands chain A's notes to a chain B caller.
+///
+/// `backfilled_through` is deliberately absent: it rides in the cached value,
+/// where being briefly stale only re-delivers rows rather than skipping them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatchesPageKey {
+    pub subscription_id: i64,
+    pub chain_id: i64,
+    pub after: i64,
+    pub limit: i64,
+}
 /// (chain_id, chunk_id) — only complete (immutable) chunks are stored.
 pub type ChunkKey = (i64, u64);
 

@@ -31,6 +31,54 @@ flush_max_n = 8
 # RELAYER_CHAIN_31337_{SWAP_WRAPPER,NATIVE_ADAPTER}_ADDRESS; left unset here so
 # the matching endpoints stay disabled until a deploy has actually run.
 
+# Served verbatim by `/chains` for wallets to boot from; the relayer reads
+# none of it. `rpc_url` here is the browser-reachable endpoint, deliberately
+# not the `rpc_url` above (`http://anvil:8545` only resolves inside compose).
+[chains.public]
+name = "anvil"
+rpc_url = "http://localhost:8545"
+tree_depth = 10
+permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+
+# ── second chain, for exercising the frontend's chain switcher ───────────
+#
+# Points at the SAME anvil and the SAME pool as 31337. It exists so `/chains`
+# returns two entries and `ChainSwitcher` stops hiding itself; it is not an
+# independent deployment and nothing indexes it, so it shows zero leaves and
+# no tokens.
+#
+# Two consequences worth knowing before relying on it:
+#
+#   * The relayer verifies its tree mirror against the chain root at boot
+#     (`TreeMirror::verify_chain_root`). This entry's mirror is always empty,
+#     because no indexer feeds chain 31338. So the relayer only boots while the
+#     pool's tree is *also* empty — i.e. straight after `just down && just up`.
+#     Once a deposit lands, the next relayer restart fails with
+#     "tree mirror diverges from chain 31338". Remove this block, or wipe, to
+#     recover.
+#   * `pool_address` is hard-coded rather than injected: deploy-contracts.sh
+#     emits `RELAYER_CHAIN_31337_*` only, so the env overlay never touches this
+#     entry. The literal is safe because anvil deploys deterministically from
+#     the same script, but it must be updated if the deploy order changes.
+#
+# A real second chain means a second anvil + deploy, and per-chain config in
+# the three indexers.
+[[chains]]
+chain_id = 31338
+rpc_url = "http://anvil:8545"
+pool_address = "0x0165878A594ca255338adfa4d48449f69242Eb8F"
+# Anvil deterministic account #1 — public test key, same as 31337 above.
+signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+receipt_timeout_s = 60
+flush_interval_s = 5
+flush_max_n = 8
+
+[chains.public]
+name = "anvil-2"
+rpc_url = "http://localhost:8545"
+tree_depth = 10
+permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+
 [prover]
 # Mounted from backend/stack/circuits/ (populated by `just fetch-circuits`).
 wasm_path = "/circuits/tree_update_batch.wasm"

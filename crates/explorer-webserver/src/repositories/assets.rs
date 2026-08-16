@@ -12,6 +12,11 @@ pub struct AssetRow {
     pub asset_id_u64: i64,
     pub token: Vec<u8>,
     pub scale: BigDecimal,
+    /// `NULL` until the indexer has read `decimals()` over RPC. Unknown, not 18.
+    pub decimals: Option<i16>,
+    /// `NULL` until the indexer has read `symbol()` over RPC. Unknown, not a
+    /// label to invent — some tokens do not implement it at all.
+    pub symbol: Option<String>,
 }
 
 pub async fn list(pool: &DbPool, chain_id: Option<i64>) -> AppResult<Vec<AssetRow>> {

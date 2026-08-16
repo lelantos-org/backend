@@ -80,6 +80,8 @@ diesel::table! {
         asset_id_u64 -> Int8,
         token -> Bytea,
         scale -> Numeric,
+        decimals -> Nullable<Int2>,
+        symbol -> Nullable<Text>,
     }
 }
 
@@ -141,6 +143,8 @@ diesel::table! {
         aux -> Jsonb,
         submitted_at_block -> Int8,
         flushed_at_block -> Nullable<Int8>,
+        flushed_at_ts -> Nullable<Int8>,
+        flushed_tx_hash -> Nullable<Bytea>,
         canceled_at_block -> Nullable<Int8>,
         tx_hash -> Bytea,
         block_ts -> Int8,
