@@ -355,6 +355,9 @@ async fn insert_asset_registered_event(
 /// so wallets filter locally instead of telling the server which
 /// nullifiers they hold. Mirrors the commitment feed's slicing and
 /// cache semantics.
+///
+/// Entries are truncated to their low 10 bytes: the client only tests set
+/// membership, and the feed is downloaded whole by every wallet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nullifier_chunk_feed_slices_spent_set() {
     use fmd_indexer::repositories::spent_nullifiers::{
@@ -383,6 +386,15 @@ async fn nullifier_chunk_feed_slices_spent_set() {
         .collect();
     repo.insert_batch(&rows).await.unwrap();
 
+    /// Independent restatement of the server's `WIRE_BYTES`: a change to the
+    /// truncation width has to break this test rather than pass silently.
+    const WIRE_BYTES: usize = 10;
+
+    /// The wire form of a stored nullifier: `0x` plus its low `WIRE_BYTES`.
+    fn wire(nf: &[u8]) -> String {
+        format!("0x{}", hex::encode(&nf[nf.len() - WIRE_BYTES..]))
+    }
+
     let base = spawn_fmd_webserver(&pool).await;
     let client = reqwest::Client::new();
 
@@ -404,8 +416,13 @@ async fn nullifier_chunk_feed_slices_spent_set() {
     assert_eq!(body["isComplete"], true);
     let first = body["nullifiers"].as_array().unwrap();
     assert_eq!(first.len(), 1024);
-    assert_eq!(first[0], format!("0x{}", hex::encode(&rows[0].nf)));
-    assert_eq!(first[1023], format!("0x{}", hex::encode(&rows[1023].nf)));
+    assert_eq!(first[0], wire(&rows[0].nf));
+    assert_eq!(first[1023], wire(&rows[1023].nf));
+    assert_eq!(
+        first[0].as_str().unwrap().len(),
+        2 + WIRE_BYTES * 2,
+        "entries are fixed-width: `0x` plus the truncated bytes"
+    );
 
     let resp = fetch(1).await;
     assert_eq!(
@@ -419,7 +436,7 @@ async fn nullifier_chunk_feed_slices_spent_set() {
     assert_eq!(body["isComplete"], false);
     let tail = body["nullifiers"].as_array().unwrap();
     assert_eq!(tail.len(), TOTAL - 1024);
-    assert_eq!(tail[0], format!("0x{}", hex::encode(&rows[1024].nf)));
+    assert_eq!(tail[0], wire(&rows[1024].nf));
 
     // Past the end: empty, not an error — the client has already stopped.
     let body: serde_json::Value = fetch(2).await.json().await.unwrap();

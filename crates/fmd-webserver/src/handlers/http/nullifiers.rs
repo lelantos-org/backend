@@ -12,7 +12,10 @@ use utoipa::ToSchema;
 #[serde(rename_all = "camelCase")]
 pub struct NullifierChunkOut {
     pub chunk_id: u64,
-    /// 0x-prefixed hex, 32 bytes each, ascending by insertion order.
+    /// 0x-prefixed hex, ascending by insertion order. Each entry is the **low
+    /// 10 bytes** of the nullifier, not all 32 — the client only tests set
+    /// membership. `WIRE_BYTES` in `services::nullifiers` carries the width
+    /// and the collision bound that justifies it.
     pub nullifiers: Vec<String>,
     /// `false` marks the tail chunk — the client stops paging here.
     pub is_complete: bool,
