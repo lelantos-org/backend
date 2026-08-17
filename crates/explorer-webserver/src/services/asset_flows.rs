@@ -46,6 +46,11 @@ struct Bucket {
 
 /// Collapse per-asset rows into one point per bucket.
 ///
+/// Dollars are the token's own decimals times the provider's *current* spot
+/// price, for every bucket in the range — a 90-day window values three-month-old
+/// volume at today's price. Clients must say so rather than presenting the
+/// figure as value at the time.
+///
 /// Token amounts are emitted only when the response covers exactly one asset.
 /// Two assets cannot be added in any token unit — that is the bug this
 /// endpoint carried first in base units and then in circuit units — so with
@@ -80,8 +85,8 @@ fn fold(rows: Vec<FlowBucketRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec
         let usd = prices
             .get(&(r.chain_id, r.token_hex.clone()))
             .and_then(|p| {
-                let into = super::prices::to_usd(r.in_base.to_f64()?, p)?;
-                let out = super::prices::to_usd(r.out_base.to_f64()?, p)?;
+                let into = super::prices::to_usd(r.in_base.to_f64()?, r.decimals, p)?;
+                let out = super::prices::to_usd(r.out_base.to_f64()?, r.decimals, p)?;
                 Some((into, out))
             });
         match usd {
@@ -186,6 +191,32 @@ mod tests {
         );
         let usd = out[0].in_usd.unwrap();
         assert!((usd - 6001.0).abs() < 1e-6, "got {usd}");
+        assert_eq!(out[0].unpriced_assets, 0);
+    }
+
+    #[test]
+    fn dollars_use_the_tokens_own_decimals_not_the_providers() {
+        // The feed reports 18 decimals for a 6-decimal token. Taking its word
+        // turns 1 USDC of flow into $1e-12.
+        let prices = HashMap::from([priced("aa", 1.0, 18)]);
+        let out = fold(vec![row(100, "aa", Some(6), "1000000")], &prices);
+        assert!(
+            (out[0].in_usd.unwrap() - 1.0).abs() < 1e-9,
+            "{:?}",
+            out[0].in_usd
+        );
+        assert_eq!(out[0].unpriced_assets, 0);
+    }
+
+    #[test]
+    fn a_priced_asset_still_counts_in_dollars_before_we_backfill_decimals() {
+        // No token amount is possible without our own decimals, but the price
+        // feed's are enough for the dollar total — withholding it would flag the
+        // asset unpriced and could empty the whole range.
+        let prices = HashMap::from([priced("aa", 2.0, 6)]);
+        let out = fold(vec![row(100, "aa", None, "1000000")], &prices);
+        assert_eq!(out[0].in_amount, None);
+        assert!((out[0].in_usd.unwrap() - 2.0).abs() < 1e-9);
         assert_eq!(out[0].unpriced_assets, 0);
     }
 

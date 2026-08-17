@@ -14,10 +14,15 @@ use utoipa::ToSchema;
 /// - `in`/`out` are **whole-token** decimal strings, present only when exactly
 ///   one asset is in scope across the whole response — pin one with
 ///   `assetIdU64`. Otherwise `null`.
-/// - `in_usd`/`out_usd` convert each asset at its own price and decimals
-///   before summing, and cover **only the assets that could be priced**.
+/// - `in_usd`/`out_usd` convert each asset at its own decimals and price before
+///   summing, and cover **only the assets that could be priced**.
 ///   `unpriced_assets` counts the rest, so a client can tell a complete total
 ///   from a partial one. `null` means nothing in the bucket had a price.
+///
+/// The price is the **current spot price**, applied to every bucket in the
+/// range: a 90-day window values three-month-old volume at today's price. These
+/// are dollars-worth-today, not value at the time, and a client must label them
+/// as such.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowPoint {
