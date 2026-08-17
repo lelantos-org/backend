@@ -14,6 +14,23 @@ pub fn whole_tokens(base: &BigDecimal, decimals: Option<i16>) -> Option<BigDecim
     Some(base / BigDecimal::new(1.into(), -i64::from(decimals)))
 }
 
+/// The wire form of `whole_tokens`: trailing zeros trimmed, and always plain
+/// decimal.
+///
+/// `to_string()` alone switches to scientific notation for small magnitudes — a
+/// single wei of an 18-decimal token prints as `2E-18` — and an amount field
+/// that changes syntax with its magnitude breaks any client that does more than
+/// `Number()` on it. Every endpoint that speaks token amounts uses this, so they
+/// cannot disagree about the format.
+pub fn whole_tokens_str(base: &BigDecimal, decimals: Option<i16>) -> Option<String> {
+    whole_tokens(base, decimals).as_ref().map(plain_amount)
+}
+
+/// The same wire form for an amount that is already in whole tokens.
+pub fn plain_amount(amount: &BigDecimal) -> String {
+    amount.normalized().to_plain_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +67,32 @@ mod tests {
     fn unknown_decimals_yield_nothing() {
         assert!(whole_tokens(&bd("1"), None).is_none());
         assert!(whole_tokens(&bd("1"), Some(-1)).is_none());
+    }
+
+    #[test]
+    fn the_wire_form_trims_zeros() {
+        assert_eq!(
+            whole_tokens_str(&bd("14000000000000000000"), Some(18)).as_deref(),
+            Some("14")
+        );
+        assert_eq!(
+            whole_tokens_str(&bd("150000000"), Some(8)).as_deref(),
+            Some("1.5")
+        );
+    }
+
+    #[test]
+    fn the_wire_form_stays_decimal_for_a_single_wei() {
+        // `to_string()` would emit "2E-18" here, changing the field's syntax
+        // with its magnitude.
+        assert_eq!(
+            whole_tokens_str(&bd("2"), Some(18)).as_deref(),
+            Some("0.000000000000000002")
+        );
+    }
+
+    #[test]
+    fn the_wire_form_has_nothing_to_say_without_decimals() {
+        assert_eq!(whole_tokens_str(&bd("1"), None), None);
     }
 }

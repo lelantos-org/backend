@@ -19,15 +19,10 @@ pub enum TxKind {
 }
 
 impl TxKind {
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "deposit" => Self::Deposit,
-            "pending" => Self::Pending,
-            "transfer" => Self::Transfer,
-            "withdraw" => Self::Withdraw,
-            _ => return None,
-        })
-    }
+    /// Every kind, in wire order. The exhaustive `match` in `as_str` is what
+    /// makes a new variant a compile error rather than a silent gap; this array
+    /// is what makes it show up in the parser and the error message too.
+    pub const ALL: [Self; 4] = [Self::Deposit, Self::Pending, Self::Transfer, Self::Withdraw];
 
     /// The wire spelling, and the literal the classification SQL emits — the
     /// two are the same string, which is what lets a kind be matched in SQL.
@@ -38,6 +33,11 @@ impl TxKind {
             Self::Transfer => "transfer",
             Self::Withdraw => "withdraw",
         }
+    }
+
+    /// Inverse of `as_str`, so the two cannot drift apart.
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == s)
     }
 }
 

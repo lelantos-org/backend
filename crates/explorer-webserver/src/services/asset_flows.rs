@@ -1,6 +1,6 @@
 use crate::adapters::{TokenKey, TokenPrice};
 use crate::app::AppState;
-use crate::domain::amount::whole_tokens;
+use crate::domain::amount::{plain_amount, whole_tokens};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::FlowPoint;
 use crate::repositories::asset_flows::{self, FlowBucketRow};
@@ -103,8 +103,10 @@ fn fold(rows: Vec<FlowBucketRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec
         .into_iter()
         .map(|(ts, b)| FlowPoint {
             ts,
-            in_amount: emit_tokens.then(|| b.tokens_in.normalized().to_string()),
-            out_amount: emit_tokens.then(|| b.tokens_out.normalized().to_string()),
+            // Already whole tokens; `plain_amount` only fixes the notation, so a
+            // dust bucket cannot arrive as "2E-18".
+            in_amount: emit_tokens.then(|| plain_amount(&b.tokens_in)),
+            out_amount: emit_tokens.then(|| plain_amount(&b.tokens_out)),
             in_usd: b.in_usd,
             out_usd: b.out_usd,
             unpriced_assets: b.unpriced_assets,

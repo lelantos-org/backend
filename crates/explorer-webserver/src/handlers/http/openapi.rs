@@ -1,5 +1,6 @@
 use crate::domain::responses::{
-    AssetOut, ChainFlowOut, CountPoint, FlowPoint, KindCounts, TreeAdvanceOut, TxKind, TxOut,
+    AssetOut, ChainFlowOut, ChainLockedOut, CountPoint, FlowPoint, KindCounts, LockedAssetOut,
+    TreeAdvanceOut, TxKind, TxOut,
 };
 use crate::handlers::http as handlers;
 use crate::handlers::http::health::HealthOut;
@@ -15,6 +16,7 @@ use utoipa::OpenApi;
         handlers::tree_advances::tx_counts,
         handlers::tree_advances::chain_flows_24h,
         handlers::asset_flows::asset_flows,
+        handlers::locked::locked_by_chain,
         handlers::transactions::recent_transactions,
         handlers::transactions::tx_kinds,
     ),
@@ -23,6 +25,8 @@ use utoipa::OpenApi;
         TreeAdvanceOut,
         CountPoint,
         ChainFlowOut,
+        ChainLockedOut,
+        LockedAssetOut,
         FlowPoint,
         HealthOut,
         TxOut,
@@ -34,6 +38,7 @@ use utoipa::OpenApi;
         (name = "assets", description = "Assets"),
         (name = "tree-advances", description = "Tree advances"),
         (name = "asset-flows", description = "Per-token deposit/withdraw flows"),
+        (name = "locked", description = "Escrowed balances per chain: all-time deposits minus withdrawals"),
         (name = "transactions", description = "Classified transactions: deposit / pending / transfer / withdraw"),
     )
 )]

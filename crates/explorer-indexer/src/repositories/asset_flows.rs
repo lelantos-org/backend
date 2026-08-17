@@ -21,11 +21,28 @@ pub struct NewAssetFlow {
 }
 
 pub async fn refresh_hourly_mv(pool: &DbPool) -> Result<(), ExplorerIndexerError> {
+    refresh(pool, "asset_flows_hourly").await
+}
+
+/// All-time per-(chain, asset) escrow totals. Refreshed on the same trigger as
+/// the hourly view — both derive from `asset_flows`, so a tick that changed one
+/// changed the other, and leaving this one behind would show a stale balance
+/// beside a fresh chart.
+pub async fn refresh_locked_mv(pool: &DbPool) -> Result<(), ExplorerIndexerError> {
+    refresh(pool, "asset_locked").await
+}
+
+/// `CONCURRENTLY`, so readers keep serving the previous contents while the
+/// refresh runs — every one of these views backs a dashboard that polls.
+///
+/// `view` is a compile-time literal at every call site; it is interpolated
+/// because a view name cannot be a bind parameter.
+async fn refresh(pool: &DbPool, view: &'static str) -> Result<(), ExplorerIndexerError> {
     let mut conn = pool
         .get()
         .await
         .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
-    sql_query("REFRESH MATERIALIZED VIEW CONCURRENTLY asset_flows_hourly")
+    sql_query(format!("REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
         .execute(&mut conn)
         .await?;
     Ok(())

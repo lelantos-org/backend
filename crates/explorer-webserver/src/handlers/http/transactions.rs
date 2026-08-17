@@ -22,7 +22,7 @@ pub async fn recent_transactions(
     Query(q): Query<RecentTxQuery>,
 ) -> AppResult<Json<Arc<Vec<TxOut>>>> {
     let limit = dto::page_limit(q.limit);
-    let kind = dto::tx_kind(q.kind)?;
+    let kind = dto::tx_kind(q.kind.as_deref())?;
     Ok(Json(
         services::transactions::recent(&st, q.chain_id, q.since_ts, kind, limit).await?,
     ))

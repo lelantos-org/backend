@@ -1,11 +1,13 @@
 pub mod asset_flows;
 pub mod assets;
+pub mod locked;
 pub mod transactions;
 pub mod tree_advances;
 pub mod tx_counts;
 
 pub use asset_flows::AssetFlowsQuery;
 pub use assets::ListAssetsQuery;
+pub use locked::LockedQuery;
 pub use transactions::{RecentTxQuery, TxKindsQuery};
 pub use tree_advances::ListTreeAdvancesQuery;
 pub use tx_counts::TxCountsQuery;
@@ -46,10 +48,14 @@ pub fn bucket_sec(bucket: Option<i64>) -> AppResult<i64> {
 /// Rejected rather than ignored: a misspelled kind that silently widened the
 /// filter would answer a question the caller did not ask, and the caller has
 /// no way to tell the full feed from a filter that did not apply.
-pub fn tx_kind(kind: Option<String>) -> AppResult<Option<TxKind>> {
+pub fn tx_kind(kind: Option<&str>) -> AppResult<Option<TxKind>> {
     let Some(kind) = kind else { return Ok(None) };
-    TxKind::parse(&kind).map(Some).ok_or_else(|| {
-        AppError::BadRequest("kind must be one of deposit, pending, transfer, withdraw".to_string())
+    TxKind::parse(kind).map(Some).ok_or_else(|| {
+        // The rejected value is quoted back: the usual cause is a caller
+        // sending a plural or a capital, which "must be one of …" alone leaves
+        // them to spot in their own query string.
+        let known = TxKind::ALL.map(TxKind::as_str).join(", ");
+        AppError::BadRequest(format!("unknown kind '{kind}'; must be one of {known}"))
     })
 }
 
@@ -105,25 +111,27 @@ mod tests {
 
     #[test]
     fn tx_kind_accepts_every_wire_spelling() {
-        for kind in [
-            TxKind::Deposit,
-            TxKind::Pending,
-            TxKind::Transfer,
-            TxKind::Withdraw,
-        ] {
-            assert_eq!(
-                tx_kind(Some(kind.as_str().to_string())).unwrap(),
-                Some(kind)
-            );
+        for kind in TxKind::ALL {
+            assert_eq!(tx_kind(Some(kind.as_str())).unwrap(), Some(kind));
         }
     }
 
     #[test]
     fn tx_kind_rejects_an_unknown_kind() {
         // Not silently widened to the whole feed: see `tx_kind`.
-        for bad in ["", "Deposit", "sideways"] {
-            let err = tx_kind(Some(bad.to_string())).unwrap_err();
+        for bad in ["", "Deposit", "deposits", "sideways"] {
+            let err = tx_kind(Some(bad)).unwrap_err();
             assert!(matches!(err, AppError::BadRequest(_)), "{bad} -> {err:?}");
         }
+    }
+
+    #[test]
+    fn tx_kind_names_the_value_it_rejected() {
+        // The caller has to be able to see which of their params was wrong.
+        let AppError::BadRequest(msg) = tx_kind(Some("deposits")).unwrap_err() else {
+            panic!("expected a bad request");
+        };
+        assert!(msg.contains("deposits"), "{msg}");
+        assert!(msg.contains("withdraw"), "{msg}");
     }
 }

@@ -51,8 +51,9 @@ All read-only `GET`. Every response is cached in-process for `CACHE_TTL_S`, exce
 | `/v1/assets` | `chainId?` | Includes `priceUsd` / `priceAt` per token; `null` when unpriced. |
 | `/v1/tree-advances` | `chainId?`, `sinceStartIndex?`, `limit?` | `limit` clamped to `1..=1000`, default 100. `sinceStartIndex` requires `chainId` (400 otherwise) — `start_index` is per-chain. |
 | `/v1/tx-counts` | `chainId?`, `bucketSec?`, `sinceTs?` | `bucketSec` must be a positive multiple of 3600 (default 3600). |
-| `/v1/chain-flows-24h` | — | 24 whole-hour buckets, oldest first; index 23 is the hour containing the request. |
-| `/v1/asset-flows` | `chainId?`, `assetIdU64?`, `bucketSec?`, `sinceTs?` | `in`/`out` are circuit units (base units ÷ the asset's `scale`) as decimal strings, so a bucket spanning several assets sums one unit. `inUsd`/`outUsd` convert each asset at its own price first and cover **only priced assets** — `unpricedAssets` counts the rest. |
+| `/v1/chain-flows-24h` | — | 24 whole-hour buckets, oldest first; index 23 is the hour containing the request. One entry per **indexed** chain (`chain_state`): `txCount: 0` means scanned and quiet, absent means not indexed. |
+| `/v1/asset-flows` | `chainId?`, `assetIdU64?`, `bucketSec?`, `sinceTs?` | `in`/`out` are **whole tokens** (base units ÷ `10^decimals`, never ÷ `scale`) as plain decimal strings, and `null` unless exactly one asset is in scope — amounts of different tokens are not addable in any unit. `inUsd`/`outUsd` convert each asset at its own decimals and price first, at **current spot**, and cover **only priced assets** — `unpricedAssets` counts the rest. |
+| `/v1/locked` | `chainId?` | Escrowed balance per chain: all-time deposits minus withdrawals, richest first. `amount` is whole tokens per asset (`null` when decimals are unresolved); `lockedUsd` is the only cross-asset total and covers only priced assets, with `unpricedAssets` counting the rest. A negative amount means the index is missing deposits — reported, not clamped. |
 
 ## OpenAPI
 

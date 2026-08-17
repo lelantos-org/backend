@@ -25,3 +25,15 @@ batch = 500      # optional, default 500
 ## Loop
 
 `services::consume::run(ctx)` polls per-chain cursors, decodes `AssetRegistered` / `RootAdvanced` events from `raw_events`, and writes projections via `repositories::{assets,tree_advances}`. Cursor commit per batch is at-least-once; idempotency is enforced by `ON CONFLICT` on each projection table.
+
+## Materialized views
+
+The explorer's read side never aggregates over raw projections at request time; it reads these, and this crate is what keeps them current. Each is refreshed `CONCURRENTLY` at the end of a tick that committed the events it derives from, and a failed refresh is logged and retried on the next such tick rather than failing the batch.
+
+| View | Derived from | Refreshed when a tick sees | Read by |
+|------|--------------|----------------------------|---------|
+| `tree_advances_hourly` | `tree_advances` | `RootAdvanced` | `/v1/tx-counts`, `/v1/chain-flows-24h` |
+| `asset_flows_hourly` | `asset_flows` | `AssetMoved` | `/v1/asset-flows` |
+| `asset_locked` | `asset_flows` | `AssetMoved` | `/v1/locked` |
+
+`asset_locked` keeps `in_base` and `out_base` apart rather than storing a net column: the reader subtracts in whatever unit it converts to, and a negative balance stays traceable to its two halves.

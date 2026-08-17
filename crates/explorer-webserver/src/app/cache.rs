@@ -1,6 +1,7 @@
 use crate::adapters::{TokenKey, TokenPrice};
 use crate::domain::responses::{
-    AssetOut, ChainFlowOut, CountPoint, FlowPoint, KindCounts, TreeAdvanceOut, TxKind, TxOut,
+    AssetOut, ChainFlowOut, ChainLockedOut, CountPoint, FlowPoint, KindCounts, TreeAdvanceOut,
+    TxKind, TxOut,
 };
 use moka::future::Cache;
 use shared::cache::build;
@@ -12,6 +13,7 @@ pub type AssetFlowsKey = (Option<i64>, Option<i64>, i64, Option<i64>);
 pub type TreeAdvancesKey = (Option<i64>, Option<i64>, i64);
 pub type TxCountsKey = (Option<i64>, i64, Option<i64>);
 pub type ChainFlows24hKey = i64;
+pub type LockedKey = Option<i64>;
 pub type TransactionsKey = (Option<i64>, Option<i64>, Option<TxKind>, i64);
 pub type TxKindsKey = (Option<i64>, i64, Option<i64>);
 
@@ -22,6 +24,9 @@ pub struct AppCache {
     pub tree_advances: Cache<TreeAdvancesKey, Arc<Vec<TreeAdvanceOut>>>,
     pub tx_counts: Cache<TxCountsKey, Arc<Vec<CountPoint>>>,
     pub chain_flows_24h: Cache<ChainFlows24hKey, Arc<Vec<ChainFlowOut>>>,
+    /// All-time escrow balances. Analytic TTL: they move with the flows the
+    /// same views are built from.
+    pub locked: Cache<LockedKey, Arc<Vec<ChainLockedOut>>>,
     /// Classified feed. Tracks the head of the chain, so it shares the short
     /// TTL rather than the analytic one.
     pub transactions: Cache<TransactionsKey, Arc<Vec<TxOut>>>,
@@ -47,6 +52,7 @@ impl AppCache {
             tree_advances: build(2_048, head),
             tx_counts: build(2_048, analytic),
             chain_flows_24h: build(8, analytic),
+            locked: build(32, analytic),
             transactions: build(512, head),
             tx_kinds: build(2_048, analytic),
             prices: build(1_024, price),

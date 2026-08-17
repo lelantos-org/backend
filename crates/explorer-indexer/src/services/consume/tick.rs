@@ -142,8 +142,16 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<(
     if root_advanced_seen && let Err(e) = tree_advances::refresh_hourly_mv(&ctx.pool).await {
         warn!(chain_id, "tree_advances_hourly refresh failed: {}", e);
     }
-    if asset_moved_seen && let Err(e) = asset_flows::refresh_hourly_mv(&ctx.pool).await {
-        warn!(chain_id, "asset_flows_hourly refresh failed: {}", e);
+    if asset_moved_seen {
+        // Both views derive from the rows this tick just wrote. Independently
+        // logged and independently attempted: a failure on one is not a reason
+        // to leave the other stale.
+        if let Err(e) = asset_flows::refresh_hourly_mv(&ctx.pool).await {
+            warn!(chain_id, "asset_flows_hourly refresh failed: {}", e);
+        }
+        if let Err(e) = asset_flows::refresh_locked_mv(&ctx.pool).await {
+            warn!(chain_id, "asset_locked refresh failed: {}", e);
+        }
     }
 
     cursors

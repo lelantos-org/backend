@@ -39,6 +39,10 @@ pub fn build(state: AppState) -> Router {
             get(handlers::chain_flows_24h).layer(cc_layer(analytic.clone())),
         )
         .route(
+            "/v1/locked",
+            get(handlers::locked_by_chain).layer(cc_layer(analytic.clone())),
+        )
+        .route(
             "/v1/asset-flows",
             get(handlers::asset_flows).layer(cc_layer(analytic.clone())),
         )
