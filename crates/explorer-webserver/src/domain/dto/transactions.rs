@@ -7,6 +7,9 @@ pub struct RecentTxQuery {
     pub chain_id: Option<i64>,
     /// Only transactions at or after this unix second.
     pub since_ts: Option<i64>,
+    /// Only transactions of this kind: `deposit`, `pending`, `transfer` or
+    /// `withdraw`. Absent = every kind.
+    pub kind: Option<String>,
     pub limit: Option<i64>,
 }
 

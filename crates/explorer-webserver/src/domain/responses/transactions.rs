@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 /// What a transaction did. Mutually exclusive and exact — see
 /// `repositories::transactions` for the contract-level derivation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TxKind {
     /// Escrowed deposit whose note has landed in the tree, counted at flush
@@ -27,6 +27,17 @@ impl TxKind {
             "withdraw" => Self::Withdraw,
             _ => return None,
         })
+    }
+
+    /// The wire spelling, and the literal the classification SQL emits — the
+    /// two are the same string, which is what lets a kind be matched in SQL.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deposit => "deposit",
+            Self::Pending => "pending",
+            Self::Transfer => "transfer",
+            Self::Withdraw => "withdraw",
+        }
     }
 }
 

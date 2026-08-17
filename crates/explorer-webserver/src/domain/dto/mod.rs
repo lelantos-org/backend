@@ -11,6 +11,7 @@ pub use tree_advances::ListTreeAdvancesQuery;
 pub use tx_counts::TxCountsQuery;
 
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::responses::TxKind;
 
 const DEFAULT_LIMIT: i64 = 100;
 const MAX_LIMIT: i64 = 1_000;
@@ -38,6 +39,18 @@ pub fn bucket_sec(bucket: Option<i64>) -> AppResult<i64> {
         ));
     }
     Ok(bucket)
+}
+
+/// Resolve the kind filter for the classified feed.
+///
+/// Rejected rather than ignored: a misspelled kind that silently widened the
+/// filter would answer a question the caller did not ask, and the caller has
+/// no way to tell the full feed from a filter that did not apply.
+pub fn tx_kind(kind: Option<String>) -> AppResult<Option<TxKind>> {
+    let Some(kind) = kind else { return Ok(None) };
+    TxKind::parse(&kind).map(Some).ok_or_else(|| {
+        AppError::BadRequest("kind must be one of deposit, pending, transfer, withdraw".to_string())
+    })
 }
 
 #[cfg(test)]
@@ -81,6 +94,35 @@ mod tests {
     fn bucket_sec_rejects_partial_hours_and_non_positive() {
         for bad in [0, -HOUR_SEC, 1, HOUR_SEC + 1] {
             let err = bucket_sec(Some(bad)).unwrap_err();
+            assert!(matches!(err, AppError::BadRequest(_)), "{bad} -> {err:?}");
+        }
+    }
+
+    #[test]
+    fn tx_kind_absent_means_every_kind() {
+        assert_eq!(tx_kind(None).unwrap(), None);
+    }
+
+    #[test]
+    fn tx_kind_accepts_every_wire_spelling() {
+        for kind in [
+            TxKind::Deposit,
+            TxKind::Pending,
+            TxKind::Transfer,
+            TxKind::Withdraw,
+        ] {
+            assert_eq!(
+                tx_kind(Some(kind.as_str().to_string())).unwrap(),
+                Some(kind)
+            );
+        }
+    }
+
+    #[test]
+    fn tx_kind_rejects_an_unknown_kind() {
+        // Not silently widened to the whole feed: see `tx_kind`.
+        for bad in ["", "Deposit", "sideways"] {
+            let err = tx_kind(Some(bad.to_string())).unwrap_err();
             assert!(matches!(err, AppError::BadRequest(_)), "{bad} -> {err:?}");
         }
     }

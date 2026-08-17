@@ -11,14 +11,17 @@ pub async fn recent(
     st: &AppState,
     chain_id: Option<i64>,
     since_ts: Option<i64>,
+    kind: Option<TxKind>,
     limit: i64,
 ) -> AppResult<Arc<Vec<TxOut>>> {
-    let key = (chain_id, since_ts, limit);
+    let key = (chain_id, since_ts, kind, limit);
     let cache = st.cache.transactions.clone();
     let pool = st.pool.clone();
     cache
         .try_get_with(key, async move {
-            let rows = transactions::recent(&pool, chain_id, since_ts, limit).await?;
+            let rows =
+                transactions::recent(&pool, chain_id, since_ts, kind.map(TxKind::as_str), limit)
+                    .await?;
             let out: Vec<TxOut> = rows
                 .into_iter()
                 .filter_map(|r| {

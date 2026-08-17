@@ -101,19 +101,29 @@ pub struct ClassifiedTxRow {
 }
 
 /// Newest-first feed of classified transactions.
+///
+/// `kind` filters outside the union rather than inside it: the kind of a row
+/// is decided by which branch produced it, so the only place all four are
+/// comparable is the classified result. `LIMIT` applies after that filter, so
+/// a filtered feed is a full page of one kind and not the leftovers of a
+/// mixed one.
 pub async fn recent(
     pool: &DbPool,
     chain_id: Option<i64>,
     since_ts: Option<i64>,
+    kind: Option<&str>,
     limit: i64,
 ) -> AppResult<Vec<ClassifiedTxRow>> {
     let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
     sql_query(format!(
-        "SELECT * FROM ({CLASSIFIED}) c ORDER BY c.block_ts DESC, c.block_number DESC LIMIT $3"
+        "SELECT * FROM ({CLASSIFIED}) c \
+          WHERE ($4::TEXT IS NULL OR c.kind = $4) \
+          ORDER BY c.block_ts DESC, c.block_number DESC LIMIT $3"
     ))
     .bind::<Nullable<BigInt>, _>(chain_id)
     .bind::<Nullable<BigInt>, _>(since_ts)
     .bind::<BigInt, _>(limit)
+    .bind::<Nullable<Text>, _>(kind)
     .load(&mut conn)
     .await
     .map_err(|e| AppError::Db(e.to_string()))

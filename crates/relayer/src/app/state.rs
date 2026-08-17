@@ -9,6 +9,7 @@ use crate::services::events::EventBroadcaster;
 use crate::services::fee_quote::{FeeQuoter, FeeToken};
 use crate::services::gas_estimator::GasEstimator;
 use crate::services::gas_witness::GasWitness;
+use crate::services::idempotency::IdempotencyCache;
 use crate::services::nullifier_guard::NullifierGuards;
 use crate::services::oracle::{CoinbaseOracle, PriceOracle};
 use crate::services::pipeline::{FlushPipeline, NativeRoute, SpendPipeline, SwapPipeline};
@@ -38,6 +39,9 @@ pub struct AppState {
     pub pool: DbPool,
     /// Nullifier admission control. See `services::nullifier_guard`.
     pub nullifiers: Arc<NullifierGuards>,
+    /// Replays a submission a caller has already made under the same
+    /// `Idempotency-Key`. See `services::idempotency`.
+    pub idempotency: Arc<IdempotencyCache>,
     /// Wallet-facing description of each chain, resolved once at boot and
     /// served by `/chains`. Holds only what a client may see — never the
     /// signer key or the relayer's internal RPC.
@@ -95,6 +99,7 @@ pub async fn build_state(
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
     let nullifiers = Arc::new(NullifierGuards::new(cfg.chains.iter().map(|c| c.chain_id)));
+    let idempotency = Arc::new(IdempotencyCache::new());
     let descriptors: HashMap<i64, ChainDescriptor> = cfg
         .chains
         .iter()
@@ -279,6 +284,7 @@ pub async fn build_state(
         events,
         pool,
         nullifiers,
+        idempotency,
         descriptors: Arc::new(descriptors),
     })
 }

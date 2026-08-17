@@ -12,15 +12,19 @@ use std::sync::Arc;
     path = "/v1/transactions",
     tag = "transactions",
     params(RecentTxQuery),
-    responses((status = 200, body = [TxOut]))
+    responses(
+        (status = 200, body = [TxOut]),
+        (status = 400, description = "kind is not a known transaction kind")
+    )
 )]
 pub async fn recent_transactions(
     State(st): State<AppState>,
     Query(q): Query<RecentTxQuery>,
 ) -> AppResult<Json<Arc<Vec<TxOut>>>> {
     let limit = dto::page_limit(q.limit);
+    let kind = dto::tx_kind(q.kind)?;
     Ok(Json(
-        services::transactions::recent(&st, q.chain_id, q.since_ts, limit).await?,
+        services::transactions::recent(&st, q.chain_id, q.since_ts, kind, limit).await?,
     ))
 }
 

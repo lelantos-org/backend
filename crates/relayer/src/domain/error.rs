@@ -33,6 +33,11 @@ pub enum AppError {
     StaleEstimate(String),
     #[error("internal: {0}")]
     Internal(String),
+    /// The outcome of a submission another caller made under the same
+    /// idempotency key. Carries only that caller's status and client message —
+    /// see [`AppError::mirrored`].
+    #[error("{message}")]
+    Mirrored { status: StatusCode, message: String },
     /// A submission a contract guard rejected before it could be mined —
     /// caught by the `eth_call` pre-flight, so nothing was broadcast and no
     /// gas was spent.
@@ -71,6 +76,20 @@ pub fn revert_reason(err: &str) -> Option<String> {
 }
 
 impl AppError {
+    /// Re-raise an error that another caller of the same idempotency key
+    /// produced.
+    ///
+    /// Only what the client is told survives — the status and the message it
+    /// would have been given. The original's internals stay with the caller
+    /// that owns them, and were already logged there, so a shared failure
+    /// cannot log the same node error twice or leak it to a second caller.
+    pub fn mirrored(e: &AppError) -> Self {
+        AppError::Mirrored {
+            status: e.status(),
+            message: e.client_message(),
+        }
+    }
+
     pub fn status(&self) -> StatusCode {
         match self {
             AppError::BadRequest(_) | AppError::ContractRejected { .. } => StatusCode::BAD_REQUEST,
@@ -85,6 +104,7 @@ impl AppError {
             | AppError::Prover(_)
             | AppError::Oracle(_)
             | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Mirrored { status, .. } => *status,
         }
     }
 
@@ -106,6 +126,8 @@ impl AppError {
                 "submit outcome unknown; check the chain before retrying".into()
             }
             AppError::MirrorDesynced(_) => "relayer unavailable for this chain".into(),
+            // Already scrubbed by the caller that produced it.
+            AppError::Mirrored { message, .. } => message.clone(),
             AppError::Db(_)
             | AppError::Rpc(_)
             | AppError::Prover(_)
@@ -154,6 +176,24 @@ mod tests {
             assert!(!msg.contains("example.com"), "leaked host from {err:?}");
             assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
         }
+    }
+
+    /// Mirroring hands one caller's failure to another, so it must scrub at
+    /// least as hard as the original would have.
+    #[test]
+    fn a_mirrored_error_says_no_more_than_the_original() {
+        for err in infrastructure_errors() {
+            let mirrored = AppError::mirrored(&err);
+            assert_eq!(mirrored.status(), err.status());
+            assert_eq!(mirrored.client_message(), "internal error");
+            assert!(!format!("{mirrored}").contains("example.com"));
+        }
+
+        // A caller's own error keeps the text that makes it actionable.
+        let conflict = AppError::NullifierInFlight("chain 31337".into());
+        let mirrored = AppError::mirrored(&conflict);
+        assert_eq!(mirrored.status(), StatusCode::CONFLICT);
+        assert_eq!(mirrored.client_message(), conflict.client_message());
     }
 
     /// Whatever the revert or desync reason was, it is operator detail.

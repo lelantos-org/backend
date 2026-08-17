@@ -1,6 +1,6 @@
 use crate::adapters::{TokenKey, TokenPrice};
 use crate::domain::responses::{
-    AssetOut, ChainFlowOut, CountPoint, FlowPoint, KindCounts, TreeAdvanceOut, TxOut,
+    AssetOut, ChainFlowOut, CountPoint, FlowPoint, KindCounts, TreeAdvanceOut, TxKind, TxOut,
 };
 use moka::future::Cache;
 use shared::cache::build;
@@ -12,7 +12,7 @@ pub type AssetFlowsKey = (Option<i64>, Option<i64>, i64, Option<i64>);
 pub type TreeAdvancesKey = (Option<i64>, Option<i64>, i64);
 pub type TxCountsKey = (Option<i64>, i64, Option<i64>);
 pub type ChainFlows24hKey = i64;
-pub type TransactionsKey = (Option<i64>, Option<i64>, i64);
+pub type TransactionsKey = (Option<i64>, Option<i64>, Option<TxKind>, i64);
 pub type TxKindsKey = (Option<i64>, i64, Option<i64>);
 
 #[derive(Clone)]

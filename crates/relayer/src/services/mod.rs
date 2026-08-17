@@ -3,6 +3,7 @@ pub mod events;
 pub mod fee_quote;
 pub mod gas_estimator;
 pub mod gas_witness;
+pub mod idempotency;
 pub mod nullifier_guard;
 pub mod oracle;
 pub mod pipeline;
