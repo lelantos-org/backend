@@ -124,10 +124,12 @@ impl DepositMempool {
     /// the indexer catches up.
     ///
     /// Returns the number of rows actually claimed. A short count means some
-    /// ids were already flushed between `pop_pending` and here — only possible
-    /// with a second relayer on this chain, which `pop_pending`'s plain SELECT
-    /// does not guard against. Running more than one instance per chain needs
-    /// claim-based dispatch, not this optimistic write.
+    /// ids stopped being unflushed between `pop_pending` and here. Usually the
+    /// indexer got there first — it writes the canonical `DepositFlushed` row
+    /// unconditionally, and `submit` only returns after one confirmation, so
+    /// the event is often already ingested. The other cause is a second relayer
+    /// on this chain, which `pop_pending`'s plain SELECT does not guard
+    /// against; telling the two apart needs `count_unflushed`.
     pub async fn mark_submitted(&self, ids: &[u64], block_number: i64) -> AppResult<usize> {
         if ids.is_empty() {
             return Ok(0);
@@ -137,13 +139,7 @@ impl DepositMempool {
             .get()
             .await
             .map_err(|e| AppError::Db(e.to_string()))?;
-        let id_bds: Vec<BigDecimal> = ids
-            .iter()
-            .map(|id| {
-                BigDecimal::from_u64(*id)
-                    .ok_or_else(|| AppError::Internal(format!("deposit_id {} unrepresentable", id)))
-            })
-            .collect::<AppResult<_>>()?;
+        let id_bds = to_id_bds(ids)?;
         let n = diesel::update(
             deposit_escrowed_events::table
                 .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
@@ -156,6 +152,39 @@ impl DepositMempool {
         .map_err(|e| AppError::Db(e.to_string()))?;
         Ok(n)
     }
+
+    /// How many of `ids` still carry no `flushed_at_block`. Zero after a short
+    /// `mark_submitted` means the indexer wrote the canonical flush first;
+    /// anything above zero means those rows were never claimed by anyone.
+    pub async fn count_unflushed(&self, ids: &[u64]) -> AppResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::Db(e.to_string()))?;
+        let id_bds = to_id_bds(ids)?;
+        let n: i64 = deposit_escrowed_events::table
+            .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
+            .filter(deposit_escrowed_events::deposit_id.eq_any(id_bds))
+            .filter(deposit_escrowed_events::flushed_at_block.is_null())
+            .count()
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Db(e.to_string()))?;
+        Ok(n as usize)
+    }
+}
+
+fn to_id_bds(ids: &[u64]) -> AppResult<Vec<BigDecimal>> {
+    ids.iter()
+        .map(|id| {
+            BigDecimal::from_u64(*id)
+                .ok_or_else(|| AppError::Internal(format!("deposit_id {} unrepresentable", id)))
+        })
+        .collect()
 }
 
 fn vec_to_arr32(v: &[u8]) -> AppResult<[u8; 32]> {

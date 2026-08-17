@@ -143,11 +143,30 @@ impl FlushPipeline {
             .mark_submitted(&ids_u64, receipt.block_number)
             .await
         {
-            Ok(claimed) if claimed != n => warn!(
-                claimed,
-                batched = n,
-                "flush claimed fewer deposits than it submitted; another relayer may share this chain"
-            ),
+            Ok(claimed) if claimed != n => {
+                // The indexer writes the canonical flush unconditionally, and
+                // `submit` waits for a confirmation — so it often wins this
+                // race. Nothing is lost then; its row is the better one.
+                match self.mempool.count_unflushed(&ids_u64).await {
+                    Ok(0) => info!(
+                        claimed,
+                        batched = n,
+                        "flush rows already marked flushed by the indexer"
+                    ),
+                    Ok(unflushed) => warn!(
+                        claimed,
+                        batched = n,
+                        unflushed,
+                        "flush claimed fewer deposits than it submitted; another relayer may share this chain"
+                    ),
+                    Err(e) => warn!(
+                        claimed,
+                        batched = n,
+                        error = %e,
+                        "flush claimed fewer deposits than it submitted; could not tell indexer race from a second relayer"
+                    ),
+                }
+            }
             Ok(_) => {}
             Err(e) => warn!(error = %e, "flush mark_submitted failed (ingester will catch up)"),
         }
