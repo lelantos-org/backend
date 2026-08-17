@@ -6,6 +6,10 @@ use utoipa::ToSchema;
 /// `tx_count` and `hourly_in` reflect aggregated `inserted` counts from
 /// `tree_advances`.
 ///
+/// Every indexed chain appears, including those with no insertions in the
+/// window: a `tx_count` of 0 means "scanned and quiet", and only a chain absent
+/// from the list is one nobody indexes.
+///
 /// `hourly_in` is oldest-first over 24 whole hours: index 23 is the hour
 /// containing the request, index 0 the hour 23 before it.
 #[derive(Debug, Clone, Serialize, ToSchema)]

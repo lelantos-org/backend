@@ -1,7 +1,7 @@
 use crate::app::AppState;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::{ChainFlowOut, CountPoint, TreeAdvanceOut};
-use crate::repositories::tree_advances;
+use crate::repositories::{chains, tree_advances};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -74,11 +74,36 @@ fn window_start(now_ts: i64) -> i64 {
     current_hour - (HOURS as i64 - 1) * 3600
 }
 
-/// One entry per chain, hottest first. Rows outside the window are dropped,
-/// not clamped — a clamped slot adds a foreign hour's count to an edge
-/// bucket, which reads as real activity in that hour.
-fn fold_chain_flows(rows: Vec<tree_advances::ChainFlow24hRow>) -> Vec<ChainFlowOut> {
-    let mut map: BTreeMap<i64, ChainFlowOut> = BTreeMap::new();
+fn empty_chain(chain_id: i64) -> ChainFlowOut {
+    ChainFlowOut {
+        chain_id,
+        inflow: 0,
+        outflow: 0,
+        hourly_in: vec![0; HOURS],
+        hourly_out: vec![0; HOURS],
+        tx_count: 0,
+    }
+}
+
+/// One entry per indexed chain, hottest first.
+///
+/// Every chain in `indexed` is emitted, at zero when it saw no insertions in the
+/// window: a chain that is scanned and quiet is a fact worth reporting, and
+/// omitting it left a client unable to tell it from a chain nobody indexes. A
+/// chain carrying rows is emitted whether or not it is in `indexed`, because
+/// dropping data to match a list is worse than an unexpected entry.
+///
+/// Rows outside the window are dropped, not clamped — a clamped slot adds a
+/// foreign hour's count to an edge bucket, which reads as real activity in that
+/// hour.
+fn fold_chain_flows(
+    rows: Vec<tree_advances::ChainFlow24hRow>,
+    indexed: Vec<i64>,
+) -> Vec<ChainFlowOut> {
+    let mut map: BTreeMap<i64, ChainFlowOut> = indexed
+        .into_iter()
+        .map(|chain_id| (chain_id, empty_chain(chain_id)))
+        .collect();
     for r in rows {
         let Ok(slot) = usize::try_from(r.slot) else {
             continue;
@@ -86,19 +111,16 @@ fn fold_chain_flows(rows: Vec<tree_advances::ChainFlow24hRow>) -> Vec<ChainFlowO
         if slot >= HOURS {
             continue;
         }
-        let entry = map.entry(r.chain_id).or_insert_with(|| ChainFlowOut {
-            chain_id: r.chain_id,
-            inflow: 0,
-            outflow: 0,
-            hourly_in: vec![0; HOURS],
-            hourly_out: vec![0; HOURS],
-            tx_count: 0,
-        });
+        let entry = map
+            .entry(r.chain_id)
+            .or_insert_with(|| empty_chain(r.chain_id));
         entry.hourly_in[slot] += r.count;
         entry.tx_count += r.count;
     }
     let mut out: Vec<ChainFlowOut> = map.into_values().collect();
-    out.sort_by_key(|b| std::cmp::Reverse(b.tx_count));
+    // Chain id breaks ties so the quiet chains, all at zero, keep a stable order
+    // between requests instead of shuffling under the reader.
+    out.sort_by_key(|b| (std::cmp::Reverse(b.tx_count), b.chain_id));
     out
 }
 
@@ -108,8 +130,11 @@ pub async fn chain_flows_24h(st: &AppState, now_ts: i64) -> AppResult<Arc<Vec<Ch
     st.cache
         .chain_flows_24h
         .try_get_with(hour_start, async move {
-            let rows = tree_advances::chain_flows_24h(&pool, hour_start).await?;
-            Ok::<_, AppError>(Arc::new(fold_chain_flows(rows)))
+            let (rows, indexed) = tokio::try_join!(
+                tree_advances::chain_flows_24h(&pool, hour_start),
+                chains::indexed(&pool),
+            )?;
+            Ok::<_, AppError>(Arc::new(fold_chain_flows(rows, indexed)))
         })
         .await
         .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
@@ -146,9 +171,13 @@ mod tests {
         assert_eq!(slot, 23);
     }
 
+    fn chain_ids(out: &[ChainFlowOut]) -> Vec<i64> {
+        out.iter().map(|c| c.chain_id).collect()
+    }
+
     #[test]
     fn folds_counts_into_their_own_slots() {
-        let out = fold_chain_flows(vec![row(1, 0, 5), row(1, 23, 7)]);
+        let out = fold_chain_flows(vec![row(1, 0, 5), row(1, 23, 7)], vec![1]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].hourly_in[0], 5);
         assert_eq!(out[0].hourly_in[23], 7);
@@ -159,17 +188,42 @@ mod tests {
     fn drops_slots_outside_the_window() {
         // A block timestamped ahead of the node clock must not inflate the
         // newest bucket.
-        let out = fold_chain_flows(vec![row(1, 23, 7), row(1, 24, 99), row(1, -1, 99)]);
+        let out = fold_chain_flows(vec![row(1, 23, 7), row(1, 24, 99), row(1, -1, 99)], vec![1]);
         assert_eq!(out[0].hourly_in[23], 7);
         assert_eq!(out[0].tx_count, 7);
     }
 
     #[test]
     fn orders_chains_by_descending_tx_count() {
-        let out = fold_chain_flows(vec![row(1, 0, 1), row(2, 0, 9)]);
-        assert_eq!(
-            out.iter().map(|c| c.chain_id).collect::<Vec<_>>(),
-            vec![2, 1]
-        );
+        let out = fold_chain_flows(vec![row(1, 0, 1), row(2, 0, 9)], vec![1, 2]);
+        assert_eq!(chain_ids(&out), vec![2, 1]);
+    }
+
+    #[test]
+    fn an_indexed_chain_with_no_insertions_reports_zero_rather_than_vanishing() {
+        // Quiet is a measurement; absent reads as "nobody indexes this chain".
+        let out = fold_chain_flows(vec![row(1, 0, 5)], vec![1, 10, 42161]);
+        assert_eq!(chain_ids(&out), vec![1, 10, 42161]);
+        let quiet = &out[1];
+        assert_eq!(quiet.tx_count, 0);
+        assert_eq!(quiet.hourly_in, vec![0; HOURS]);
+    }
+
+    #[test]
+    fn quiet_chains_keep_a_stable_order_between_requests() {
+        let out = fold_chain_flows(vec![row(7, 0, 3)], vec![42161, 10, 7, 1]);
+        assert_eq!(chain_ids(&out), vec![7, 1, 10, 42161]);
+    }
+
+    #[test]
+    fn a_chain_with_rows_is_kept_even_when_it_is_not_in_the_indexed_list() {
+        // Dropping data to match a list is worse than an unexpected entry.
+        let out = fold_chain_flows(vec![row(99, 0, 4)], vec![1]);
+        assert_eq!(chain_ids(&out), vec![99, 1]);
+    }
+
+    #[test]
+    fn no_indexed_chains_and_no_rows_is_an_empty_grid() {
+        assert!(fold_chain_flows(vec![], vec![]).is_empty());
     }
 }
