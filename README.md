@@ -22,6 +22,7 @@ flowchart LR
   ET --> EW[explorer-webserver]
   REL[relayer] -->|prove + submit tx| EVM
   FT -->|spent nullifiers| REL
+  ET -->|escrowed deposits| REL
   MQ[metaquoter] -->|eth_call quoters| EVM
   SA[(screened_addresses)] --> RW[risk-webserver]
   FW --> APP[clients]
@@ -98,6 +99,10 @@ flowchart LR
 **Indexer.** Single tick service, one pass per chain. Reads `raw_events` from
 its cursor and projects public analytics tables: asset registrations, per-tx
 in/out amounts, and tree-advance records (old root, new root, leaves inserted).
+It also maintains `deposit_escrowed_events`, the ledger the relayer's flush
+worker drains — so this indexer feeds an on-chain writer, not only the API. It
+refreshes three materialized views `CONCURRENTLY` at the end of a tick that
+committed the events they derive from.
 
 **Webserver.** Read-only axum API over those tables, with an in-process TTL
 cache in front of the analytic aggregates.
@@ -108,9 +113,10 @@ flowchart LR
   T --> A[(assets)]
   T --> AF[(asset_flows)]
   T --> TA[(tree_advances)]
+  T --> DE[(deposit_escrowed_events)]
   T -.cursor.-> CUR[(consumer_cursors)]
   subgraph web["explorer-webserver"]
-    RT["/v1/assets · /v1/tree-advances<br/>/v1/tx-counts · /v1/chain-flows-24h<br/>/v1/asset-flows"]
+    RT["/v1/assets · /v1/tree-advances · /v1/locked<br/>/v1/tx-counts · /v1/chain-flows-24h<br/>/v1/asset-flows · /v1/transactions · /v1/tx-kinds"]
     CA[AppCache TTL]
   end
   A --> CA
@@ -128,11 +134,13 @@ tree, generates a Groth16 proof (ark-circom, serialized behind a mutex since it
 is CPU-bound), and submits the batch transaction. Nullifier guard rejects
 double-spends before proving, the oracle and gas estimator price the fee, and
 successful flushes publish deposit-lifecycle events on an SSE stream. The
-`/estimate` routes run the same build without submitting.
+`/estimate` routes only validate the payload shape and quote — proving on an
+unauthenticated request path is exactly what `gas_witness` exists to avoid.
 
 ```mermaid
 flowchart TD
   CL[client] -->|POST /v1/spend, /v1/swap| PIPE[pipeline]
+  CL -->|GET /chains| REG[chain registry<br/>roots · assets · wallet config]
   PIPE --> NG[nullifier guard]
   NG --> W[witness builder]
   MIR[tree mirror] --> W
@@ -144,6 +152,8 @@ flowchart TD
   SUB --> EV[event broadcaster]
   EV -->|SSE /v1/deposits/stream| CL
   CL -->|POST /v1/*/estimate| FQ
+  GW[gas witness<br/>learned from receipts] --> FQ
+  SUB -.gas_used.-> GW
 ```
 
 ### Metaquoter — `metaquoter`
@@ -191,10 +201,11 @@ flowchart LR
 ### Libraries
 
 No IO loop of their own; every binary sits on top of them. `shared` holds
-entities, shutdown, the tick driver, config loading and tracing init;
-`chain-types` the ABI types and decoding; `fmd-crypto` the Poseidon / Baby
-Jubjub / filter / tree primitives; `database` the Diesel schema, migrations,
-bb8 pool and cursor repository. `integration-tests` drives the whole stack
+entities, shutdown, the tick driver, config loading and tracing init (plus the
+HTTP error type behind its `webserver` feature); `chain-types` the ABI types and
+decoding; `fmd-crypto` the Poseidon / Baby Jubjub / filter / tree primitives;
+`database` the Diesel schema, migrations, bb8 pool, cursor repository, advisory
+locks and reorg retraction. `integration-tests` drives the whole stack
 end-to-end via testcontainers.
 
 ```mermaid
@@ -204,6 +215,45 @@ flowchart BT
   BINS --> FC[fmd-crypto]
   BINS --> DB[database]
 ```
+
+## Crate READMEs
+
+Each crate documents its own config, routes, and the decisions behind them.
+
+| Crate | What it is |
+|-------|-----------|
+| [ingester](crates/ingester/README.md) | Live + backfill EVM log ingester, reorg detection |
+| [fmd-indexer](crates/fmd-indexer/README.md) | FMD consume + filter loops |
+| [fmd-webserver](crates/fmd-webserver/README.md) | FMD client API, capability tokens, chunk feeds |
+| [explorer-indexer](crates/explorer-indexer/README.md) | Public projections + materialized views |
+| [explorer-webserver](crates/explorer-webserver/README.md) | Explorer API, prices, tx classification |
+| [relayer](crates/relayer/README.md) | Prover + submitter, flush worker, fee quotes |
+| [metaquoter](crates/metaquoter/README.md) | DB-less swap quote aggregator |
+| [risk-webserver](crates/risk-webserver/README.md) | Address screening |
+| [shared](crates/shared/README.md) | Tick driver, shutdown, config, `AppError` |
+| [chain-types](crates/chain-types/README.md) | Event ABI + decode |
+| [fmd-crypto](crates/fmd-crypto/README.md) | FMD + Merkle primitives |
+| [database](crates/database/README.md) | Schema, migrations, pool, cursors, reorg |
+| [integration-tests](crates/integration-tests/README.md) | Cross-crate end-to-end |
+| [stack](stack/README.md) | Local Docker Compose stack |
+
+## Reorgs
+
+The ingester is the only crate that *detects* a fork, but retraction is a
+system-wide concern. Replacement `raw_events` rows get fresh, higher ids, so the
+replay side takes care of itself; state already *derived* from the deleted rows
+does not, since it sits below each consumer's cursor. The ingester therefore
+records every fork in `chain_reorgs`, and each consumer calls
+`database::reorg::apply_pending` at the top of its tick to drop its own derived
+rows and rewind. See [database](crates/database/README.md#reorg-retraction).
+
+## Replicas
+
+| Service | Safe replica count |
+|---------|-------------------|
+| `ingester`, `fmd-indexer` | N, as **failover** — a Postgres advisory lock elects one leader per chain; the rest skip their tick. Throughput per chain stays 1x |
+| `fmd-webserver`, `explorer-webserver`, `risk-webserver`, `metaquoter` | N, freely — stateless reads |
+| `relayer` | **1 per chain.** The tree mirror, nullifier guard, and idempotency cache are per-process, and there is no lock |
 
 ## Requirements
 

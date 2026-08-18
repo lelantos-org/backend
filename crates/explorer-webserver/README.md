@@ -1,6 +1,11 @@
 # explorer-webserver
 
-HTTP API for explorer queries (public chain data). Axum + Postgres. Must not depend on `fmd-crypto` (CI gate enforces).
+Read-only HTTP API for explorer queries over public chain data. Axum +
+Postgres, over the tables `explorer-indexer` writes.
+
+**Must not depend on `fmd-crypto`** — the privacy gate is recorded in
+`Cargo.toml` and `lib.rs`, but nothing in CI checks it, so a new dependency
+edge has to be caught in review.
 
 ## Run
 
@@ -43,7 +48,9 @@ Prices are decoration on public chain data, so nothing here can fail a request:
 
 ## Endpoints
 
-All read-only `GET`. Every response is cached in-process for `CACHE_TTL_S`, except `/v1/tree-advances`, which tracks the head of the chain and uses a fixed 5s TTL.
+All read-only `GET`. Every response is cached in-process for `CACHE_TTL_S`,
+except `/v1/tree-advances` and `/v1/transactions`, which track the head of the
+chain and use a fixed 5s TTL.
 
 | Path | Query | Notes |
 |------|-------|-------|
@@ -53,8 +60,35 @@ All read-only `GET`. Every response is cached in-process for `CACHE_TTL_S`, exce
 | `/v1/tx-counts` | `chainId?`, `bucketSec?`, `sinceTs?` | `bucketSec` must be a positive multiple of 3600 (default 3600). |
 | `/v1/chain-flows-24h` | — | 24 whole-hour buckets, oldest first; index 23 is the hour containing the request. One entry per **indexed** chain (`chain_state`): `txCount: 0` means scanned and quiet, absent means not indexed. |
 | `/v1/asset-flows` | `chainId?`, `assetIdU64?`, `bucketSec?`, `sinceTs?` | `in`/`out` are **whole tokens** (base units ÷ `10^decimals`, never ÷ `scale`) as plain decimal strings, and `null` unless exactly one asset is in scope — amounts of different tokens are not addable in any unit. `inUsd`/`outUsd` convert each asset at its own decimals and price first, at **current spot**, and cover **only priced assets** — `unpricedAssets` counts the rest. |
+| `/v1/transactions` | `chainId?`, `sinceTs?`, `kind?`, `limit?` | Classified feed, newest first. `limit` clamped to `1..=1000`, default 100. An unknown `kind` is a 400 rather than an ignored filter — a caller cannot tell the full feed from a filter that did not apply. |
+| `/v1/tx-kinds` | `chainId?`, `bucketSec?`, `sinceTs?` | The same classification, bucketed and pivoted to one row per bucket so the four series stay aligned for a stacked chart. A kind absent from a bucket is a real zero. |
 | `/v1/locked` | `chainId?` | Escrowed balance per chain: all-time deposits minus withdrawals, richest first. `amount` is whole tokens per asset (`null` when decimals are unresolved); `lockedUsd` is the only cross-asset total and covers only priced assets, with `unpricedAssets` counting the rest. A negative amount means the index is missing deposits — reported, not clamped. |
 
 ## OpenAPI
 
 `utoipa` + Swagger UI mounted by `build_router`. Spec at `/api-docs/openapi.json`, browsable at `/swagger-ui`.
+
+## Transaction classification
+
+`/v1/transactions` and `/v1/tx-kinds` share one SQL statement, so the feed and
+the counts can never disagree about a kind. The split is exact rather than
+heuristic, because the contract emits from a bounded set of sites:
+
+| tx | `AssetMoved` | `RootAdvanced` | kind |
+|----|--------------|----------------|------|
+| deposit / depositAuthorized | `(in>0, 0)` | no | `pending` |
+| …once flushed | | (the flush) | `deposit` |
+| withdraw | `(0, out>0)` | yes | `withdraw` |
+| transfer | none | yes | `transfer` |
+
+Both sides of an `AssetMoved` can never be non-zero — `withdraw` reverts on
+`publicIn != 0` and every spend entry point forces `publicIn == 0` — so the sign
+of an `asset_flows` row *is* the label.
+
+A deposit counts at flush time, because that is when its note enters the tree;
+until then it is `pending` at its escrow time. So a bucket's composition can
+still change after the fact. `DepositFlushed` is emitted per deposit inside
+`flushBatch`, so a batch of eight counts as eight deposits, not one.
+
+A row whose kind the SQL and the Rust enum disagree about is dropped with a
+warning rather than mislabelled.

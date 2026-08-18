@@ -16,6 +16,9 @@ just --list             # all recipes
 Requires `docker`, `just`, and `gh` (for circuit artifacts). First run downloads
 ~200 MB of proving keys and builds the Rust images.
 
+For what each service actually does and how it is configured, see its own
+README — linked from the [backend README](../README.md#crate-readmes).
+
 ## Layout
 
 ```
@@ -126,3 +129,6 @@ environment, so it can also be run outside the container against any RPC.
   Both are fine for local use and neither is suitable for an exposed host.
 - Rust images build from `backend/` via `backend/Dockerfile`, except the relayer,
   which builds from the repo root via `backend/crates/relayer/Dockerfile`.
+- `relayer` must run as a single replica per chain — its tree mirror, nullifier
+  guard, and idempotency cache are all per-process state. The compose stack runs
+  one of each anyway; it matters when porting this to an orchestrator.

@@ -117,12 +117,26 @@ Adding real pruning needs a decision this crate cannot make alone:
 the slowest consumer's cursor, and `matches` retention is a privacy question
 (the table is a user → note index) rather than a disk-space one.
 
+## Reorgs
+
+Handled, but not here. `ingester` records each fork in `chain_reorgs`; the
+consume tick calls `database::reorg::apply_pending` **before reading**, which
+drops `notes` and `spent_nullifiers` at or above the fork block — `matches`
+follows by `ON DELETE CASCADE` from `notes` — and rewinds the cursor so the
+replay rebuilds them. See [database](../database/README.md#reorg-retraction).
+
+Retraction rewinds the cursor, so the tick reports `Saturated` and comes
+straight back rather than sleeping on work it has just queued.
+
+The filter loop needs nothing of its own: retracted notes are re-inserted with
+fresh, higher ids, which puts them back above the filter cursor.
+
+`NotesRepo::delete_from_block` and `SpentNullifiersRepo::delete_from_block`
+implement the same rewind per repository, and predate the shared path. Nothing
+in the binary calls them today — only tests do.
+
 ## Known gaps
 
-- **No reorg handling.** `NotesRepo::delete_from_block` and
-  `SpentNullifiersRepo::delete_from_block` implement the rewind that migrations
-  000008/000014 describe, but nothing calls them and no cursor rewinds on a
-  reorg. Re-orged rows stay.
 - **`ChainLocks::is_leader` holds its mutex across a TCP connect.** One slow
   `ChainLock::try_acquire` delays the leadership check for every other chain in
   the same replica.

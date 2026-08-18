@@ -29,7 +29,10 @@ DATABASE_URL=postgres://... cargo run -p risk-webserver
 | `POST /v1/screen/batch` | `{chain, addresses}`, max 100, verdicts in request order |
 | `GET /v1/entries` | `?chain=&source=&limit=&offset=` — list contents |
 
-Screening is POST rather than GET-with-path-param even though it is a read: `TraceLayer` records the request URI, so an address in the URL would be copied into access logs.
+Screening is POST rather than GET-with-path-param even though it is a read:
+`TraceLayer` records the request URI, so an address in the URL would be copied
+into access logs. Every route carries `Cache-Control: no-store` for the same
+reason — a verdict must not sit in an intermediary cache.
 
 `risk` is one of `banned | high | medium | low | none`, the max across all matching rows; `blocked` is true for `banned` and `high`.
 
