@@ -4,6 +4,7 @@ pub mod estimate_spend;
 pub mod estimate_swap;
 pub mod health;
 pub mod router;
+pub mod submission;
 pub mod swap;
 pub mod transact;
 

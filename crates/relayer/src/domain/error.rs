@@ -27,6 +27,11 @@ pub enum AppError {
     NullifierAlreadySpent(String),
     #[error("nullifier in flight: {0}")]
     NullifierInFlight(String),
+    /// An `Idempotency-Key` that already answered a *different* submission.
+    /// Replaying it would report someone else's transaction as this caller's,
+    /// so the reuse is refused instead.
+    #[error("idempotency key reused: {0}")]
+    IdempotencyKeyReused(String),
     #[error("oracle: {0}")]
     Oracle(String),
     #[error("stale estimate: {0}")]
@@ -96,6 +101,7 @@ impl AppError {
             AppError::UnknownChain(_) => StatusCode::NOT_FOUND,
             AppError::NullifierAlreadySpent(_)
             | AppError::NullifierInFlight(_)
+            | AppError::IdempotencyKeyReused(_)
             | AppError::StaleEstimate(_) => StatusCode::CONFLICT,
             AppError::Reverted(_) | AppError::SubmitUnknown(_) => StatusCode::BAD_GATEWAY,
             AppError::MirrorDesynced(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -118,6 +124,7 @@ impl AppError {
             | AppError::UnknownChain(_)
             | AppError::NullifierAlreadySpent(_)
             | AppError::NullifierInFlight(_)
+            | AppError::IdempotencyKeyReused(_)
             | AppError::StaleEstimate(_) => self.to_string(),
             // Only `reason` — never `detail`, which is the raw node error.
             AppError::ContractRejected { reason, .. } => format!("rejected by contract: {reason}"),
@@ -228,6 +235,7 @@ mod tests {
         for err in [
             AppError::NullifierInFlight("chain 1".into()),
             AppError::NullifierAlreadySpent("chain 1".into()),
+            AppError::IdempotencyKeyReused("chain 1".into()),
         ] {
             assert_eq!(err.status(), StatusCode::CONFLICT);
         }

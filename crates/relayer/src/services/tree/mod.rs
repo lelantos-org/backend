@@ -20,10 +20,16 @@ use diesel_async::RunQueryDsl;
 use fmd_crypto::poseidon as fmd_poseidon;
 use fmd_crypto::tree::{Field, MerkleTree};
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::str::FromStr;
+use std::sync::Arc;
 use tracing::{error, info};
 
-const DEPTH: usize = 10;
+/// Merkle depth this mirror is built for. Must match the deployed pool and
+/// every chain's published `public.tree_depth`.
+pub const DEPTH: usize = 10;
+/// Quaternary tree, so `ARITY^DEPTH` leaves. Mirrors `MASP.MAX_LEAVES`.
+const MAX_LEAVES: usize = 4usize.pow(DEPTH as u32);
 /// Domain-separation tag for Merkle leaf hashing. Mirrors `TAG_LEAF` in
 /// `circuits/src/lib/tags.circom` — `leaf = Poseidon(TAG_LEAF, cm,
 /// cv_dep_x, cv_dep_y)` so the spender can rebuild the same leaf hash from
@@ -50,14 +56,40 @@ pub struct TreeMirror {
     /// Every reserve then fails fast rather than building on state that may
     /// no longer match the chain.
     desynced: Option<String>,
+    /// Lock-free copy of what `/chains` reports, refreshed on every mutation.
+    ///
+    /// The mirror mutex is held from reserve through prove and submit — tens
+    /// of seconds — and `/chains` is what every wallet calls at boot. Reading
+    /// it through the mutex made that endpoint queue behind whatever spend was
+    /// in flight, so the readings are published here instead.
+    snapshot: Arc<MirrorSnapshot>,
+    /// Roots this mirror has held, newest last, bounded to [`ROOT_HISTORY`].
+    ///
+    /// The pool accepts a proof against any root in its own recent window, so
+    /// a payload naming an older one is legitimate. What is *not* legitimate is
+    /// a root the relayer has never held: that proof cannot land, and catching
+    /// it here saves a Groth16 and a revert.
+    recent_roots: VecDeque<Field>,
 }
 
+/// How many past roots a payload may name. Matches the pool's own accepted
+/// window; a spend proved against anything older cannot land anyway.
+const ROOT_HISTORY: usize = 32;
+
+mod snapshot;
+
+pub use snapshot::MirrorSnapshot;
+/// The tree position a submission has claimed, plus the state it must prove
+/// the advance from.
+#[derive(Debug)]
 pub struct ReservedSlot {
     pub start_index: u64,
     pub old_root: Field,
     pub old_frontier: Vec<[Field; 3]>,
 }
 
+/// The state that claim advances the tree to.
+#[derive(Debug)]
 pub struct AdvancedState {
     pub new_root: Field,
 }
@@ -65,11 +97,53 @@ pub struct AdvancedState {
 impl TreeMirror {
     pub fn new(chain_id: i64) -> AppResult<Self> {
         let tree = MerkleTree::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
-        Ok(Self {
+        let mut m = Self {
             chain_id,
             tree,
             desynced: None,
-        })
+            snapshot: Arc::new(MirrorSnapshot::default()),
+            recent_roots: VecDeque::with_capacity(ROOT_HISTORY),
+        };
+        m.publish();
+        Ok(m)
+    }
+
+    /// Handle `/chains` reads from, without taking the mirror lock.
+    pub fn snapshot(&self) -> Arc<MirrorSnapshot> {
+        self.snapshot.clone()
+    }
+
+    /// Whether `root` is one this mirror has held recently.
+    ///
+    /// Unknown roots are the common cause of a `StaleOldRoot` revert, and the
+    /// caller can act on being told so — unlike the opaque 502 the revert
+    /// produces.
+    pub fn knows_root(&self, root: &Field) -> bool {
+        self.recent_roots.contains(root)
+    }
+
+    /// Refresh the published readings and the accepted-root window. Called
+    /// after every mutation.
+    fn publish(&mut self) {
+        let root = self.tree.root().ok();
+        self.snapshot
+            .publish(self.tree.leaf_count() as u64, root, self.desynced.is_some());
+        if let Some(root) = root {
+            self.remember_root(root);
+        }
+    }
+
+    /// Append `root` to the accepted window, newest last, dropping the oldest
+    /// once it is full. A repeat of the newest entry is a no-op, so a mutation
+    /// that leaves the root unchanged does not consume a slot.
+    fn remember_root(&mut self, root: Field) {
+        if self.recent_roots.back() == Some(&root) {
+            return;
+        }
+        if self.recent_roots.len() == ROOT_HISTORY {
+            self.recent_roots.pop_front();
+        }
+        self.recent_roots.push_back(root);
     }
 
     /// Undo `leaves` speculative inserts after a failed pipeline stage, and
@@ -101,6 +175,7 @@ impl TreeMirror {
     /// the indexer. Only [`Self::unwind`] should need this.
     fn park(&mut self, reason: String) {
         self.desynced.get_or_insert(reason);
+        self.publish();
     }
 
     pub fn is_desynced(&self) -> bool {
@@ -157,6 +232,7 @@ impl TreeMirror {
         self.tree
             .extend(leaves)
             .map_err(|e| AppError::Internal(e.to_string()))?;
+        self.publish();
 
         // Sanity: latest tree_advances.new_root must match local root.
         let latest: Option<(Vec<u8>, i64)> = tree_advances::table
@@ -167,9 +243,28 @@ impl TreeMirror {
             .await
             .optional()
             .map_err(|e| AppError::Db(e.to_string()))?;
+        // Seed the accepted-root window from the chain's own advance history.
+        // Without this a relayer restart narrows the window to the single
+        // current root, and a wallet holding a proof against the previous one
+        // gets a 400 for a payload the pool would still have accepted.
+        let history: Vec<Vec<u8>> = tree_advances::table
+            .filter(tree_advances::chain_id.eq(self.chain_id))
+            .order(tree_advances::start_index.desc())
+            .limit(ROOT_HISTORY as i64)
+            .select(tree_advances::new_root)
+            .load(&mut conn)
+            .await
+            .map_err(|e| AppError::Db(e.to_string()))?;
+        for root in history.into_iter().rev() {
+            if let Ok(f) = vec_to_field(&root) {
+                self.remember_root(f);
+            }
+        }
+
         info!(
             chain_id = self.chain_id,
             leaves = cms.len(),
+            roots = self.recent_roots.len(),
             "tree mirror replayed notes"
         );
         if let Some((expected_root, _)) = latest {
@@ -206,6 +301,31 @@ impl TreeMirror {
     ) -> AppResult<(ReservedSlot, AdvancedState)> {
         self.check_usable()?;
         let start_index = self.tree.leaf_count() as u64;
+
+        // Capacity first: it is a length check, so an oversized batch is
+        // refused without paying for a single Poseidon.
+        if start_index as usize + cms.len() > MAX_LEAVES {
+            return Err(AppError::BadRequest(format!(
+                "chain {}: tree is full ({} leaves, {} more requested, capacity {})",
+                self.chain_id,
+                start_index,
+                cms.len(),
+                MAX_LEAVES
+            )));
+        }
+
+        // Then hash every leaf up front. `leaf_hash` is Poseidon, which rejects
+        // a non-canonical input — and `cm` / `cv_dep` are wallet-supplied on
+        // the spend and swap paths. Hashing inside the insert loop meant such a
+        // value failed *after* earlier leaves had already gone in, leaving the
+        // mirror one leaf ahead of the chain with no rollback and no park:
+        // a permanent, silent desync from a single request. Nothing mutates
+        // until all of them are known good.
+        let leaves = cms
+            .iter()
+            .map(|(cm, cv_dep)| leaf_hash(cm, cv_dep))
+            .collect::<AppResult<Vec<Field>>>()?;
+
         let old_root = self
             .tree
             .root()
@@ -214,16 +334,17 @@ impl TreeMirror {
             .tree
             .frontier()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        for (cm, cv_dep) in cms {
-            let leaf = leaf_hash(cm, cv_dep)?;
-            self.tree
-                .insert(leaf)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-        }
+
+        // Past this point the tree is being mutated, so any failure has to be
+        // unwound rather than propagated bare — see `insert_all`.
+        let inserted = self.insert_all(leaves)?;
+        debug_assert_eq!(inserted, cms.len());
+
         let new_root = self
             .tree
             .root()
             .map_err(|e| AppError::Internal(e.to_string()))?;
+        self.publish();
         Ok((
             ReservedSlot {
                 start_index,
@@ -232,6 +353,29 @@ impl TreeMirror {
             },
             AdvancedState { new_root },
         ))
+    }
+
+    /// Insert pre-hashed leaves, leaving the tree untouched if any insert
+    /// fails. `MerkleTree::insert` should not fail once capacity is checked,
+    /// but a partial batch is precisely the state that desyncs a mirror
+    /// permanently, so it is undone here and the mirror parked if even that
+    /// does not work.
+    fn insert_all(&mut self, leaves: Vec<Field>) -> AppResult<usize> {
+        let n = leaves.len();
+        for (i, leaf) in leaves.into_iter().enumerate() {
+            if let Err(e) = self.tree.insert(leaf) {
+                let cause = AppError::Internal(format!(
+                    "chain {}: leaf {} of {} failed to insert: {}",
+                    self.chain_id, i, n, e
+                ));
+                error!(chain_id = self.chain_id, error = %cause, "partial batch insert; undoing");
+                if let Err(rollback_err) = self.rollback(i) {
+                    self.park(format!("partial batch insert: {rollback_err}"));
+                }
+                return Err(cause);
+            }
+        }
+        Ok(n)
     }
 
     /// Cross-check the in-memory mirror against the on-chain `currentRoot()`.
@@ -283,6 +427,7 @@ impl TreeMirror {
         self.tree
             .truncate_leaves(n)
             .map_err(|e| AppError::Internal(e.to_string()))?;
+        self.publish();
         info!(
             chain_id = self.chain_id,
             n,
@@ -311,129 +456,4 @@ pub fn field_to_hex(f: &Field) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const CHAIN_ID: i64 = 31337;
-
-    fn cm(n: u8) -> Field {
-        let mut f = [0u8; 32];
-        f[31] = n;
-        f
-    }
-
-    fn cv(n: u8) -> [U256; 2] {
-        [U256::from(n), U256::from(n) + U256::from(1u8)]
-    }
-
-    /// Two-leaf advance. Real spends insert `TRANSACT_OUT` leaves and a
-    /// flush one per deposit; two keeps the arithmetic in these tests easy
-    /// to read without changing what is under test.
-    fn advance2(
-        m: &mut TreeMirror,
-        cm0: Field,
-        cm1: Field,
-        cv0: [U256; 2],
-        cv1: [U256; 2],
-    ) -> AppResult<(ReservedSlot, AdvancedState)> {
-        m.reserve_and_advance_batch(&[(cm0, cv0), (cm1, cv1)])
-    }
-
-    /// A mirror with `pairs` pairs already committed.
-    fn mirror(pairs: u8) -> TreeMirror {
-        let mut m = TreeMirror::new(CHAIN_ID).unwrap();
-        for i in 0..pairs {
-            advance2(&mut m, cm(2 * i), cm(2 * i + 1), cv(i), cv(i + 1)).unwrap();
-        }
-        m
-    }
-
-    fn reserve_one(m: &mut TreeMirror) -> AppResult<()> {
-        advance2(m, cm(200), cm(201), cv(9), cv(10)).map(|_| ())
-    }
-
-    #[test]
-    fn reserve_advances_by_two_leaves() {
-        let mut m = mirror(1);
-        assert_eq!(m.committed_count(), 2);
-        let (slot, advanced) = advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
-        assert_eq!(slot.start_index, 2);
-        assert_eq!(m.committed_count(), 4);
-        assert_ne!(slot.old_root, advanced.new_root);
-    }
-
-    /// A revert or a refused broadcast provably left no leaves on-chain, so
-    /// the speculative pair comes back off and the mirror stays usable.
-    #[test]
-    fn unwind_rolls_back_a_clean_failure() {
-        let mut m = mirror(1);
-        let before = m.current_root().unwrap();
-        advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
-
-        let err = m.unwind(2, AppError::Reverted("tx reverted".into()));
-
-        assert!(matches!(err, AppError::Reverted(_)));
-        assert!(!m.is_desynced());
-        assert_eq!(m.committed_count(), 2);
-        assert_eq!(m.current_root().unwrap(), before, "root must be restored");
-        reserve_one(&mut m).expect("mirror should still accept work");
-    }
-
-    /// The tx may still mine, so the leaves must stay — and because the mirror
-    /// can no longer be trusted either way, it stops accepting work.
-    #[test]
-    fn unwind_parks_on_an_unknown_outcome() {
-        let mut m = mirror(1);
-        advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
-
-        let err = m.unwind(2, AppError::SubmitUnknown("no receipt".into()));
-
-        assert!(matches!(err, AppError::SubmitUnknown(_)));
-        assert!(m.is_desynced());
-        assert_eq!(m.committed_count(), 4, "speculative leaves must be kept");
-        assert!(matches!(
-            reserve_one(&mut m),
-            Err(AppError::MirrorDesynced(_))
-        ));
-    }
-
-    /// Rolling back more leaves than exist cannot be honoured, so the mirror
-    /// parks rather than silently carrying on — but the caller still sees the
-    /// error that actually caused the unwind.
-    #[test]
-    fn unwind_parks_when_the_rollback_itself_fails() {
-        let mut m = mirror(1);
-
-        let err = m.unwind(99, AppError::Reverted("tx reverted".into()));
-
-        assert!(matches!(err, AppError::Reverted(_)));
-        assert!(m.is_desynced());
-        assert!(matches!(
-            reserve_one(&mut m),
-            Err(AppError::MirrorDesynced(_))
-        ));
-    }
-
-    #[test]
-    fn parking_keeps_the_first_reason() {
-        let mut m = mirror(1);
-        let _ = m.unwind(2, AppError::SubmitUnknown("first".into()));
-        let _ = m.unwind(2, AppError::SubmitUnknown("second".into()));
-
-        let Err(AppError::MirrorDesynced(reason)) = reserve_one(&mut m) else {
-            panic!("expected a desynced mirror");
-        };
-        assert!(reason.contains("first"), "got {reason}");
-    }
-
-    #[test]
-    fn rollback_past_the_start_is_rejected() {
-        let mut m = mirror(1);
-        assert!(m.rollback(3).is_err());
-        assert_eq!(
-            m.committed_count(),
-            2,
-            "a rejected rollback changes nothing"
-        );
-    }
-}
+mod tests;

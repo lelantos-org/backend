@@ -32,6 +32,16 @@ pub type AdvisoryResult<T> = Result<T, AdvisoryError>;
 
 /// Namespace for `ingester`'s per-chain worker locks.
 pub const NS_INGESTER: i64 = 0x1A95_0000_0000_0000_u64 as i64;
+/// Namespace for the schema-migration lock.
+///
+/// Every replica runs `migrate::run` at startup and `diesel_migrations` takes
+/// no lock of its own, so N replicas booting together can apply the same
+/// migration concurrently. Serialising them here makes the losers wait and
+/// then find nothing pending.
+pub const NS_MIGRATE: i64 = 0x1A95_0002_0000_0000_u64 as i64;
+/// Key for the single, chain-independent migration lock.
+pub const MIGRATE_KEY: i64 = NS_MIGRATE;
+
 /// Namespace for `fmd-indexer`'s per-chain consume locks.
 ///
 /// Distinct from [`NS_INGESTER`] so the two services can each hold their own

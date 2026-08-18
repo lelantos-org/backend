@@ -32,6 +32,16 @@ diesel::table! {
         last_event_id -> Int8,
         last_block_number -> Int8,
         updated_at -> Timestamptz,
+        last_reorg_id -> Int8,
+    }
+}
+
+diesel::table! {
+    chain_reorgs (id) {
+        id -> Int8,
+        chain_id -> Int8,
+        rewind_to -> Int8,
+        created_at -> Timestamptz,
     }
 }
 
@@ -171,6 +181,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     raw_events,
     chain_state,
     consumer_cursors,
+    chain_reorgs,
     notes,
     subscriptions,
     matches,

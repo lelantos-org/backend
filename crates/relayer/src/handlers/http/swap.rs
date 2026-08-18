@@ -1,33 +1,22 @@
-use crate::adapters::parse::parse_b32;
 use crate::app::AppState;
 use crate::domain::dto::SubmitSwapPayload;
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::responses::RelayerSubmitResponse;
+use crate::handlers::http::submission;
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use tracing::instrument;
 
 #[instrument(skip_all, fields(chain_id = payload.chain_id, adapter = %payload.swap.adapter))]
 pub async fn submit_swap(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<SubmitSwapPayload>,
 ) -> AppResult<Json<RelayerSubmitResponse>> {
-    let chain_id = payload.chain_id;
-    let pipeline = st
-        .swap_pipelines
-        .get(&chain_id)
-        .ok_or(AppError::UnknownChain(chain_id))?
-        .clone();
-    let nfs = [
-        parse_b32(&payload.pub_inputs.nullifier[0])?.0,
-        parse_b32(&payload.pub_inputs.nullifier[1])?.0,
-    ];
-    let nf_guard = st.nullifiers.reserve(&st.pool, chain_id, nfs).await?;
-    let receipt = pipeline.process(payload).await?;
-    // Landed. Hold these nullifiers against a resubmit until the indexer has
-    // written them to `spent_nullifiers`.
-    nf_guard.spent().await;
-    Ok(Json(RelayerSubmitResponse {
-        tx_hash: format!("0x{}", hex::encode(receipt.tx_hash)),
-    }))
+    let pipeline = st.swap_pipeline(payload.chain_id)?;
+    submission::submit(st, headers, payload, |p| async move {
+        pipeline.process(p).await
+    })
+    .await
 }

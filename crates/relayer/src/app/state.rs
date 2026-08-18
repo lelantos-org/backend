@@ -15,12 +15,14 @@ use crate::services::oracle::{CoinbaseOracle, PriceOracle};
 use crate::services::pipeline::{FlushPipeline, NativeRoute, SpendPipeline, SwapPipeline};
 use crate::services::prover::TreeUpdateBatchProver;
 use crate::services::submitter::Submitter;
-use crate::services::tree::TreeMirror;
+use crate::services::transact_verifier::TransactVerifier;
+use crate::services::tree::{self, TreeMirror};
 use alloy::primitives::Address;
 use database::DbPool;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -86,207 +88,324 @@ impl From<&ChainDescriptor> for ChainConfigOut {
     }
 }
 
+impl AppState {
+    /// The spend pipeline serving `chain_id`, or a 404.
+    ///
+    /// Every endpoint dispatches on a chain id the caller supplied, so the
+    /// "unknown chain" answer belongs here rather than being restated at each
+    /// one.
+    pub fn spend_pipeline(&self, chain_id: i64) -> AppResult<Arc<SpendPipeline>> {
+        self.spend_pipelines
+            .get(&chain_id)
+            .cloned()
+            .ok_or(AppError::UnknownChain(chain_id))
+    }
+
+    /// The swap pipeline serving `chain_id`. Absent on chains with no
+    /// `swap_wrapper_address`, which is the same 404 to a caller.
+    pub fn swap_pipeline(&self, chain_id: i64) -> AppResult<Arc<SwapPipeline>> {
+        self.swap_pipelines
+            .get(&chain_id)
+            .cloned()
+            .ok_or(AppError::UnknownChain(chain_id))
+    }
+
+    pub fn serves_chain(&self, chain_id: i64) -> bool {
+        self.spend_pipelines.contains_key(&chain_id)
+    }
+}
+
 pub async fn build_state(
     cfg: &RelayerConfig,
     pool: DbPool,
     prover: Arc<dyn TreeUpdateBatchProver>,
 ) -> AppResult<AppState> {
-    let events = Arc::new(EventBroadcaster::new());
-    let oracle: Arc<dyn PriceOracle> = Arc::new(
-        CoinbaseOracle::new(&cfg.price_oracle)
-            .map_err(|e| AppError::Internal(format!("price oracle: {e}")))?,
-    );
+    let shared = Shared::new(cfg, pool.clone(), prover)?;
+
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
-    let nullifiers = Arc::new(NullifierGuards::new(cfg.chains.iter().map(|c| c.chain_id)));
-    let idempotency = Arc::new(IdempotencyCache::new());
-    let descriptors: HashMap<i64, ChainDescriptor> = cfg
-        .chains
-        .iter()
-        .map(|c| (c.chain_id, ChainDescriptor::from_cfg(c)))
-        .collect();
     for c in &cfg.chains {
-        let rpc = RpcEndpoint::new(&c.rpc_url)
-            .map_err(|e| AppError::Internal(format!("rpc endpoint chain {}: {}", c.chain_id, e)))?;
-        let mut mirror = TreeMirror::new(c.chain_id)
-            .map_err(|e| AppError::Internal(format!("mirror init chain {}: {}", c.chain_id, e)))?;
-        mirror
-            .bootstrap(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("bootstrap chain {}: {}", c.chain_id, e)))?;
-        mirror
-            .verify_chain_root(&rpc, &c.pool_address)
-            .await
-            .map_err(|e| AppError::Internal(format!("chain root check {}: {}", c.chain_id, e)))?;
-
-        let mirror = Arc::new(Mutex::new(mirror));
-        let submitter = Arc::new(
-            Submitter::new(
-                c.chain_id,
-                rpc.clone(),
-                &c.signer_key_hex,
-                &c.pool_address,
-                c.receipt_timeout_s,
-                c.receipt_poll_interval_ms,
-            )
-            .map_err(|e| {
-                AppError::Internal(format!("submitter init chain {}: {}", c.chain_id, e))
-            })?,
-        );
-
-        let fee_tokens: Vec<FeeToken> = c
-            .accepted_fee_tokens
-            .iter()
-            .map(FeeToken::from_cfg)
-            .collect::<AppResult<_>>()?;
-        validate_fee_token_pairs(oracle.as_ref(), &c.native_symbol, &fee_tokens, c.chain_id)
-            .await?;
-        let gas_estimator = Arc::new(GasEstimator::new(c.chain_id, rpc.clone()));
-        let gas_witness = Arc::new(GasWitness::new());
-        let fee_quoter = Arc::new(FeeQuoter {
-            chain_id: c.chain_id,
-            native_symbol: c.native_symbol.clone(),
-            native_decimals: c.native_decimals,
-            accepted_fee_tokens: fee_tokens,
-            oracle: oracle.clone(),
-            gas_estimator,
-            markup_bps: c.fee_markup_bps,
-        });
-
-        // Optional native route. The adapter is the pool's caller for a
-        // native unshield, so it needs its own submitter target; the tree
-        // mirror and prover stay shared with every other entry point.
-        let native = match &c.native_adapter_address {
-            Some(hex) => {
-                let address = Address::from_str(hex).map_err(|e| {
-                    AppError::Internal(format!(
-                        "native_adapter_address chain {}: {}",
-                        c.chain_id, e
-                    ))
-                })?;
-                let native_submitter = Arc::new(
-                    Submitter::new(
-                        c.chain_id,
-                        rpc.clone(),
-                        &c.signer_key_hex,
-                        hex,
-                        c.receipt_timeout_s,
-                        c.receipt_poll_interval_ms,
-                    )
-                    .map_err(|e| {
-                        AppError::Internal(format!(
-                            "native submitter init chain {}: {}",
-                            c.chain_id, e
-                        ))
-                    })?,
-                );
-                info!(chain_id = c.chain_id, adapter = %address, "native adapter route ready");
-                Some(Arc::new(NativeRoute {
-                    address,
-                    submitter: native_submitter,
-                }))
-            }
-            None => None,
-        };
-
-        let spend = SpendPipeline {
-            chain_id: c.chain_id,
-            mirror: mirror.clone(),
-            submitter: submitter.clone(),
-            prover: prover.clone(),
-            fee_quoter: fee_quoter.clone(),
-            gas_witness: gas_witness.clone(),
-            native,
-        };
-        spend_pipelines.insert(c.chain_id, Arc::new(spend));
-
-        // Optional swap pipeline. Same TreeMirror + prover as the spend
-        // pipeline so the per-chain mutex serialises across both. Dedicated
-        // submitter targets the wrapper address rather than MASP.
-        if let Some(wrapper_hex) = &c.swap_wrapper_address {
-            let wrapper_address = Address::from_str(wrapper_hex).map_err(|e| {
-                AppError::Internal(format!("swap_wrapper_address chain {}: {}", c.chain_id, e))
-            })?;
-            let swap_submitter = Arc::new(
-                Submitter::new(
-                    c.chain_id,
-                    rpc.clone(),
-                    &c.signer_key_hex,
-                    wrapper_hex,
-                    c.receipt_timeout_s,
-                    c.receipt_poll_interval_ms,
-                )
-                .map_err(|e| {
-                    AppError::Internal(format!("swap submitter init chain {}: {}", c.chain_id, e))
-                })?,
-            );
-            let swap = SwapPipeline {
-                chain_id: c.chain_id,
-                mirror: mirror.clone(),
-                submitter: swap_submitter,
-                prover: prover.clone(),
-                wrapper_address,
-                fee_quoter: fee_quoter.clone(),
-                gas_witness: gas_witness.clone(),
-            };
-            swap_pipelines.insert(c.chain_id, Arc::new(swap));
-            info!(
-                chain_id = c.chain_id,
-                wrapper = %wrapper_address,
-                "swap pipeline ready"
-            );
+        let chain = build_chain(c, &shared).await?;
+        spawn_flush_worker(chain.flush, Duration::from_secs(c.flush_interval_s));
+        spend_pipelines.insert(c.chain_id, chain.spend);
+        if let Some(swap) = chain.swap {
+            swap_pipelines.insert(c.chain_id, swap);
         }
-
-        let max_n = c.flush_max_n.clamp(1, MAX_L_BATCH);
-        let mempool = Arc::new(DepositMempool::new(pool.clone(), c.chain_id));
-        let flush = Arc::new(FlushPipeline {
-            chain_id: c.chain_id,
-            mirror,
-            submitter,
-            prover: prover.clone(),
-            mempool,
-            max_n,
-            events: events.clone(),
-        });
-        let interval = std::time::Duration::from_secs(c.flush_interval_s);
-        let flush_task = flush.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                match flush_task.tick().await {
-                    Ok(Some(_)) | Ok(None) => {}
-                    // A parked mirror never un-parks without a restart, so
-                    // keep the loop from retrying (and log-spamming) forever.
-                    Err(e @ AppError::MirrorDesynced(_)) => {
-                        error!(chain_id = flush_task.chain_id, error = %e, "flush worker stopping");
-                        return;
-                    }
-                    Err(e) => {
-                        warn!(chain_id = flush_task.chain_id, error = %e, "flush tick failed")
-                    }
-                }
-            }
-        });
-
-        info!(
-            chain_id = c.chain_id,
-            flush_interval_s = c.flush_interval_s,
-            flush_max_n = max_n,
-            "relayer pipelines ready"
-        );
     }
 
     Ok(AppState {
         spend_pipelines: Arc::new(spend_pipelines),
         swap_pipelines: Arc::new(swap_pipelines),
-        events,
+        events: shared.events,
         pool,
-        nullifiers,
-        idempotency,
-        descriptors: Arc::new(descriptors),
+        nullifiers: Arc::new(NullifierGuards::new(cfg.chains.iter().map(|c| c.chain_id))),
+        idempotency: Arc::new(IdempotencyCache::new()),
+        descriptors: Arc::new(
+            cfg.chains
+                .iter()
+                .map(|c| (c.chain_id, ChainDescriptor::from_cfg(c)))
+                .collect(),
+        ),
     })
+}
+
+/// Dependencies every chain's pipelines share. Built once so the per-chain
+/// code below reads as "what this chain adds", not as a list of clones.
+struct Shared {
+    pool: DbPool,
+    prover: Arc<dyn TreeUpdateBatchProver>,
+    oracle: Arc<dyn PriceOracle>,
+    events: Arc<EventBroadcaster>,
+    /// `None` when the deployment shipped no transact verification key.
+    transact_verifier: Option<Arc<TransactVerifier>>,
+}
+
+impl Shared {
+    fn new(
+        cfg: &RelayerConfig,
+        pool: DbPool,
+        prover: Arc<dyn TreeUpdateBatchProver>,
+    ) -> AppResult<Self> {
+        let oracle: Arc<dyn PriceOracle> = Arc::new(
+            CoinbaseOracle::new(&cfg.price_oracle)
+                .map_err(|e| AppError::Internal(format!("price oracle: {e}")))?,
+        );
+        Ok(Self {
+            pool,
+            prover,
+            oracle,
+            events: Arc::new(EventBroadcaster::new()),
+            // The key describes the circuit, not the deployment, so it is
+            // loaded once rather than per chain.
+            transact_verifier: load_transact_verifier(cfg)?,
+        })
+    }
+}
+
+fn load_transact_verifier(cfg: &RelayerConfig) -> AppResult<Option<Arc<TransactVerifier>>> {
+    let Some(path) = &cfg.prover.transact_vkey_path else {
+        warn!(
+            "prover.transact_vkey_path is unset: wallet proofs are not checked before the \
+             tree-update prove, so an invalid payload still costs a full Groth16"
+        );
+        return Ok(None);
+    };
+    let verifier = Arc::new(TransactVerifier::load(path)?);
+    info!(vkey = %path.display(), "transact proof pre-verification enabled");
+    Ok(Some(verifier))
+}
+
+/// What one configured chain contributes to the running relayer.
+struct ChainRuntime {
+    spend: Arc<SpendPipeline>,
+    /// Present only where `swap_wrapper_address` is configured.
+    swap: Option<Arc<SwapPipeline>>,
+    flush: Arc<FlushPipeline>,
+}
+
+async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
+    let rpc = RpcEndpoint::new(&c.rpc_url).map_err(|e| boot_err(c.chain_id, "rpc endpoint", e))?;
+    let mirror = bootstrap_mirror(c, shared, &rpc).await?;
+
+    // Taken before the mirror goes behind its mutex, so `/chains` can read the
+    // tree's state without waiting on a submission.
+    let snapshot = mirror.snapshot();
+    let mirror = Arc::new(Mutex::new(mirror));
+
+    let submitter = submitter_for(c, &rpc, &c.pool_address, "submitter")?;
+    let fee_quoter = Arc::new(build_fee_quoter(c, shared, &rpc).await?);
+    let gas_witness = Arc::new(GasWitness::new());
+
+    let spend = Arc::new(SpendPipeline {
+        chain_id: c.chain_id,
+        mirror: mirror.clone(),
+        snapshot,
+        submitter: submitter.clone(),
+        prover: shared.prover.clone(),
+        fee_quoter: fee_quoter.clone(),
+        gas_witness: gas_witness.clone(),
+        native: build_native_route(c, &rpc)?,
+        transact_verifier: shared.transact_verifier.clone(),
+    });
+
+    let swap = build_swap_pipeline(c, shared, &rpc, &mirror, &fee_quoter, &gas_witness)?;
+
+    let flush = Arc::new(FlushPipeline {
+        chain_id: c.chain_id,
+        mirror,
+        submitter,
+        prover: shared.prover.clone(),
+        mempool: Arc::new(DepositMempool::new(shared.pool.clone(), c.chain_id)),
+        max_n: c.flush_max_n.clamp(1, MAX_L_BATCH),
+        events: shared.events.clone(),
+    });
+
+    info!(
+        chain_id = c.chain_id,
+        flush_interval_s = c.flush_interval_s,
+        flush_max_n = flush.max_n,
+        swap = swap.is_some(),
+        native = spend.native.is_some(),
+        "relayer pipelines ready"
+    );
+    Ok(ChainRuntime { spend, swap, flush })
+}
+
+/// Replay the chain's tree from the indexer's tables, then prove the result
+/// against the pool itself. Both must agree before this chain serves anything.
+async fn bootstrap_mirror(
+    c: &ChainCfg,
+    shared: &Shared,
+    rpc: &RpcEndpoint,
+) -> AppResult<TreeMirror> {
+    if let Some(declared) = c.public.tree_depth
+        && declared as usize != tree::DEPTH
+    {
+        return Err(boot_err(
+            c.chain_id,
+            "tree depth",
+            format!(
+                "public.tree_depth is {declared} but this relayer mirrors a depth-{} tree; \
+                 wallets would build proofs against the wrong shape",
+                tree::DEPTH
+            ),
+        ));
+    }
+    let mut mirror =
+        TreeMirror::new(c.chain_id).map_err(|e| boot_err(c.chain_id, "mirror init", e))?;
+    mirror
+        .bootstrap(&shared.pool)
+        .await
+        .map_err(|e| boot_err(c.chain_id, "bootstrap", e))?;
+    mirror
+        .verify_chain_root(rpc, &c.pool_address)
+        .await
+        .map_err(|e| boot_err(c.chain_id, "chain root check", e))?;
+    Ok(mirror)
+}
+
+/// Optional native route. The adapter is the pool's caller for a native
+/// unshield, so it needs its own submitter target; the tree mirror and prover
+/// stay shared with every other entry point.
+fn build_native_route(c: &ChainCfg, rpc: &RpcEndpoint) -> AppResult<Option<Arc<NativeRoute>>> {
+    let Some(hex) = &c.native_adapter_address else {
+        return Ok(None);
+    };
+    let address = parse_configured_address(c.chain_id, "native_adapter_address", hex)?;
+    let submitter = submitter_for(c, rpc, hex, "native submitter")?;
+    info!(chain_id = c.chain_id, adapter = %address, "native adapter route ready");
+    Ok(Some(Arc::new(NativeRoute { address, submitter })))
+}
+
+/// Optional swap pipeline. Shares the chain's `TreeMirror` and prover with the
+/// spend pipeline so the per-chain mutex serialises across both; its dedicated
+/// submitter targets the wrapper rather than the pool.
+fn build_swap_pipeline(
+    c: &ChainCfg,
+    shared: &Shared,
+    rpc: &RpcEndpoint,
+    mirror: &Arc<Mutex<TreeMirror>>,
+    fee_quoter: &Arc<FeeQuoter>,
+    gas_witness: &Arc<GasWitness>,
+) -> AppResult<Option<Arc<SwapPipeline>>> {
+    let Some(hex) = &c.swap_wrapper_address else {
+        return Ok(None);
+    };
+    let wrapper_address = parse_configured_address(c.chain_id, "swap_wrapper_address", hex)?;
+    let pipeline = SwapPipeline {
+        chain_id: c.chain_id,
+        mirror: mirror.clone(),
+        submitter: submitter_for(c, rpc, hex, "swap submitter")?,
+        prover: shared.prover.clone(),
+        wrapper_address,
+        fee_quoter: fee_quoter.clone(),
+        gas_witness: gas_witness.clone(),
+        default_deadline_s: c.swap_default_deadline_s,
+        transact_verifier: shared.transact_verifier.clone(),
+    };
+    info!(chain_id = c.chain_id, wrapper = %wrapper_address, "swap pipeline ready");
+    Ok(Some(Arc::new(pipeline)))
+}
+
+async fn build_fee_quoter(
+    c: &ChainCfg,
+    shared: &Shared,
+    rpc: &RpcEndpoint,
+) -> AppResult<FeeQuoter> {
+    let accepted_fee_tokens: Vec<FeeToken> = c
+        .accepted_fee_tokens
+        .iter()
+        .map(FeeToken::from_cfg)
+        .collect::<AppResult<_>>()?;
+    validate_fee_token_pairs(
+        shared.oracle.as_ref(),
+        &c.native_symbol,
+        &accepted_fee_tokens,
+        c.chain_id,
+    )
+    .await?;
+    Ok(FeeQuoter {
+        chain_id: c.chain_id,
+        native_symbol: c.native_symbol.clone(),
+        native_decimals: c.native_decimals,
+        accepted_fee_tokens,
+        oracle: shared.oracle.clone(),
+        gas_estimator: Arc::new(GasEstimator::new(c.chain_id, rpc.clone())),
+        markup_bps: c.fee_markup_bps,
+    })
+}
+
+/// Every submitter on a chain shares its signer and receipt settings and
+/// differs only in the contract it targets.
+fn submitter_for(
+    c: &ChainCfg,
+    rpc: &RpcEndpoint,
+    target_hex: &str,
+    what: &str,
+) -> AppResult<Arc<Submitter>> {
+    Submitter::new(
+        c.chain_id,
+        rpc.clone(),
+        &c.signer_key_hex,
+        target_hex,
+        c.receipt_timeout_s,
+        c.receipt_poll_interval_ms,
+    )
+    .map(Arc::new)
+    .map_err(|e| boot_err(c.chain_id, what, e))
+}
+
+fn parse_configured_address(chain_id: i64, field: &str, hex: &str) -> AppResult<Address> {
+    Address::from_str(hex).map_err(|e| boot_err(chain_id, field, e))
+}
+
+/// Boot failures are all fatal and all want the same "which chain, which step"
+/// framing, so they share one constructor.
+fn boot_err(chain_id: i64, step: &str, e: impl std::fmt::Display) -> AppError {
+    AppError::Internal(format!("chain {chain_id}: {step}: {e}"))
+}
+
+/// Drive one chain's flush pipeline on a fixed interval.
+///
+/// Ticks are skipped rather than queued when one runs long, and a parked mirror
+/// stops the worker outright: it never un-parks without a restart, so retrying
+/// would only spam the log.
+fn spawn_flush_worker(flush: Arc<FlushPipeline>, interval: Duration) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            match flush.tick().await {
+                Ok(_) => {}
+                Err(e @ AppError::MirrorDesynced(_)) => {
+                    error!(chain_id = flush.chain_id, error = %e, "flush worker stopping");
+                    return;
+                }
+                Err(e) => warn!(chain_id = flush.chain_id, error = %e, "flush tick failed"),
+            }
+        }
+    });
 }
 
 /// Boot-time check: every accepted fee token must resolve a price via the
@@ -303,10 +422,14 @@ async fn validate_fee_token_pairs(
             .price(native_symbol, &t.quote_symbol)
             .await
             .map_err(|e| {
-                AppError::Internal(format!(
-                    "fee token validation chain {}: pair {}-{} not resolvable: {}",
-                    chain_id, native_symbol, t.quote_symbol, e
-                ))
+                boot_err(
+                    chain_id,
+                    "fee token validation",
+                    format!(
+                        "pair {}-{} not resolvable: {}",
+                        native_symbol, t.quote_symbol, e
+                    ),
+                )
             })?;
     }
     info!(

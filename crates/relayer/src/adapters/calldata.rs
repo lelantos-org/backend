@@ -16,6 +16,112 @@ use fmd_crypto::tree::Field;
 /// `TRANSACT_OUT`.
 pub const MAX_L_BATCH: usize = 8;
 
+/// The batch circuit's leaf-indexed arrays, at full width.
+///
+/// One entry per leaf slot: the first `actual_count` are real and the rest are
+/// zero, padding that the circuit and the contract both enforce. Grouped into
+/// a struct rather than passed as five same-shaped arrays — every consumer
+/// needs all of them, and positional arguments of identical type transpose
+/// silently. Keeping `actual_count` here too means the count can never drift
+/// from the arrays it describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaddedBatch {
+    pub cms: [FixedBytes<32>; MAX_L_BATCH],
+    pub cv_deps: [[U256; 2]; MAX_L_BATCH],
+    pub leaf_asset: [u64; MAX_L_BATCH],
+    pub leaf_public_in: [u64; MAX_L_BATCH],
+    /// `1` marks a deposit leaf, whose value commitment the circuit pins to
+    /// its `(leaf_asset, leaf_public_in)`.
+    pub is_deposit: [u8; MAX_L_BATCH],
+    /// How many leading slots are real. A leaf count, not a pair count, so an
+    /// odd value is legitimate.
+    pub actual_count: u64,
+}
+
+impl PaddedBatch {
+    fn zeroed() -> Self {
+        Self {
+            cms: [FixedBytes::<32>::ZERO; MAX_L_BATCH],
+            cv_deps: [[U256::ZERO; 2]; MAX_L_BATCH],
+            leaf_asset: [0; MAX_L_BATCH],
+            leaf_public_in: [0; MAX_L_BATCH],
+            is_deposit: [0; MAX_L_BATCH],
+            actual_count: 0,
+        }
+    }
+
+    /// Spend leaves. Every deposit-only field stays zero: the transact SNARK
+    /// already proves conservation, so the per-leaf deposit binding is
+    /// intentionally skipped.
+    ///
+    /// # Panics
+    /// If more leaves are supplied than the circuit has slots. Callers are
+    /// fixed-arity (`TRANSACT_OUT`) or clamped to `MAX_L_BATCH` at boot.
+    pub fn from_spend(cms: &[FixedBytes<32>], cv_deps: &[[U256; 2]]) -> Self {
+        assert_eq!(cms.len(), cv_deps.len(), "one cv_dep per commitment");
+        let mut batch = Self::zeroed();
+        batch.cms[..cms.len()].copy_from_slice(cms);
+        batch.cv_deps[..cv_deps.len()].copy_from_slice(cv_deps);
+        batch.actual_count = cms.len() as u64;
+        batch
+    }
+
+    /// Deposit leaves, one per escrowed deposit, each carrying the binding the
+    /// circuit checks against its value commitment.
+    ///
+    /// # Panics
+    /// As [`Self::from_spend`].
+    pub fn from_deposits(leaves: &[DepositLeaf]) -> Self {
+        let mut batch = Self::zeroed();
+        for (slot, d) in batch.slots_mut().zip(leaves) {
+            *slot.cm = d.cm;
+            *slot.cv_dep = d.cv_dep;
+            *slot.leaf_asset = d.leaf_asset;
+            *slot.leaf_public_in = d.leaf_public_in;
+            *slot.is_deposit = 1;
+        }
+        batch.actual_count = leaves.len() as u64;
+        batch
+    }
+
+    fn slots_mut(&mut self) -> impl Iterator<Item = BatchSlot<'_>> {
+        self.cms
+            .iter_mut()
+            .zip(self.cv_deps.iter_mut())
+            .zip(self.leaf_asset.iter_mut())
+            .zip(self.leaf_public_in.iter_mut())
+            .zip(self.is_deposit.iter_mut())
+            .map(
+                |((((cm, cv_dep), leaf_asset), leaf_public_in), is_deposit)| BatchSlot {
+                    cm,
+                    cv_dep,
+                    leaf_asset,
+                    leaf_public_in,
+                    is_deposit,
+                },
+            )
+    }
+}
+
+/// One leaf slot, borrowed across all five arrays at once, so a write cannot
+/// land in the wrong one.
+struct BatchSlot<'a> {
+    cm: &'a mut FixedBytes<32>,
+    cv_dep: &'a mut [U256; 2],
+    leaf_asset: &'a mut u64,
+    leaf_public_in: &'a mut u64,
+    is_deposit: &'a mut u8,
+}
+
+/// One escrowed deposit's contribution to a batch.
+#[derive(Debug, Clone, Copy)]
+pub struct DepositLeaf {
+    pub cm: FixedBytes<32>,
+    pub cv_dep: [U256; 2],
+    pub leaf_asset: u64,
+    pub leaf_public_in: u64,
+}
+
 pub fn build_proof(p: &ProofDto) -> AppResult<IMasp::Proof> {
     Ok(IMasp::Proof {
         a: [parse_u256(&p.pi_a[0])?, parse_u256(&p.pi_a[1])?],
@@ -81,31 +187,23 @@ pub fn build_tu_proof(tp: &TreeUpdateBatchProof) -> AppResult<IMasp::Proof> {
     })
 }
 
-/// Build `TreeUpdateBatch` PI for `flushBatch` or spend ops. Every array is
-/// leaf-indexed; padding entries (i ≥ actual_count) MUST be zero — caller is
-/// responsible for padding. The circuit + contract jointly enforce this.
-#[allow(clippy::too_many_arguments)]
+/// Build the `TreeUpdateBatch` public inputs for `flushBatch` or a spend.
 pub fn build_tu_batch_pub_inputs(
     start_index: u64,
     old_root: &Field,
     new_root: &Field,
-    cms: [FixedBytes<32>; MAX_L_BATCH],
-    cv_deps: [[U256; 2]; MAX_L_BATCH],
-    leaf_asset: [u64; MAX_L_BATCH],
-    leaf_public_in: [u64; MAX_L_BATCH],
-    is_deposit: [u8; MAX_L_BATCH],
-    actual_count: u64,
+    batch: &PaddedBatch,
 ) -> IMasp::TreeUpdateBatch {
     IMasp::TreeUpdateBatch {
         oldRoot: FixedBytes::<32>::from(*old_root),
         newRoot: FixedBytes::<32>::from(*new_root),
         startIndex: start_index,
-        actualCount: actual_count,
-        cms,
-        cvDeps: cv_deps,
-        leafAsset: leaf_asset,
-        leafPublicIn: leaf_public_in,
-        isDeposit: is_deposit,
+        actualCount: batch.actual_count,
+        cms: batch.cms,
+        cvDeps: batch.cv_deps,
+        leafAsset: batch.leaf_asset,
+        leafPublicIn: batch.leaf_public_in,
+        isDeposit: batch.is_deposit,
     }
 }
 

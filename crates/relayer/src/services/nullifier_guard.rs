@@ -1,5 +1,9 @@
 //! Pre-SNARK nullifier validation.
 //!
+//! Every check covers all `TRANSACT_IN` nullifiers. The handlers used to pass
+//! only the first two — a leftover from the 2x2 shape — which left the last
+//! one unguarded on all three layers.
+//!
 //! Three layers, cheapest first:
 //!   1. Per-chain set of nullifiers currently being processed by this relayer.
 //!      Rejects concurrent duplicate submissions before proof generation.
@@ -14,6 +18,8 @@
 //! All three run before the spend/swap pipeline takes the tree lock, so a
 //! doomed submission never wastes CPU on Groth16 or gas on a revert.
 
+use crate::adapters::parse::{FieldRef, parse_field};
+use crate::domain::dto::{PubInputsDto, TRANSACT_IN};
 use crate::domain::error::{AppError, AppResult};
 use crate::repositories::spent_nullifiers;
 use database::DbPool;
@@ -26,6 +32,23 @@ use tokio::sync::Mutex;
 /// comfortably exceed indexer lag — it only has to hold until the nullifier
 /// reaches `spent_nullifiers`, after which layer 3 takes over.
 const RECENTLY_SPENT_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// The nullifier set of one transact payload, at the deployed circuit arity.
+/// Named so a shape change is a compile error at every call site rather than a
+/// silently short slice.
+pub type Nullifiers = [[u8; 32]; TRANSACT_IN];
+
+/// Every nullifier a payload spends, parsed from the wire.
+///
+/// Takes the whole array rather than an index range: reading a fixed prefix is
+/// exactly the bug this replaces.
+pub fn nullifiers_of(pi: &PubInputsDto) -> AppResult<Nullifiers> {
+    let mut out = [[0u8; 32]; TRANSACT_IN];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = parse_field(&pi.nullifier[i], FieldRef::Index("pubInputs.nullifier", i))?.0;
+    }
+    Ok(out)
+}
 
 /// Nullifier admission control, one entry per configured chain. A chain that
 /// is absent is an unknown chain, not an empty set.
@@ -43,10 +66,10 @@ impl NullifierGuards {
         }
     }
 
-    /// Reserve both nullifiers and verify neither is already spent. The
-    /// returned guard releases the reservation on drop — success, error, or
-    /// panic alike — so callers can hold it for the whole submission and
-    /// forget about it.
+    /// Reserve every nullifier in the payload and verify none is already
+    /// spent. The returned guard releases the reservation on drop — success,
+    /// error, or panic alike — so callers can hold it for the whole submission
+    /// and forget about it.
     ///
     /// On success the caller must call [`PendingGuard::spent`]; plain drop
     /// only releases the reservation.
@@ -54,7 +77,7 @@ impl NullifierGuards {
         &self,
         pool: &DbPool,
         chain_id: i64,
-        nfs: [[u8; 32]; 2],
+        nfs: Nullifiers,
     ) -> AppResult<PendingGuard> {
         let chain = self
             .chains
@@ -98,7 +121,7 @@ impl ChainNullifiers {
     async fn reserve_local(
         self: &Arc<Self>,
         chain_id: i64,
-        nfs: [[u8; 32]; 2],
+        nfs: Nullifiers,
     ) -> AppResult<PendingGuard> {
         // Hold the lock across contains+insert so two concurrent identical
         // requests cannot both pass through the gap.
@@ -131,7 +154,7 @@ impl ChainNullifiers {
 #[derive(Debug)]
 pub struct PendingGuard {
     chain: Arc<ChainNullifiers>,
-    nfs: [[u8; 32]; 2],
+    nfs: Nullifiers,
 }
 
 impl PendingGuard {
@@ -172,8 +195,25 @@ mod tests {
 
     const CHAIN_ID: i64 = 31337;
 
-    fn nfs(a: u8, b: u8) -> [[u8; 32]; 2] {
-        [[a; 32], [b; 32]]
+    /// Distinct nullifiers built from a seed, at the full circuit arity.
+    fn nfs(a: u8, b: u8) -> Nullifiers {
+        let mut out = [[0u8; 32]; TRANSACT_IN];
+        out[0] = [a; 32];
+        out[1] = [b; 32];
+        // Padding has to be seed-dependent, or two calls with different (a, b)
+        // would still collide on the slots past the second.
+        for (i, slot) in out.iter_mut().enumerate().skip(2) {
+            *slot = [a.wrapping_mul(31).wrapping_add(b).wrapping_add(i as u8); 32];
+        }
+        out
+    }
+
+    /// Same as `nfs`, but the collision sits in the LAST slot — the one the
+    /// handlers never used to pass.
+    fn nfs_colliding_on_last(last: u8) -> Nullifiers {
+        let mut out = nfs(50, 51);
+        out[TRANSACT_IN - 1] = [last; 32];
+        out
     }
 
     fn chain() -> Arc<ChainNullifiers> {
@@ -243,6 +283,52 @@ mod tests {
         drop(guard);
 
         c.reserve_local(CHAIN_ID, nfs(3, 4)).await.unwrap();
+    }
+
+    /// The regression: a payload whose only reused nullifier is the last one
+    /// used to sail through every layer, burning a Groth16 on a tx the pool
+    /// would reject.
+    #[tokio::test]
+    async fn a_collision_on_the_last_nullifier_is_rejected() {
+        let c = chain();
+        let _held = c
+            .reserve_local(CHAIN_ID, nfs_colliding_on_last(0xAB))
+            .await
+            .unwrap();
+
+        let err = c
+            .reserve_local(CHAIN_ID, nfs_colliding_on_last(0xAB))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NullifierInFlight(_)), "got {err}");
+    }
+
+    /// And the same for the already-landed cache.
+    #[tokio::test]
+    async fn a_landed_last_nullifier_is_held_back_too() {
+        let c = chain();
+        let guard = c
+            .reserve_local(CHAIN_ID, nfs_colliding_on_last(0xCD))
+            .await
+            .unwrap();
+        guard.spent().await;
+        drop(guard);
+
+        let err = c
+            .reserve_local(CHAIN_ID, nfs_colliding_on_last(0xCD))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AppError::NullifierAlreadySpent(_)),
+            "got {err}"
+        );
+    }
+
+    /// `nfs` must cover the whole shape, or the tests above would pass for the
+    /// wrong reason.
+    #[test]
+    fn the_guard_covers_every_circuit_input() {
+        assert_eq!(nfs(1, 2).len(), TRANSACT_IN);
     }
 
     #[tokio::test]

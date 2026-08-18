@@ -1,7 +1,8 @@
 // Orchestrates a fee estimate: observed gas units + live fee data + price
 // oracle + configured fee tokens → final `EstimateResponse`.
 //
-// Each accepted fee token is priced concurrently via `try_join_all`.
+// Each accepted fee token is priced concurrently; one that cannot be priced
+// drops out of the quote rather than failing it.
 // Amount math uses scaled integers (PRICE_SCALE=1e8) to avoid f64
 // precision loss for low-decimal tokens vs 18-decimal native.
 
@@ -11,10 +12,11 @@ use crate::domain::responses::{EstimateResponse, FeeQuote};
 use crate::services::gas_estimator::{GasEstimator, apply_markup};
 use crate::services::oracle::PriceOracle;
 use alloy::primitives::{Address, U256};
-use futures::future::try_join_all;
+use futures::future::join_all;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 const PRICE_SCALE: u128 = 100_000_000; // 1e8
 
@@ -50,6 +52,39 @@ impl FeeToken {
 }
 
 impl FeeQuoter {
+    /// One token's share of the quote, or `None` if it could not be priced.
+    fn quote_one(
+        &self,
+        token: &FeeToken,
+        price: AppResult<f64>,
+        total_native_wei: U256,
+    ) -> Option<FeeQuote> {
+        let price = match price {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    chain_id = self.chain_id,
+                    token = token.symbol,
+                    error = %e,
+                    "fee token priced out of the quote"
+                );
+                return None;
+            }
+        };
+        let amount = compute_token_amount(
+            total_native_wei,
+            self.native_decimals,
+            token.decimals,
+            price,
+        );
+        Some(FeeQuote {
+            token_symbol: token.symbol.clone(),
+            token_address: format!("{:#x}", token.address),
+            decimals: token.decimals,
+            amount: amount.to_string(),
+        })
+    }
+
     /// Price `gas_used` units at the chain's current fee data. Callers source
     /// the units from `gas_witness`, so this path costs one RPC round trip and
     /// a (usually cached) oracle lookup — no proving, no `eth_estimateGas`.
@@ -60,33 +95,30 @@ impl FeeQuoter {
 
         let oracle = self.oracle.clone();
         let native = self.native_symbol.clone();
-        let prices: Vec<f64> = try_join_all(self.accepted_fee_tokens.iter().map(|t| {
+        let prices: Vec<AppResult<f64>> = join_all(self.accepted_fee_tokens.iter().map(|t| {
             let oracle = oracle.clone();
             let native = native.clone();
             let quote = t.quote_symbol.clone();
             async move { oracle.price(&native, &quote).await }
         }))
-        .await?;
+        .await;
 
-        let fees = self
+        // One unresolvable pair drops that token from the quote rather than
+        // failing the estimate: a caller who can pay in any of the others is
+        // still served, and the boot-time check in `build_state` is what keeps
+        // a permanently broken pair from going unnoticed.
+        let fees: Vec<FeeQuote> = self
             .accepted_fee_tokens
             .iter()
-            .zip(prices.iter())
-            .map(|(t, price)| {
-                let amt = compute_token_amount(
-                    total_native_wei,
-                    self.native_decimals,
-                    t.decimals,
-                    *price,
-                );
-                FeeQuote {
-                    token_symbol: t.symbol.clone(),
-                    token_address: format!("{:#x}", t.address),
-                    decimals: t.decimals,
-                    amount: amt.to_string(),
-                }
-            })
+            .zip(prices)
+            .filter_map(|(token, price)| self.quote_one(token, price, total_native_wei))
             .collect();
+        if fees.is_empty() && !self.accepted_fee_tokens.is_empty() {
+            return Err(AppError::Oracle(format!(
+                "chain {}: no accepted fee token could be priced",
+                self.chain_id
+            )));
+        }
 
         let quoted_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -117,9 +149,12 @@ pub fn compute_token_amount(
         return U256::ZERO;
     }
     let price_scaled = (price * PRICE_SCALE as f64).round() as u128;
-    let num =
-        total_native_wei * U256::from(price_scaled) * U256::from(10u128.pow(token_dec as u32));
-    let den = U256::from(10u128.pow(native_dec as u32)) * U256::from(PRICE_SCALE);
+    // `U256::pow` rather than `10u128.pow`, which panics past 38 decimals.
+    // `RelayerConfig::validate` bounds both, but the arithmetic should not be
+    // the thing that enforces it.
+    let ten = U256::from(10u8);
+    let num = total_native_wei * U256::from(price_scaled) * ten.pow(U256::from(token_dec));
+    let den = ten.pow(U256::from(native_dec)) * U256::from(PRICE_SCALE);
     num / den
 }
 

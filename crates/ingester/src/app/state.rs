@@ -7,6 +7,10 @@ use crate::services::reorg::ReorgService;
 use std::sync::Arc;
 
 /// Bag of dependencies for one chain worker. Built once in `main`.
+///
+/// `Clone` so the supervisor can restart a worker without rebuilding the
+/// provider and repositories — everything inside is either `Arc` or cheap.
+#[derive(Clone)]
 pub struct WorkerDeps {
     pub cfg: ChainConfig,
     pub rpc: DynRpc,

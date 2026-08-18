@@ -60,6 +60,7 @@ async fn fmd_consume_pairs_root_advanced_with_note_created() {
         fmd_indexer::repositories::spent_nullifiers::PostgresSpentNullifiersRepo::new(pool.clone()),
     );
     let svc = fmd_indexer::services::consume::ConsumeServiceImpl::new(
+        pool.clone(),
         cursors,
         raw_events_repo,
         notes_repo,

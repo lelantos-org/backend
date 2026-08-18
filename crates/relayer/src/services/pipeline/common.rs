@@ -6,13 +6,16 @@
 //! payload-shape checks they apply. This module owns everything they share.
 
 use crate::adapters::abi::IMasp;
-use crate::adapters::calldata::{MAX_L_BATCH, build_tu_batch_pub_inputs};
-use crate::adapters::parse::{parse_address, parse_b32, parse_u256};
-use crate::domain::dto::{PubInputsDto, TRANSACT_OUT};
+use crate::adapters::calldata::{
+    PaddedBatch, build_aux, build_pub_inputs, build_tu_batch_pub_inputs,
+};
+use crate::adapters::parse::{FieldRef, parse_address, parse_field};
+use crate::domain::dto::{OutputAuxDto, PointDto, ProofDto, PubInputsDto, TRANSACT_OUT};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
-use crate::services::tree::{AdvancedState, ReservedSlot};
+use crate::services::transact_verifier::TransactVerifier;
+use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use crate::services::witness;
 use alloy::primitives::{Address, FixedBytes, U256};
 use std::sync::Arc;
@@ -62,8 +65,46 @@ impl TransactBinding {
                 }
             }
         }
+        check_field_elements(pi)?;
         Ok(())
     }
+}
+
+/// Reject any wallet-supplied value that is not a canonical BN254 field
+/// element.
+///
+/// This has to run before the mirror is touched. `out_cm` and `out_cv_dep`
+/// feed `TreeMirror::reserve_and_advance_batch`, which hashes them with
+/// Poseidon; a non-canonical one fails there, and if an earlier leaf in the
+/// same batch already went in, the mirror is left ahead of the chain. The rest
+/// are checked in the same pass because the contract's coefficient range check
+/// would reject them anyway — better a 400 than a burnt Groth16.
+pub fn check_field_elements(pi: &PubInputsDto) -> AppResult<()> {
+    parse_field(&pi.merkle_root, FieldRef::Named("pubInputs.merkleRoot"))?;
+    for (array, values) in [
+        ("pubInputs.nullifier", pi.nullifier.as_slice()),
+        ("pubInputs.outCm", pi.out_cm.as_slice()),
+    ] {
+        for (i, v) in values.iter().enumerate() {
+            parse_field(v, FieldRef::Index(array, i))?;
+        }
+    }
+    for (array, points) in [
+        ("pubInputs.inCv", pi.in_cv.as_slice()),
+        ("pubInputs.outCv", pi.out_cv.as_slice()),
+        ("pubInputs.outCvDep", pi.out_cv_dep.as_slice()),
+    ] {
+        for (i, p) in points.iter().enumerate() {
+            check_point(p, array, i)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_point(p: &PointDto, array: &str, i: usize) -> AppResult<()> {
+    parse_field(&p.x, FieldRef::Coord(array, i, "x"))?;
+    parse_field(&p.y, FieldRef::Coord(array, i, "y"))?;
+    Ok(())
 }
 
 /// Parsed leg-1 output commitments + value commitments, ready to feed the
@@ -83,46 +124,70 @@ impl SpendInputs {
             .map(|(cm, cv)| (cm.0, *cv))
             .collect()
     }
-}
 
-/// Padded arrays expected by `build_tu_batch_pub_inputs` and `compute_z`.
-/// Leaf slots `0..SPEND_LEAVES` carry the spend; everything else is zero.
-pub type PaddedBatchArrays = (
-    [FixedBytes<32>; MAX_L_BATCH],
-    [[U256; 2]; MAX_L_BATCH],
-    [u64; MAX_L_BATCH],
-    [u64; MAX_L_BATCH],
-    [u8; MAX_L_BATCH],
-);
+    /// The same leaves at the batch circuit's full width.
+    pub fn padded(&self) -> PaddedBatch {
+        PaddedBatch::from_spend(&self.cms, &self.cv_deps)
+    }
+}
 
 pub fn parse_spend_inputs(pi: &PubInputsDto) -> AppResult<SpendInputs> {
     let mut cms = [FixedBytes::<32>::ZERO; SPEND_LEAVES];
     let mut cv_deps = [[U256::ZERO; 2]; SPEND_LEAVES];
     for i in 0..SPEND_LEAVES {
-        cms[i] = parse_b32(&pi.out_cm[i])?;
+        cms[i] = parse_field(&pi.out_cm[i], FieldRef::Index("pubInputs.outCm", i))?;
         cv_deps[i] = [
-            parse_u256(&pi.out_cv_dep[i].x)?,
-            parse_u256(&pi.out_cv_dep[i].y)?,
+            field_u256(
+                &pi.out_cv_dep[i].x,
+                FieldRef::Coord("pubInputs.outCvDep", i, "x"),
+            )?,
+            field_u256(
+                &pi.out_cv_dep[i].y,
+                FieldRef::Coord("pubInputs.outCvDep", i, "y"),
+            )?,
         ];
     }
     Ok(SpendInputs { cms, cv_deps })
 }
 
-/// Build the padded arrays a spend feeds to the SNARK + calldata.
-/// `is_deposit` stays all-zero: the transact SNARK already proves
-/// conservation, so the per-leaf deposit binding is intentionally skipped.
-pub fn build_padded_spend_arrays(inputs: &SpendInputs) -> PaddedBatchArrays {
-    let mut cms_padded = [FixedBytes::<32>::ZERO; MAX_L_BATCH];
-    let mut cv_deps_padded = [[U256::ZERO, U256::ZERO]; MAX_L_BATCH];
-    cms_padded[..SPEND_LEAVES].copy_from_slice(&inputs.cms);
-    cv_deps_padded[..SPEND_LEAVES].copy_from_slice(&inputs.cv_deps);
-    (
-        cms_padded,
-        cv_deps_padded,
-        [0u64; MAX_L_BATCH],
-        [0u64; MAX_L_BATCH],
-        [0u8; MAX_L_BATCH],
-    )
+fn field_u256(s: &str, at: FieldRef<'_>) -> AppResult<U256> {
+    Ok(U256::from_be_bytes(parse_field(s, at)?.0))
+}
+
+/// Verify the wallet's transact proof locally, before anything expensive.
+///
+/// Shape checks alone cannot tell a real proof from a fabricated one, so
+/// without this a caller could spend the relayer's single-permit prover and the
+/// chain's tree mutex on payloads that were always going to be rejected
+/// on-chain. `None` means the deployment shipped no verification key, in which
+/// case there is nothing to check against — see `ProverCfg::transact_vkey_path`.
+pub fn verify_transact_proof(
+    verifier: Option<&TransactVerifier>,
+    proof: &ProofDto,
+    pi: &PubInputsDto,
+    aux: &[OutputAuxDto; TRANSACT_OUT],
+) -> AppResult<()> {
+    let Some(verifier) = verifier else {
+        return Ok(());
+    };
+    verifier.verify(proof, &build_pub_inputs(pi)?, &build_aux(aux)?)
+}
+
+/// Reject a payload proved against a root this relayer has never held.
+///
+/// The pool would revert `StaleOldRoot`, which reaches the caller as an opaque
+/// 502 after a full Groth16. Checked under the mirror lock, since that is what
+/// makes the answer stable.
+pub fn check_known_root(mirror: &TreeMirror, pi: &PubInputsDto) -> AppResult<()> {
+    let root = parse_field(&pi.merkle_root, FieldRef::Named("pubInputs.merkleRoot"))?;
+    if !mirror.knows_root(&root.0) {
+        return Err(AppError::BadRequest(
+            "pubInputs.merkleRoot is not a root this relayer has held recently; \
+             refresh the tree state and re-prove"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Run the tree-update SNARK for one spend: derive `z`, build the witness,
@@ -133,40 +198,27 @@ pub async fn prove_spend(
     advanced: &AdvancedState,
     inputs: &SpendInputs,
 ) -> AppResult<TreeUpdateBatchProof> {
-    let (cms_padded, cv_deps_padded, la, lpi, is_dep) = build_padded_spend_arrays(inputs);
     let z = fiat_shamir::compute_z(
         &slot.old_root,
         &advanced.new_root,
         slot.start_index,
-        SPEND_LEAVES as u64,
-        &cms_padded,
-        &cv_deps_padded,
-        &la,
-        &lpi,
-        &is_dep,
+        &inputs.padded(),
     );
     let w = witness::build_spend(slot, advanced, &inputs.cms, &inputs.cv_deps, z);
     prover.prove(w).await
 }
 
-/// Encode the `TreeUpdateBatch` public-inputs struct that both spend and
-/// swap calldata builders embed identically (`actualCount = SPEND_LEAVES`,
-/// rest zero-padded).
+/// Encode the `TreeUpdateBatch` public-inputs struct that both spend and swap
+/// calldata builders embed identically.
 pub fn build_tu_pi_for_spend(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
-    arrays: PaddedBatchArrays,
+    inputs: &SpendInputs,
 ) -> IMasp::TreeUpdateBatch {
-    let (cms_padded, cv_deps_padded, la, lpi, is_dep) = arrays;
     build_tu_batch_pub_inputs(
         slot.start_index,
         &slot.old_root,
         &advanced.new_root,
-        cms_padded,
-        cv_deps_padded,
-        la,
-        lpi,
-        is_dep,
-        SPEND_LEAVES as u64,
+        &inputs.padded(),
     )
 }

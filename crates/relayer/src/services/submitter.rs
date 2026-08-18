@@ -6,7 +6,7 @@
 // Everything expensive underneath it is not: the signer is parsed once here,
 // and the connection pool lives in `RpcEndpoint`.
 
-use crate::adapters::rpc::RpcEndpoint;
+use crate::adapters::rpc::{HttpTransport, RpcEndpoint};
 use crate::domain::error::{AppError, AppResult, revert_reason};
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256};
@@ -89,28 +89,38 @@ impl Submitter {
             .to(self.pool_address)
             .input(data.into());
 
-        // eth_call probe surfaces revert data that `send_transaction` would
-        // otherwise hide behind a gas-estimation failure. Keep the reason: it
-        // is the only place the rejecting guard is legible, and the send that
-        // follows reports the same rejection as an opaque RPC error.
-        let probe_revert = match provider.call(&tx.clone().from(self.signer_address)).await {
-            Ok(_) => None,
-            Err(e) => {
-                warn!(error = %e, "eth_call probe reverted; send_transaction will likely fail");
-                Some(e.to_string())
+        // The happy path does not probe. A contract guard that rejects the
+        // payload surfaces from `send_transaction` as an opaque gas-estimation
+        // failure, so the `eth_call` that makes the revert legible is run
+        // *after* that failure instead of ahead of every submission — same
+        // diagnosis, one fewer RPC round trip per successful spend.
+        let pending = match provider.send_transaction(tx.clone()).await {
+            Ok(pending) => pending,
+            Err(send_err) => {
+                let probe = self.probe_revert(&provider, &tx).await;
+                return Err(classify_send_failure(
+                    probe.as_deref(),
+                    &send_err.to_string(),
+                ));
             }
         };
-        let pending = provider
-            .send_transaction(tx)
-            .await
-            .map_err(|e| classify_send_failure(probe_revert.as_deref(), &e.to_string()))?
+        let pending = pending
             .with_required_confirmations(1)
             .with_timeout(Some(Duration::from_secs(self.receipt_timeout_s)));
         let tx_hash = *pending.tx_hash();
         info!(%tx_hash, "tx submitted, awaiting receipt");
-        let receipt = pending.get_receipt().await.map_err(|e| {
-            AppError::SubmitUnknown(format!("tx {} broadcast, no receipt: {}", tx_hash, e))
-        })?;
+        let receipt = match pending.get_receipt().await {
+            Ok(r) => r,
+            // No receipt inside the window. The transaction may still be in the
+            // mempool, so before declaring the outcome unknown — which parks
+            // the chain's mirror until a restart — give it one more look and
+            // one more window. Most timeouts here are a slow node or a fee
+            // spike, not a lost transaction.
+            Err(e) => {
+                self.await_late_receipt(&provider, tx_hash, &e.to_string())
+                    .await?
+            }
+        };
         if !receipt.status() {
             error!(tx_hash = %receipt.transaction_hash, "tx reverted on-chain");
             return Err(AppError::Reverted(format!(
@@ -134,6 +144,63 @@ impl Submitter {
             block_number,
             gas_used: receipt.gas_used as u64,
         })
+    }
+
+    /// One `eth_call` against the same payload, to recover the revert reason a
+    /// failed send hid behind a gas-estimation error.
+    async fn probe_revert<P: Provider<HttpTransport>>(
+        &self,
+        provider: &P,
+        tx: &alloy::rpc::types::TransactionRequest,
+    ) -> Option<String> {
+        match provider.call(&tx.clone().from(self.signer_address)).await {
+            Ok(_) => None,
+            Err(e) => {
+                warn!(error = %e, "eth_call probe reverted");
+                Some(e.to_string())
+            }
+        }
+    }
+
+    /// Second chance for a transaction whose receipt did not arrive in time.
+    ///
+    /// [`AppError::SubmitUnknown`] parks the chain's tree mirror until the
+    /// process restarts, so it is worth being sure. This polls the receipt
+    /// directly for another full window; only a transaction still missing at
+    /// the end of it is genuinely ambiguous.
+    async fn await_late_receipt<P: Provider<HttpTransport>>(
+        &self,
+        provider: &P,
+        tx_hash: B256,
+        first_error: &str,
+    ) -> AppResult<alloy::rpc::types::TransactionReceipt> {
+        warn!(
+            %tx_hash,
+            error = first_error,
+            "no receipt within the timeout; polling before declaring the outcome unknown"
+        );
+        let interval = Duration::from_millis(self.receipt_poll_interval_ms.max(1));
+        let poll = async {
+            loop {
+                match provider.get_transaction_receipt(tx_hash).await {
+                    Ok(Some(r)) => return r,
+                    Ok(None) => {}
+                    // A failing poll says nothing about the transaction, so
+                    // keep trying until the window closes.
+                    Err(e) => warn!(%tx_hash, error = %e, "late receipt poll failed"),
+                }
+                tokio::time::sleep(interval).await;
+            }
+        };
+        match tokio::time::timeout(Duration::from_secs(self.receipt_timeout_s), poll).await {
+            Ok(receipt) => {
+                info!(%tx_hash, "late receipt recovered");
+                Ok(receipt)
+            }
+            Err(_) => Err(AppError::SubmitUnknown(format!(
+                "tx {tx_hash} broadcast, still no receipt after a second window: {first_error}"
+            ))),
+        }
     }
 }
 

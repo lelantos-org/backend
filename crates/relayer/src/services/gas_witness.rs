@@ -14,9 +14,16 @@
 //! Note this is a *fee* quote, not a gas limit: submissions still take their
 //! limit from alloy's own per-tx estimate, so a stale value here only shifts a
 //! little cost between relayer and user.
+//!
+//! Swaps break the "last value predicts the next" assumption: gas there scales
+//! with route length and adapter, so a single-hop observation would under-quote
+//! the multi-hop that follows. Every entry point therefore quotes the *high
+//! water mark* of a bounded window of recent observations rather than the last
+//! one, which tracks the expensive shape while still decaying once the window
+//! has rolled past it.
 
 use crate::domain::dto::SpendKind;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Discriminants double as slot indices into [`GasWitness::observed`], so they
 /// must stay `0..COUNT` and contiguous.
@@ -74,30 +81,63 @@ impl From<SpendKind> for EntryPoint {
     }
 }
 
+/// How many recent observations an entry point quotes over. Small enough that
+/// a genuinely cheaper deployment is reflected within a handful of
+/// submissions, large enough that one cheap swap does not under-quote the
+/// expensive route that follows it.
+const WINDOW: usize = 8;
+
 /// Process-wide, one per chain. Lock-free: quoting must not queue behind
 /// submissions.
 pub struct GasWitness {
-    observed: [AtomicU64; EntryPoint::COUNT],
+    windows: [Window; EntryPoint::COUNT],
+}
+
+/// A fixed ring of recent observations. `0` means "no observation yet", which
+/// is also the value a fresh slot holds, so an unfilled ring simply
+/// contributes nothing to the maximum.
+struct Window {
+    slots: [AtomicU64; WINDOW],
+    next: AtomicUsize,
+}
+
+impl Window {
+    fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| AtomicU64::new(0)),
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    fn record(&self, gas_used: u64) {
+        let i = self.next.fetch_add(1, Ordering::Relaxed) % WINDOW;
+        self.slots[i].store(gas_used, Ordering::Relaxed);
+    }
+
+    fn high_water(&self) -> u64 {
+        self.slots
+            .iter()
+            .fold(0, |max, s| max.max(s.load(Ordering::Relaxed)))
+    }
 }
 
 impl GasWitness {
     pub fn new() -> Self {
         Self {
-            observed: std::array::from_fn(|_| AtomicU64::new(0)),
+            windows: std::array::from_fn(|_| Window::new()),
         }
     }
 
     /// Record a confirmed submission's gas.
     pub fn observe(&self, entry: EntryPoint, gas_used: u64) {
-        self.observed[entry.index()].store(gas_used, Ordering::Relaxed);
+        self.windows[entry.index()].record(gas_used);
     }
 
-    /// Best estimate for the next call, floored at the seed so one unusually
-    /// cheap tx (warm storage, no token transfer) cannot under-quote the next.
+    /// Best estimate for the next call: the most expensive of the last
+    /// [`WINDOW`] submissions, floored at the seed so one unusually cheap tx
+    /// (warm storage, no token transfer) cannot under-quote the next.
     pub fn gas_for(&self, entry: EntryPoint) -> u64 {
-        self.observed[entry.index()]
-            .load(Ordering::Relaxed)
-            .max(entry.seed())
+        self.windows[entry.index()].high_water().max(entry.seed())
     }
 }
 
@@ -129,6 +169,28 @@ mod tests {
         let w = GasWitness::new();
         w.observe(EntryPoint::Swap, 1);
         assert_eq!(w.gas_for(EntryPoint::Swap), EntryPoint::Swap.seed());
+    }
+
+    /// The swap case: a cheap single-hop right after an expensive multi-hop
+    /// must not drag the quote down to the cheap one.
+    #[test]
+    fn a_cheap_observation_does_not_undo_an_expensive_one() {
+        let w = GasWitness::new();
+        w.observe(EntryPoint::Swap, 2_000_000);
+        w.observe(EntryPoint::Swap, 1_000_000);
+        assert_eq!(w.gas_for(EntryPoint::Swap), 2_000_000);
+    }
+
+    /// But the window is bounded, so a one-off spike does eventually roll off
+    /// rather than over-quoting forever.
+    #[test]
+    fn an_old_spike_rolls_out_of_the_window() {
+        let w = GasWitness::new();
+        w.observe(EntryPoint::Swap, 5_000_000);
+        for _ in 0..WINDOW {
+            w.observe(EntryPoint::Swap, 1_000_000);
+        }
+        assert_eq!(w.gas_for(EntryPoint::Swap), 1_000_000);
     }
 
     #[test]

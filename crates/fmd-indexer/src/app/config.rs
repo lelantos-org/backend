@@ -15,6 +15,22 @@ pub struct FmdIndexerConfig {
     pub filter_batch: usize,
     #[serde(default = "default_filter_tick_ms")]
     pub filter_tick_ms: u64,
+    /// Consume-loop batch size. Defaults to `filter_batch`, but the two loops
+    /// price it differently: for the filter it is a throughput knob, while for
+    /// consume it bounds the widest tx that can be committed at all.
+    #[serde(default)]
+    pub consume_batch: Option<usize>,
+    #[serde(default)]
+    pub consume_tick_ms: Option<u64>,
+}
+
+impl FmdIndexerConfig {
+    pub fn consume_batch(&self) -> usize {
+        self.consume_batch.unwrap_or(self.filter_batch)
+    }
+    pub fn consume_tick_ms(&self) -> u64 {
+        self.consume_tick_ms.unwrap_or(self.filter_tick_ms)
+    }
 }
 
 impl FmdIndexerConfig {
@@ -30,6 +46,8 @@ impl FmdIndexerConfig {
                 filter_workers: default_filter_workers(),
                 filter_batch: default_filter_batch(),
                 filter_tick_ms: default_filter_tick_ms(),
+                consume_batch: None,
+                consume_tick_ms: None,
             })
         }
     }

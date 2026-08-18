@@ -9,5 +9,6 @@ pub mod oracle;
 pub mod pipeline;
 pub mod prover;
 pub mod submitter;
+pub mod transact_verifier;
 pub mod tree;
 pub mod witness;

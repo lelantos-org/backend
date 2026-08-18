@@ -26,7 +26,7 @@ DEST="${DEST:-${STACK_DIR}/circuits}"
 REPO="lelantos-org/circuits"
 VERSION_FILE="${DEST}/.version"
 
-ASSETS="tree_update_batch.wasm tree_update_batch.r1cs tree_update_batch_final.zkey"
+ASSETS="tree_update_batch.wasm tree_update_batch.r1cs tree_update_batch_final.zkey 3x3_verification_key.json"
 
 # Nothing to do when the cached artifacts already match the requested tag.
 is_cached() {

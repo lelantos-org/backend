@@ -1,5 +1,5 @@
 use crate::domain::error::IngesterError;
-use crate::domain::models::RawEvent;
+use crate::repositories::checkout;
 use async_trait::async_trait;
 use database::DbPool;
 use database::schema::raw_events;
@@ -8,35 +8,32 @@ use diesel::sql_query;
 use diesel::sql_types::Text;
 use diesel_async::RunQueryDsl;
 
+/// Channel announcing newly appended rows.
+pub const CHANNEL_APPENDED: &str = "raw_events_appended";
+/// Channel announcing that rows at or above a height were withdrawn.
+///
+/// Consumers stream `raw_events` by ascending `id`, so re-inserted canonical
+/// rows are picked up naturally — but state they already derived from the
+/// orphaned rows is invisible to that cursor and has to be retracted
+/// explicitly. Payload is `<chain_id>:<rewind_to>`.
+///
+/// This is a latency optimisation, not the mechanism: `chain_reorgs` is the
+/// durable record, because a NOTIFY sent while a consumer is down is simply
+/// lost.
+pub const CHANNEL_REORG: &str = "raw_events_reorg";
+
 #[async_trait]
 pub trait RawEventRepo: Send + Sync {
-    async fn insert_batch(&self, rows: &[RawEvent]) -> Result<usize, IngesterError>;
-    async fn delete_from_block(
+    /// Distinct `(block_number, block_hash)` in `[from_block, to_block]`,
+    /// highest block first. Drives the reorg anchor walk.
+    async fn block_hashes_desc(
         &self,
         chain_id: i64,
         from_block: i64,
-    ) -> Result<usize, IngesterError>;
-    async fn block_hash_at(
-        &self,
-        chain_id: i64,
-        block_number: i64,
-    ) -> Result<Option<Vec<u8>>, IngesterError>;
-    async fn notify(&self, chain_id: i64) -> Result<(), IngesterError>;
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = raw_events)]
-struct RawEventRow<'a> {
-    chain_id: i64,
-    block_number: i64,
-    evm_block_number: Option<i64>,
-    block_hash: &'a [u8],
-    block_ts: i64,
-    tx_hash: &'a [u8],
-    log_index: i32,
-    event_kind: i16,
-    topics: &'a [Vec<u8>],
-    data: &'a [u8],
+        to_block: i64,
+    ) -> Result<Vec<(i64, Vec<u8>)>, IngesterError>;
+    async fn notify_appended(&self, chain_id: i64) -> Result<(), IngesterError>;
+    async fn notify_reorg(&self, chain_id: i64, rewind_to: i64) -> Result<(), IngesterError>;
 }
 
 pub struct PostgresRawEventRepo {
@@ -47,102 +44,43 @@ impl PostgresRawEventRepo {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
+
+    async fn notify(&self, channel: &str, payload: String) -> Result<(), IngesterError> {
+        let mut conn = checkout(&self.pool).await?;
+        sql_query("SELECT pg_notify($1, $2)")
+            .bind::<Text, _>(channel.to_string())
+            .bind::<Text, _>(payload)
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl RawEventRepo for PostgresRawEventRepo {
-    async fn insert_batch(&self, rows: &[RawEvent]) -> Result<usize, IngesterError> {
-        if rows.is_empty() {
-            return Ok(0);
-        }
-        let to_insert: Vec<RawEventRow> = rows
-            .iter()
-            .map(|r| RawEventRow {
-                chain_id: r.chain_id,
-                evm_block_number: Some(r.evm_block_number),
-                block_number: r.block_number,
-                block_hash: &r.block_hash,
-                block_ts: r.block_ts,
-                tx_hash: &r.tx_hash,
-                log_index: r.log_index,
-                event_kind: r.event_kind,
-                topics: &r.topics,
-                data: &r.data,
-            })
-            .collect();
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        let n = diesel::insert_into(raw_events::table)
-            .values(&to_insert)
-            .on_conflict((
-                raw_events::chain_id,
-                raw_events::block_number,
-                raw_events::log_index,
-            ))
-            .do_nothing()
-            .execute(&mut conn)
-            .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        Ok(n)
-    }
-
-    async fn delete_from_block(
+    async fn block_hashes_desc(
         &self,
         chain_id: i64,
         from_block: i64,
-    ) -> Result<usize, IngesterError> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        let n = diesel::delete(
-            raw_events::table
-                .filter(raw_events::chain_id.eq(chain_id))
-                .filter(raw_events::block_number.ge(from_block)),
-        )
-        .execute(&mut conn)
-        .await
-        .map_err(|e| IngesterError::Db(e.to_string()))?;
-        Ok(n)
-    }
-
-    async fn block_hash_at(
-        &self,
-        chain_id: i64,
-        block_number: i64,
-    ) -> Result<Option<Vec<u8>>, IngesterError> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        let row: Option<Vec<u8>> = raw_events::table
+        to_block: i64,
+    ) -> Result<Vec<(i64, Vec<u8>)>, IngesterError> {
+        let mut conn = checkout(&self.pool).await?;
+        Ok(raw_events::table
             .filter(raw_events::chain_id.eq(chain_id))
-            .filter(raw_events::block_number.eq(block_number))
-            .select(raw_events::block_hash)
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        Ok(row)
+            .filter(raw_events::block_number.between(from_block, to_block))
+            .distinct_on(raw_events::block_number)
+            .order(raw_events::block_number.desc())
+            .select((raw_events::block_number, raw_events::block_hash))
+            .load(&mut conn)
+            .await?)
     }
 
-    async fn notify(&self, chain_id: i64) -> Result<(), IngesterError> {
-        let mut conn = self
-            .pool
-            .get()
+    async fn notify_appended(&self, chain_id: i64) -> Result<(), IngesterError> {
+        self.notify(CHANNEL_APPENDED, chain_id.to_string()).await
+    }
+
+    async fn notify_reorg(&self, chain_id: i64, rewind_to: i64) -> Result<(), IngesterError> {
+        self.notify(CHANNEL_REORG, format!("{}:{}", chain_id, rewind_to))
             .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        sql_query("SELECT pg_notify($1, $2)")
-            .bind::<Text, _>("raw_events_appended")
-            .bind::<Text, _>(chain_id.to_string())
-            .execute(&mut conn)
-            .await
-            .map_err(|e| IngesterError::Db(e.to_string()))?;
-        Ok(())
     }
 }

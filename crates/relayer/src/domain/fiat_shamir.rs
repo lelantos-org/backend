@@ -13,57 +13,31 @@
 //   [4 + 4*MAX_L .. 3 + 5*MAX_L]         leafPublicIn[0..MAX_L-1]
 //   [4 + 5*MAX_L .. 3 + 6*MAX_L]         isDeposit[0..MAX_L-1]
 
-use crate::adapters::calldata::MAX_L_BATCH;
-use alloy::primitives::{FixedBytes, U256, keccak256};
+use crate::adapters::calldata::{MAX_L_BATCH, PaddedBatch};
+use crate::adapters::parse::BN254_R;
+use alloy::primitives::{U256, keccak256};
 use alloy::sol_types::SolValue;
 use fmd_crypto::tree::Field;
-use std::sync::LazyLock;
 
-/// BN254 scalar field order.
-static BN254_R: LazyLock<U256> = LazyLock::new(|| {
-    U256::from_str_radix(
-        "21888242871839275222246405745257275088548364400416034343698204186575808495617",
-        10,
-    )
-    .expect("BN254 modulus literal")
-});
-
-#[allow(clippy::too_many_arguments)]
 pub fn compute_z(
     old_root: &Field,
     new_root: &Field,
     start_index: u64,
-    actual_count: u64,
-    cms: &[FixedBytes<32>; MAX_L_BATCH],
-    cv_deps: &[[U256; 2]; MAX_L_BATCH],
-    leaf_asset: &[u64; MAX_L_BATCH],
-    leaf_public_in: &[u64; MAX_L_BATCH],
-    is_deposit: &[u8; MAX_L_BATCH],
+    batch: &PaddedBatch,
 ) -> String {
     let mut coeffs: Vec<U256> = Vec::with_capacity(4 + 6 * MAX_L_BATCH);
     coeffs.push(U256::from_be_bytes(*old_root));
     coeffs.push(U256::from_be_bytes(*new_root));
     coeffs.push(U256::from(start_index));
-    coeffs.push(U256::from(actual_count));
-    for cm in cms.iter() {
-        coeffs.push(U256::from_be_bytes(cm.0));
-    }
-    for pt in cv_deps.iter() {
-        coeffs.push(pt[0]);
-        coeffs.push(pt[1]);
-    }
-    for v in leaf_asset.iter() {
-        coeffs.push(U256::from(*v));
-    }
-    for v in leaf_public_in.iter() {
-        coeffs.push(U256::from(*v));
-    }
-    for v in is_deposit.iter() {
-        coeffs.push(U256::from(*v));
-    }
-    let encoded = coeffs.abi_encode();
-    let h = keccak256(&encoded);
-    let z = U256::from_be_bytes(h.0) % *BN254_R;
+    coeffs.push(U256::from(batch.actual_count));
+    coeffs.extend(batch.cms.iter().map(|cm| U256::from_be_bytes(cm.0)));
+    coeffs.extend(batch.cv_deps.iter().flatten().copied());
+    coeffs.extend(batch.leaf_asset.iter().copied().map(U256::from));
+    coeffs.extend(batch.leaf_public_in.iter().copied().map(U256::from));
+    coeffs.extend(batch.is_deposit.iter().copied().map(U256::from));
+    debug_assert_eq!(coeffs.len(), 4 + 6 * MAX_L_BATCH);
+
+    let z = U256::from_be_bytes(keccak256(coeffs.abi_encode()).0) % *BN254_R;
     z.to_string()
 }
 
@@ -80,6 +54,7 @@ mod tests {
     //! `TreeUpdateRejected`.
 
     use super::*;
+    use alloy::primitives::FixedBytes;
 
     fn field(dec: &str) -> Field {
         U256::from_str_radix(dec, 10)
@@ -98,6 +73,25 @@ mod tests {
                 U256::from_str_radix(p[1], 10).expect("cv y"),
             ]
         })
+    }
+
+    /// A vector's published arrays, as the batch the relayer would have built.
+    fn batch(
+        cms: [FixedBytes<32>; MAX_L_BATCH],
+        cv_deps: [[U256; 2]; MAX_L_BATCH],
+        leaf_asset: [u64; MAX_L_BATCH],
+        leaf_public_in: [u64; MAX_L_BATCH],
+        is_deposit: [u8; MAX_L_BATCH],
+        actual_count: u64,
+    ) -> PaddedBatch {
+        PaddedBatch {
+            cms,
+            cv_deps,
+            leaf_asset,
+            leaf_public_in,
+            is_deposit,
+            actual_count,
+        }
     }
 
     /// `single-deposit-empty-tree` — One deposit leaf into an empty tree; per-leaf binding active.
@@ -134,12 +128,7 @@ mod tests {
             &field("8609704094418396324511832574933371601208234217740666943293213721288143421607"),
             &field("18982714174264210624719308725723541775850103495556838081460623913484912999053"),
             0,
-            1,
-            &cms,
-            &cv_deps,
-            &leaf_asset,
-            &leaf_public_in,
-            &is_deposit,
+            &batch(cms, cv_deps, leaf_asset, leaf_public_in, is_deposit, 1),
         );
         assert_eq!(
             z,
@@ -187,12 +176,7 @@ mod tests {
             &field("8609704094418396324511832574933371601208234217740666943293213721288143421607"),
             &field("21111111995574014383501506628652439267483092886486391783740534242857993335558"),
             0,
-            3,
-            &cms,
-            &cv_deps,
-            &leaf_asset,
-            &leaf_public_in,
-            &is_deposit,
+            &batch(cms, cv_deps, leaf_asset, leaf_public_in, is_deposit, 3),
         );
         assert_eq!(
             z,
@@ -237,12 +221,7 @@ mod tests {
             &field("16317179763850847199255836009578461868788906640504234318695444798435183315946"),
             &field("18791493954298985871190032798805294413512517775796641227739822589544247321992"),
             5,
-            2,
-            &cms,
-            &cv_deps,
-            &leaf_asset,
-            &leaf_public_in,
-            &is_deposit,
+            &batch(cms, cv_deps, leaf_asset, leaf_public_in, is_deposit, 2),
         );
         assert_eq!(
             z,

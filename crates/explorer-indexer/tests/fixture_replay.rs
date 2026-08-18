@@ -55,7 +55,7 @@ async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
         .unwrap();
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "TRUNCATE raw_events, chain_state, consumer_cursors, notes, \
+        "TRUNCATE raw_events, chain_state, chain_reorgs, consumer_cursors, notes, \
          subscriptions, matches, assets, tree_advances \
          RESTART IDENTITY CASCADE",
     )

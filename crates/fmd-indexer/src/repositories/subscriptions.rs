@@ -1,4 +1,4 @@
-use crate::domain::error::{FmdIndexerError, Result};
+use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
 use database::schema::subscriptions;
@@ -47,6 +47,7 @@ pub trait SubscriptionsRepo: Send + Sync {
     /// costs bounded work per tick instead of a fleet-wide rescan.
     async fn next_backfilling(&self, through_note_id: i64) -> Result<Option<SubscriptionRow>>;
 
+    /// Advance the backfill pointer. Never rewinds it — see the impl.
     async fn advance_backfill(&self, id: i64, through_note_id: i64) -> Result<()>;
 }
 
@@ -63,11 +64,7 @@ impl PostgresSubscriptionsRepo {
 #[async_trait]
 impl SubscriptionsRepo for PostgresSubscriptionsRepo {
     async fn list_active(&self) -> Result<Vec<SubscriptionRow>> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let rows = subscriptions::table
             .filter(subscriptions::active.eq(true))
             .select(SubscriptionRow::as_select())
@@ -77,11 +74,7 @@ impl SubscriptionsRepo for PostgresSubscriptionsRepo {
     }
 
     async fn next_backfilling(&self, through_note_id: i64) -> Result<Option<SubscriptionRow>> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let row = subscriptions::table
             .filter(subscriptions::active.eq(true))
             .filter(subscriptions::backfilled_through_note_id.lt(through_note_id))
@@ -94,15 +87,19 @@ impl SubscriptionsRepo for PostgresSubscriptionsRepo {
     }
 
     async fn advance_backfill(&self, id: i64, through_note_id: i64) -> Result<()> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
-        diesel::update(subscriptions::table.filter(subscriptions::id.eq(id)))
-            .set(subscriptions::backfilled_through_note_id.eq(through_note_id))
-            .execute(&mut conn)
-            .await?;
+        let mut conn = super::conn(&self.pool).await?;
+        // Advance only. The filter loop is deliberately unlocked, so two
+        // replicas can be mid-backfill on the same subscription; without this
+        // guard the slower one's older pointer lands last and rewinds the
+        // faster one, re-scanning an unbounded range every round.
+        diesel::update(
+            subscriptions::table
+                .filter(subscriptions::id.eq(id))
+                .filter(subscriptions::backfilled_through_note_id.lt(through_note_id)),
+        )
+        .set(subscriptions::backfilled_through_note_id.eq(through_note_id))
+        .execute(&mut conn)
+        .await?;
         Ok(())
     }
 }

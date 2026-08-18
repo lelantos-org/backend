@@ -5,6 +5,9 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub type DbPool = Pool<AsyncDieselConnectionManager<AsyncPgConnection>>;
+/// A connection checked out of [`DbPool`]. Named so repositories can hand it
+/// around without spelling the bb8/diesel-async generics at every call site.
+pub type DbConn<'a> = bb8::PooledConnection<'a, AsyncDieselConnectionManager<AsyncPgConnection>>;
 
 #[derive(Debug, Error)]
 pub enum PoolError {

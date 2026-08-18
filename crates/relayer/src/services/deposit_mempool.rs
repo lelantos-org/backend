@@ -70,7 +70,13 @@ impl DepositMempool {
             .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
             .filter(deposit_escrowed_events::flushed_at_block.is_null())
             .filter(deposit_escrowed_events::canceled_at_block.is_null())
-            .order(deposit_escrowed_events::submitted_at_block.asc())
+            // `deposit_id` breaks ties inside a block. Without it the subset
+            // a limited flush picks — and the leaf order it commits — is
+            // whatever the planner happens to return.
+            .order((
+                deposit_escrowed_events::submitted_at_block.asc(),
+                deposit_escrowed_events::deposit_id.asc(),
+            ))
             .limit(limit as i64)
             .select((
                 deposit_escrowed_events::deposit_id,

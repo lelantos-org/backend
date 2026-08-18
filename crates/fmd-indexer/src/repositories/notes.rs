@@ -1,4 +1,4 @@
-use crate::domain::error::{FmdIndexerError, Result};
+use crate::domain::error::{Result, log_unique_violation};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use database::DbPool;
@@ -58,6 +58,11 @@ pub trait NotesRepo: Send + Sync {
     async fn max_id(&self) -> Result<i64>;
 }
 
+/// Rows per INSERT. Postgres caps a statement at 65535 bind parameters and
+/// `NewNote` binds 13 columns, so an operator raising `filter_batch` past
+/// ~5000 would otherwise turn every tick into a hard error.
+const INSERT_CHUNK: usize = 2000;
+
 pub struct PostgresNotesRepo {
     pool: DbPool,
 }
@@ -74,26 +79,22 @@ impl NotesRepo for PostgresNotesRepo {
         if rows.is_empty() {
             return Ok(0);
         }
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
-        let n = diesel::insert_into(notes::table)
-            .values(rows)
-            .on_conflict((notes::chain_id, notes::cm))
-            .do_nothing()
-            .execute(&mut conn)
-            .await?;
+        let mut conn = super::conn(&self.pool).await?;
+        let mut n = 0;
+        for chunk in rows.chunks(INSERT_CHUNK) {
+            n += diesel::insert_into(notes::table)
+                .values(chunk)
+                .on_conflict((notes::chain_id, notes::cm))
+                .do_nothing()
+                .execute(&mut conn)
+                .await
+                .inspect_err(|e| log_unique_violation("notes", e))?;
+        }
         Ok(n)
     }
 
     async fn delete_from_block(&self, chain_id: i64, from_block: i64) -> Result<usize> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let n = diesel::delete(
             notes::table
                 .filter(notes::chain_id.eq(chain_id))
@@ -105,11 +106,7 @@ impl NotesRepo for PostgresNotesRepo {
     }
 
     async fn fetch_after(&self, chain_id: i64, after_id: i64, limit: i64) -> Result<Vec<NoteRow>> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let rows = notes::table
             .filter(notes::chain_id.eq(chain_id))
             .filter(notes::id.gt(after_id))
@@ -122,11 +119,7 @@ impl NotesRepo for PostgresNotesRepo {
     }
 
     async fn fetch_after_any_chain(&self, after_id: i64, limit: i64) -> Result<Vec<NoteRow>> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let rows = notes::table
             .filter(notes::id.gt(after_id))
             .order(notes::id.asc())
@@ -138,11 +131,7 @@ impl NotesRepo for PostgresNotesRepo {
     }
 
     async fn max_id(&self) -> Result<i64> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let max: Option<i64> = notes::table
             .select(diesel::dsl::max(notes::id))
             .first(&mut conn)

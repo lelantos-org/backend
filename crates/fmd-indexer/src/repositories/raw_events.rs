@@ -1,4 +1,4 @@
-use crate::domain::error::{FmdIndexerError, Result};
+use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
 use database::schema::raw_events;
@@ -59,11 +59,7 @@ impl RawEventsRepo for PostgresRawEventsRepo {
         kinds: &[i16],
         limit: i64,
     ) -> Result<Vec<RawEventRow>> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let rows = raw_events::table
             .filter(raw_events::chain_id.eq(chain_id))
             .filter(raw_events::id.gt(after_id))
@@ -77,11 +73,7 @@ impl RawEventsRepo for PostgresRawEventsRepo {
     }
 
     async fn max_id(&self, chain_id: i64) -> Result<i64> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let v: Option<i64> = raw_events::table
             .filter(raw_events::chain_id.eq(chain_id))
             .select(diesel::dsl::max(raw_events::id))
@@ -98,17 +90,16 @@ impl RawEventsRepo for PostgresRawEventsRepo {
         if deposit_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         // Postgres arrays are 1-based: topics[2] is the second topic (indexed deposit id, 32B big-endian).
+        // Ordered by id so a re-used deposit id resolves to the same escrow on
+        // every replica; served by `raw_events_escrowed_id_idx`.
         let kind = shared::entities::EventKind::DepositEscrowed.as_i16();
         let q = diesel::sql_query(
             "SELECT id, chain_id, block_number, block_hash, block_ts, tx_hash, log_index, event_kind, topics, data \
              FROM raw_events \
-             WHERE chain_id = $1 AND event_kind = $2 AND topics[2] = ANY($3)",
+             WHERE chain_id = $1 AND event_kind = $2 AND topics[2] = ANY($3) \
+             ORDER BY id ASC",
         )
         .bind::<diesel::sql_types::BigInt, _>(chain_id)
         .bind::<diesel::sql_types::SmallInt, _>(kind)

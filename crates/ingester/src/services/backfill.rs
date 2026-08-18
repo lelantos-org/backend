@@ -1,18 +1,47 @@
+//! Chunked, parallel catch-up.
+//!
+//! Used whenever the gap to tip is wider than a poll-interval tail can close.
+
 use crate::adapters::DynRpc;
 use crate::app::config::ChainConfig;
-use crate::domain::error::{IngesterError, RpcError};
-use crate::services::decode::logs_to_rows;
+use crate::domain::error::IngesterError;
+use crate::services::decode::{distinct_blocks, logs_to_rows};
 use crate::services::ingest::IngestService;
+use crate::services::log_range::fetch_adaptive;
 use alloy::primitives::Address;
 use alloy::rpc::types::eth::Log;
 use futures::stream::{self, StreamExt};
-use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::info;
 
 pub struct BackfillService {
     rpc: DynRpc,
     ingest: Arc<IngestService>,
+}
+
+/// One unit of catch-up work: an inclusive block range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Chunk {
+    from: u64,
+    to: u64,
+}
+
+/// Split `[from, to]` into chunks of at most `size` blocks.
+///
+/// A free function so the boundary arithmetic — the off-by-one at the tail,
+/// and the `size == 0` case that would panic `step_by` — is testable directly.
+fn chunks(from: u64, to: u64, size: u64) -> Vec<Chunk> {
+    if from > to {
+        return Vec::new();
+    }
+    let size = size.max(1);
+    (from..=to)
+        .step_by(size as usize)
+        .map(|start| Chunk {
+            from: start,
+            to: start.saturating_add(size - 1).min(to),
+        })
+        .collect()
 }
 
 impl BackfillService {
@@ -28,10 +57,10 @@ impl BackfillService {
         to: u64,
     ) -> Result<(), IngesterError> {
         let chain_id = cfg.chain_id;
-        let chunks: Vec<(u64, u64)> = (from..=to)
-            .step_by(cfg.chunk_blocks as usize)
-            .map(|s| (s, std::cmp::min(s + cfg.chunk_blocks - 1, to)))
-            .collect();
+        let chunks = chunks(from, to, cfg.chunk_blocks);
+        if chunks.is_empty() {
+            return Ok(());
+        }
         info!(
             chain_id,
             from,
@@ -43,60 +72,78 @@ impl BackfillService {
         );
 
         let rpc = self.rpc.clone();
-        let mut stream = stream::iter(chunks.into_iter().map(|(s, e)| {
+        let mut fetches = stream::iter(chunks.into_iter().map(|chunk| {
             let rpc = rpc.clone();
             async move {
-                let logs = fetch_with_adaptive_range(&rpc, pool_addr, s, e).await?;
-                Ok::<((u64, u64), Vec<Log>), IngesterError>(((s, e), logs))
+                let logs = fetch_adaptive(&rpc, pool_addr, chunk.from, chunk.to).await?;
+                Ok::<_, IngesterError>((chunk, logs))
             }
         }))
-        .buffered(cfg.backfill_concurrency);
+        .buffered(cfg.backfill_concurrency.max(1));
 
-        while let Some(res) = stream.next().await {
-            let ((cs, ce), logs) = res?;
-            let block_numbers: Vec<u64> = logs
-                .iter()
-                .filter_map(|l| l.block_number)
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            let block_meta = self.rpc.fetch_block_meta(&block_numbers).await?;
-            let rows = logs_to_rows(chain_id, logs, &block_meta);
-            self.ingest.commit_batch(chain_id, &rows, ce as i64).await?;
-            info!(chain_id, cs, ce, inserted = rows.len(), "backfill chunk");
+        // `buffered` yields in submission order, so the cursor only ever moves
+        // forward even though the fetches complete out of order.
+        while let Some(result) = fetches.next().await {
+            let (chunk, logs) = result?;
+            let inserted = self.commit(chain_id, chunk, logs).await?;
+            info!(
+                chain_id,
+                from = chunk.from,
+                to = chunk.to,
+                inserted,
+                "backfill chunk"
+            );
         }
         info!(chain_id, from, to, "backfill done");
         Ok(())
     }
+
+    async fn commit(
+        &self,
+        chain_id: i64,
+        chunk: Chunk,
+        logs: Vec<Log>,
+    ) -> Result<usize, IngesterError> {
+        let block_meta = self.rpc.fetch_block_meta(&distinct_blocks(&logs)).await?;
+        let rows = logs_to_rows(chain_id, logs, &block_meta)?;
+        self.ingest
+            .commit_batch(chain_id, &rows, chunk.to as i64)
+            .await
+    }
 }
 
-/// Probe a [from, to] window. On RangeTooLarge / ResponseTooLarge, halve.
-/// Otherwise grow the window back up. Bubbles up other RPC errors.
-async fn fetch_with_adaptive_range(
-    rpc: &DynRpc,
-    pool_addr: Address,
-    from: u64,
-    to: u64,
-) -> Result<Vec<Log>, IngesterError> {
-    let mut next_size = to - from + 1;
-    let mut cursor = from;
-    let mut acc = Vec::new();
-    while cursor <= to {
-        let end = std::cmp::min(cursor + next_size - 1, to);
-        match rpc.fetch_logs(pool_addr, cursor, end).await {
-            Ok(mut logs) => {
-                acc.append(&mut logs);
-                cursor = end + 1;
-                let remaining = to.saturating_sub(cursor).saturating_add(1);
-                next_size = std::cmp::min(next_size.saturating_mul(2), remaining);
-            }
-            Err(IngesterError::Rpc(RpcError::RangeTooLarge | RpcError::ResponseTooLarge))
-                if next_size > 1 =>
-            {
-                next_size = std::cmp::max(next_size / 2, 1);
-            }
-            Err(e) => return Err(e),
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunks_tile_the_range_exactly() {
+        let cs = chunks(10, 34, 10);
+        assert_eq!(
+            cs,
+            vec![
+                Chunk { from: 10, to: 19 },
+                Chunk { from: 20, to: 29 },
+                Chunk { from: 30, to: 34 },
+            ],
+            "no gaps, no overlap, tail clipped to `to`"
+        );
     }
-    Ok(acc)
+
+    #[test]
+    fn a_single_block_range_is_one_chunk() {
+        assert_eq!(chunks(7, 7, 50), vec![Chunk { from: 7, to: 7 }]);
+    }
+
+    #[test]
+    fn an_inverted_range_yields_nothing() {
+        assert!(chunks(10, 9, 50).is_empty());
+    }
+
+    /// `Iterator::step_by(0)` panics. Config validation rejects it, but this
+    /// is where it would detonate, so it is defended here too.
+    #[test]
+    fn a_zero_chunk_size_does_not_panic() {
+        assert_eq!(chunks(1, 3, 0).len(), 3);
+    }
 }

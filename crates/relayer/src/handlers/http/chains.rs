@@ -20,23 +20,23 @@ use axum::extract::State;
 pub async fn chains(State(st): State<AppState>) -> AppResult<Json<ChainsResponse>> {
     let mut chains = Vec::with_capacity(st.spend_pipelines.len());
     for (chain_id, pipeline) in st.spend_pipelines.iter() {
-        // Read before taking the mirror lock: the query is unrelated to the
-        // tree, and holding the lock across it would serialise every spend on
-        // this chain behind a database round trip.
         let tokens: Vec<TokenOut> = assets::list_for_chain(&st.pool, *chain_id)
             .await?
             .into_iter()
             .map(TokenOut::from)
             .collect();
 
-        let mirror = pipeline.mirror.lock().await;
-        let root = mirror.current_root()?;
+        // Read the published snapshot rather than the mirror itself. The
+        // mirror mutex is held from reserve through prove and confirmation, so
+        // locking it here would park the endpoint every wallet boots from
+        // behind whatever submission is in flight.
+        let snapshot = &pipeline.snapshot;
         chains.push(ChainHealth {
             chain_id: *chain_id,
-            committed_count: mirror.committed_count() as i64,
-            current_root_hex: field_to_hex(&root),
+            committed_count: snapshot.leaf_count() as i64,
+            current_root_hex: field_to_hex(&snapshot.root()),
             masp_address: pipeline.submitter.pool_address.to_checksum(None),
-            desynced: mirror.is_desynced(),
+            desynced: snapshot.is_desynced(),
             relayer_address: pipeline.submitter.signer_address.to_checksum(None),
             config: st
                 .descriptors

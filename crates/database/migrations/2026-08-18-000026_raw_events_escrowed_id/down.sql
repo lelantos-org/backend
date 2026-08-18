@@ -1,0 +1,1 @@
+DROP INDEX raw_events_escrowed_id_idx;

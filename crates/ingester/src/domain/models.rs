@@ -22,6 +22,9 @@ pub struct RawEvent {
 #[derive(Debug, Clone)]
 pub struct BlockCursor {
     pub chain_id: i64,
+    /// Highest block whose hash was verified against the chain. Paired with
+    /// `last_block_hash`, this is the anchor reorg detection walks back from,
+    /// so it is only ever written alongside a real block.
     pub last_block: i64,
     pub last_block_hash: Vec<u8>,
     pub last_scanned_block: i64,
@@ -30,9 +33,21 @@ pub struct BlockCursor {
 #[derive(Debug, Clone)]
 pub enum TickOutcome {
     Idle,
-    Empty { to: i64 },
-    Committed { count: usize, to: i64 },
-    Reorg { rewind_to: i64 },
+    Empty {
+        to: i64,
+    },
+    Committed {
+        count: usize,
+        to: i64,
+    },
+    Reorg {
+        rewind_to: i64,
+    },
+    /// Too far behind for the live tail to be the right tool; the worker
+    /// should drop back into chunked, parallel backfill.
+    Lagging {
+        lag: i64,
+    },
 }
 
 pub fn parse_address(s: &str) -> Result<Address, IngesterError> {

@@ -25,3 +25,6 @@ swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
 wasm_path = "/circuits/tree_update_batch.wasm"
 r1cs_path = "/circuits/tree_update_batch.r1cs"
 zkey_path = "/circuits/tree_update_batch_final.zkey"
+# Transact circuit verification key. Lets the relayer reject a bad wallet
+# proof before it spends a tree_update_batch Groth16 on it.
+transact_vkey_path = "/circuits/3x3_verification_key.json"

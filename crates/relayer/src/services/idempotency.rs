@@ -29,9 +29,17 @@ const TTL: Duration = Duration::from_secs(15 * 60);
 /// is sized for headroom rather than against memory.
 const CAPACITY: u64 = 10_000;
 
+/// What a key answered: the transaction hash, plus the fingerprint of the
+/// payload that produced it.
+#[derive(Clone)]
+struct Answer {
+    fingerprint: [u8; 32],
+    tx_hash: String,
+}
+
 /// Idempotent submission results, keyed by `(chain_id, key)`.
 pub struct IdempotencyCache {
-    entries: moka::future::Cache<(i64, String), String>,
+    entries: moka::future::Cache<(i64, String), Answer>,
 }
 
 impl IdempotencyCache {
@@ -51,13 +59,25 @@ impl IdempotencyCache {
     /// original — the wallet gave up waiting while the relayer was still
     /// proving — waits for it rather than being refused as a duplicate.
     ///
+    /// `fingerprint` pins the key to its payload. A key is chosen by the
+    /// caller and proves nothing about what it stands for, so a repeat that
+    /// carries *different* contents is refused rather than quietly served the
+    /// first answer — otherwise a reused key silently swallows a real
+    /// submission and reports someone else's transaction as its own.
+    ///
     /// Failures are not recorded. A submission that did not land leaves the
     /// key free, so a client that retries after a genuine failure is served
     /// rather than handed back the error forever.
     ///
     /// `key` is `None` when the caller sent no header, which runs `submit`
     /// with no replay protection at all — the pre-header behaviour.
-    pub async fn run<F>(&self, chain_id: i64, key: Option<String>, submit: F) -> AppResult<String>
+    pub async fn run<F>(
+        &self,
+        chain_id: i64,
+        key: Option<String>,
+        fingerprint: [u8; 32],
+        submit: F,
+    ) -> AppResult<String>
     where
         F: Future<Output = AppResult<String>>,
     {
@@ -69,21 +89,31 @@ impl IdempotencyCache {
         // and the logs show no submission behind it. `try_get_with` does not
         // say whether it ran the future, so the future says so itself.
         let ran = AtomicBool::new(false);
-        let result = self
+        let answer = self
             .entries
             .try_get_with((chain_id, key), async {
                 ran.store(true, Ordering::SeqCst);
-                submit.await
+                submit.await.map(|tx_hash| Answer {
+                    fingerprint,
+                    tx_hash,
+                })
             })
             .await
-            .map_err(|shared: Arc<AppError>| AppError::mirrored(&shared));
+            .map_err(|shared: Arc<AppError>| AppError::mirrored(&shared))?;
 
-        if let Ok(tx_hash) = &result
-            && !ran.load(Ordering::SeqCst)
-        {
-            info!(chain_id, tx_hash, "replayed an earlier submission");
+        if answer.fingerprint != fingerprint {
+            return Err(AppError::IdempotencyKeyReused(
+                "this Idempotency-Key was already used for a different submission".into(),
+            ));
         }
-        result
+        if !ran.load(Ordering::SeqCst) {
+            info!(
+                chain_id,
+                tx_hash = answer.tx_hash,
+                "replayed an earlier submission"
+            );
+        }
+        Ok(answer.tx_hash)
     }
 }
 
@@ -105,6 +135,10 @@ mod tests {
         Some(k.to_string())
     }
 
+    fn fp(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+
     #[tokio::test]
     async fn a_repeat_of_an_answered_key_replays_the_first_answer() {
         let cache = IdempotencyCache::new();
@@ -115,14 +149,45 @@ mod tests {
         };
 
         assert_eq!(
-            cache.run(CHAIN_ID, key("k"), submit()).await.unwrap(),
+            cache
+                .run(CHAIN_ID, key("k"), fp(1), submit())
+                .await
+                .unwrap(),
             "0xabc"
         );
         assert_eq!(
-            cache.run(CHAIN_ID, key("k"), submit()).await.unwrap(),
+            cache
+                .run(CHAIN_ID, key("k"), fp(1), submit())
+                .await
+                .unwrap(),
             "0xabc"
         );
         assert_eq!(runs.load(Ordering::SeqCst), 1, "second call re-submitted");
+    }
+
+    /// A key stands for one submission. Reusing it under different contents
+    /// must not hand the second caller the first one's transaction hash — and
+    /// must not silently drop their submission either.
+    #[tokio::test]
+    async fn the_same_key_with_a_different_payload_is_refused() {
+        let cache = IdempotencyCache::new();
+        cache
+            .run(CHAIN_ID, key("k"), fp(1), async { Ok("0xabc".to_string()) })
+            .await
+            .unwrap();
+
+        let err = cache
+            .run(CHAIN_ID, key("k"), fp(2), async {
+                panic!("must not submit under a reused key")
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, AppError::IdempotencyKeyReused(_)),
+            "got {err}"
+        );
+        assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
     }
 
     /// The case the wallet actually hits: it stops waiting and retries while
@@ -135,7 +200,7 @@ mod tests {
 
         let call = |cache: Arc<IdempotencyCache>, runs: Arc<AtomicUsize>, gate: Arc<Barrier>| async move {
             cache
-                .run(CHAIN_ID, key("k"), async {
+                .run(CHAIN_ID, key("k"), fp(1), async {
                     runs.fetch_add(1, Ordering::SeqCst);
                     // Hold the first run open until both callers are inside.
                     gate.wait().await;
@@ -152,7 +217,7 @@ mod tests {
             let runs = runs.clone();
             async move {
                 cache
-                    .run(CHAIN_ID, key("k"), async move {
+                    .run(CHAIN_ID, key("k"), fp(1), async move {
                         runs.fetch_add(1, Ordering::SeqCst);
                         Ok("other".to_string())
                     })
@@ -175,7 +240,7 @@ mod tests {
         let cache = IdempotencyCache::new();
 
         let err = cache
-            .run(CHAIN_ID, key("k"), async {
+            .run(CHAIN_ID, key("k"), fp(1), async {
                 Err(AppError::Reverted("out of gas".into()))
             })
             .await
@@ -183,7 +248,7 @@ mod tests {
         assert_eq!(err.status(), AppError::Reverted(String::new()).status());
 
         let ok = cache
-            .run(CHAIN_ID, key("k"), async { Ok("0xabc".to_string()) })
+            .run(CHAIN_ID, key("k"), fp(1), async { Ok("0xabc".to_string()) })
             .await
             .unwrap();
         assert_eq!(ok, "0xabc");
@@ -193,11 +258,13 @@ mod tests {
     async fn the_same_key_on_another_chain_is_a_different_submission() {
         let cache = IdempotencyCache::new();
         cache
-            .run(CHAIN_ID, key("k"), async { Ok("0xabc".to_string()) })
+            .run(CHAIN_ID, key("k"), fp(1), async { Ok("0xabc".to_string()) })
             .await
             .unwrap();
         let other = cache
-            .run(CHAIN_ID + 1, key("k"), async { Ok("0xdef".to_string()) })
+            .run(CHAIN_ID + 1, key("k"), fp(1), async {
+                Ok("0xdef".to_string())
+            })
             .await
             .unwrap();
         assert_eq!(other, "0xdef");
@@ -209,7 +276,7 @@ mod tests {
         let runs = AtomicUsize::new(0);
         for _ in 0..2 {
             cache
-                .run(CHAIN_ID, None, async {
+                .run(CHAIN_ID, None, fp(1), async {
                     runs.fetch_add(1, Ordering::SeqCst);
                     Ok("0xabc".to_string())
                 })

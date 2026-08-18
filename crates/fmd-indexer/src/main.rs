@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use fmd_indexer::adapters;
 use fmd_indexer::adapters::locks::ChainLocks;
-use fmd_indexer::app::{self, AppState, FmdIndexerConfig};
+use fmd_indexer::app::{self, FmdIndexerConfig};
 use fmd_indexer::handlers::worker;
 use fmd_indexer::repositories::cursor::PostgresCursorRepo;
 use fmd_indexer::repositories::matches::PostgresMatchesRepo;
@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
     let matches = Arc::new(PostgresMatchesRepo::new(pool.clone()));
 
     let consume = Arc::new(ConsumeServiceImpl::new(
+        pool.clone(),
         cursors.clone(),
         raw_events,
         notes.clone(),
@@ -57,26 +58,20 @@ async fn main() -> Result<()> {
         matches,
     ));
 
-    let _state = AppState {
-        consume: consume.clone(),
-        filter: filter.clone(),
-    };
-
     info!(workers = cfg.filter_workers, "fmd-indexer ready");
 
     let (trigger, shutdown) = app::shutdown::channel();
 
     let consume_handle = tokio::spawn(worker::consume::run(
         consume,
-        cfg.filter_tick_ms,
-        cfg.filter_batch as i64,
+        cfg.consume_tick_ms(),
+        cfg.consume_batch() as i64,
         shutdown.clone(),
     ));
     let filter_handle = tokio::spawn(worker::filter::run(
         filter,
         cfg.filter_tick_ms,
         cfg.filter_batch as i64,
-        cfg.filter_workers,
         shutdown.clone(),
     ));
 

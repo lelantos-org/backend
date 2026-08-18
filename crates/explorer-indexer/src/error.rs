@@ -12,6 +12,12 @@ pub enum ExplorerIndexerError {
     Rpc(String),
 }
 
+impl From<database::reorg::ReorgError> for ExplorerIndexerError {
+    fn from(e: database::reorg::ReorgError) -> Self {
+        ExplorerIndexerError::Db(e.to_string())
+    }
+}
+
 impl From<database::CursorError> for ExplorerIndexerError {
     fn from(e: database::CursorError) -> Self {
         ExplorerIndexerError::Db(e.to_string())

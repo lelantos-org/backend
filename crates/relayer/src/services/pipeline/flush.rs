@@ -1,5 +1,7 @@
 use crate::adapters::abi::IMasp;
-use crate::adapters::calldata::{MAX_L_BATCH, build_tu_batch_pub_inputs, build_tu_proof};
+use crate::adapters::calldata::{
+    DepositLeaf, PaddedBatch, build_tu_batch_pub_inputs, build_tu_proof,
+};
 use crate::domain::error::AppResult;
 use crate::domain::fiat_shamir;
 use crate::services::deposit_mempool::DepositMempool;
@@ -39,31 +41,42 @@ impl FlushPipeline {
         tracing::Span::current().record("n", n);
         info!("flush batch starting");
 
-        let mut cms_real: Vec<FixedBytes<32>> = Vec::with_capacity(n);
-        let mut leaves: Vec<(fmd_crypto::tree::Field, [U256; 2])> = Vec::with_capacity(n);
-        let mut ids_u64: Vec<u64> = Vec::with_capacity(n);
-        let mut ids_u256: Vec<U256> = Vec::with_capacity(n);
-        let mut meta: Vec<IMasp::DepositMeta> = Vec::with_capacity(n);
-        let mut deposits: Vec<LeafDeposit> = Vec::with_capacity(n);
-        for p in &pending {
-            cms_real.push(FixedBytes::<32>::from(p.cm));
-            leaves.push((p.cm, p.cv_dep));
-            ids_u64.push(p.id);
-            ids_u256.push(U256::from(p.id));
-            // Digest preimage the contract dropped from storage; a wrong
-            // field here reverts `DigestMismatch` for the whole batch.
-            meta.push(IMasp::DepositMeta {
+        let cms_real: Vec<FixedBytes<32>> = pending.iter().map(|p| p.cm.into()).collect();
+        let leaves: Vec<(fmd_crypto::tree::Field, [U256; 2])> =
+            pending.iter().map(|p| (p.cm, p.cv_dep)).collect();
+        let ids_u64: Vec<u64> = pending.iter().map(|p| p.id).collect();
+        // Digest preimage the contract dropped from storage; a wrong field
+        // here reverts `DigestMismatch` for the whole batch.
+        let meta: Vec<IMasp::DepositMeta> = pending
+            .iter()
+            .map(|p| IMasp::DepositMeta {
                 payer: Address::from(p.payer),
                 submittedAt: p.submitted_at,
                 fbps: p.fee_bps_at_submit,
-            });
-            deposits.push(LeafDeposit {
+            })
+            .collect();
+        // The public half of each leaf, at the circuit's full width...
+        let batch = PaddedBatch::from_deposits(
+            &pending
+                .iter()
+                .map(|p| DepositLeaf {
+                    cm: p.cm.into(),
+                    cv_dep: p.cv_dep,
+                    leaf_asset: p.public_asset_id,
+                    leaf_public_in: p.public_in,
+                })
+                .collect::<Vec<_>>(),
+        );
+        // ...and the private blinder the circuit binds it against.
+        let deposits: Vec<LeafDeposit> = pending
+            .iter()
+            .map(|p| LeafDeposit {
                 cv_dep: p.cv_dep,
                 leaf_asset: p.public_asset_id,
                 leaf_public_in: p.public_in,
                 rcv: p.rcv,
-            });
-        }
+            })
+            .collect();
 
         // Hold the mirror lock through prove+submit. SpendPipeline shares
         // this mutex; concurrent ops on the same chain serialize.
@@ -72,30 +85,7 @@ impl FlushPipeline {
         let start_index = slot.start_index;
         tracing::Span::current().record("start_index", start_index);
 
-        let mut cms_padded: [FixedBytes<32>; MAX_L_BATCH] = [FixedBytes::<32>::ZERO; MAX_L_BATCH];
-        let mut cv_deps_padded: [[U256; 2]; MAX_L_BATCH] = [[U256::ZERO, U256::ZERO]; MAX_L_BATCH];
-        let mut leaf_asset_padded: [u64; MAX_L_BATCH] = [0u64; MAX_L_BATCH];
-        let mut leaf_public_in_padded: [u64; MAX_L_BATCH] = [0u64; MAX_L_BATCH];
-        let mut is_deposit_padded: [u8; MAX_L_BATCH] = [0u8; MAX_L_BATCH];
-        for (i, d) in deposits.iter().enumerate() {
-            cms_padded[i] = cms_real[i];
-            cv_deps_padded[i] = d.cv_dep;
-            leaf_asset_padded[i] = d.leaf_asset;
-            leaf_public_in_padded[i] = d.leaf_public_in;
-            is_deposit_padded[i] = 1;
-        }
-
-        let z = fiat_shamir::compute_z(
-            &slot.old_root,
-            &advanced.new_root,
-            start_index,
-            n as u64,
-            &cms_padded,
-            &cv_deps_padded,
-            &leaf_asset_padded,
-            &leaf_public_in_padded,
-            &is_deposit_padded,
-        );
+        let z = fiat_shamir::compute_z(&slot.old_root, &advanced.new_root, start_index, &batch);
         let tu_witness = witness::build_batch(&slot, &advanced, &cms_real, &deposits, z);
 
         let prove_started = std::time::Instant::now();
@@ -109,20 +99,11 @@ impl FlushPipeline {
         );
 
         let tp = build_tu_proof(&tu_proof)?;
-        let tpi = build_tu_batch_pub_inputs(
-            start_index,
-            &slot.old_root,
-            &advanced.new_root,
-            cms_padded,
-            cv_deps_padded,
-            leaf_asset_padded,
-            leaf_public_in_padded,
-            is_deposit_padded,
-            n as u64,
-        );
+        let tpi =
+            build_tu_batch_pub_inputs(start_index, &slot.old_root, &advanced.new_root, &batch);
 
         let calldata = IMasp::flushBatchCall {
-            ids: ids_u256,
+            ids: ids_u64.iter().copied().map(U256::from).collect(),
             meta,
             tp,
             tpi,

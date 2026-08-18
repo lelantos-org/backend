@@ -2,18 +2,19 @@ use crate::adapters::abi::ISwapWrapper;
 use crate::adapters::calldata::{
     build_aux, build_deposit_request, build_one_aux, build_proof, build_pub_inputs, build_tu_proof,
 };
-use crate::adapters::parse::{parse_address, parse_hex_bytes, parse_u256};
+use crate::adapters::parse::{FieldRef, parse_address, parse_field, parse_hex_bytes, parse_u256};
 use crate::domain::dto::SubmitSwapPayload;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::EstimateResponse;
 use crate::services::fee_quote::FeeQuoter;
 use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    SPEND_LEAVES, SpendInputs, TransactBinding, build_padded_spend_arrays, build_tu_pi_for_spend,
-    parse_spend_inputs, prove_spend,
+    SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend, check_known_root,
+    parse_spend_inputs, prove_spend, verify_transact_proof,
 };
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::submitter::{SubmissionReceipt, Submitter};
+use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use alloy::primitives::Address;
 use alloy::sol_types::SolCall;
@@ -42,6 +43,12 @@ pub struct SwapPipeline {
     pub wrapper_address: Address,
     pub fee_quoter: Arc<FeeQuoter>,
     pub gas_witness: Arc<GasWitness>,
+    /// Applied when the wallet pins no `deadline`. See
+    /// `ChainCfg::swap_default_deadline_s`.
+    pub default_deadline_s: u64,
+    /// See `SpendPipeline::transact_verifier`. Leg 1 of a swap is the same
+    /// transact proof, so it gets the same pre-check.
+    pub transact_verifier: Option<Arc<TransactVerifier>>,
 }
 
 impl SwapPipeline {
@@ -51,6 +58,12 @@ impl SwapPipeline {
     )]
     pub async fn process(&self, payload: SubmitSwapPayload) -> AppResult<SubmissionReceipt> {
         self.validate(&payload)?;
+        verify_transact_proof(
+            self.transact_verifier.as_deref(),
+            &payload.proof,
+            &payload.pub_inputs,
+            &payload.aux,
+        )?;
         let inputs = parse_spend_inputs(&payload.pub_inputs)?;
 
         let mut mirror = self.mirror.lock().await;
@@ -60,6 +73,7 @@ impl SwapPipeline {
             token_out = %payload.swap.token_out,
             "swap pipeline start"
         );
+        check_known_root(&mirror, &payload.pub_inputs)?;
         let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
         tracing::Span::current().record("start_index", slot.start_index);
 
@@ -68,7 +82,14 @@ impl SwapPipeline {
             Err(e) => return Err(mirror.unwind(SPEND_LEAVES, e)),
         };
 
-        let calldata = encode_swap_calldata(&payload, &inputs, &slot, &advanced, &tu_proof)?;
+        let calldata = encode_swap_calldata(
+            &payload,
+            &inputs,
+            &slot,
+            &advanced,
+            &tu_proof,
+            self.deadline_for(&payload)?,
+        )?;
         match self.submitter.submit(calldata).await {
             Ok(receipt) => {
                 self.gas_witness.observe(EntryPoint::Swap, receipt.gas_used);
@@ -92,6 +113,26 @@ impl SwapPipeline {
             .await
     }
 
+    /// The `deadline` this swap goes out with.
+    ///
+    /// A wallet that pins one gets exactly that. One that does not gets
+    /// `now + default_deadline_s`, **not** `U256::MAX`: an unbounded deadline
+    /// disables the wrapper's `SwapExpired` guard entirely, so a tx parked in
+    /// the mempool can execute at a much later price with nothing but
+    /// `min_out` behind it.
+    fn deadline_for(&self, payload: &SubmitSwapPayload) -> AppResult<alloy::primitives::U256> {
+        if let Some(s) = &payload.swap.deadline {
+            return parse_u256(s);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| AppError::Internal(format!("system clock before epoch: {e}")))?
+            .as_secs();
+        Ok(alloy::primitives::U256::from(
+            now.saturating_add(self.default_deadline_s),
+        ))
+    }
+
     fn validate(&self, payload: &SubmitSwapPayload) -> AppResult<()> {
         // The wrapper calls `MASP.withdraw` for leg 1, so it — not this
         // relayer's signer — is the pool's `msg.sender`, and the pool checks
@@ -111,19 +152,16 @@ fn encode_swap_calldata(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
     tu_proof: &TreeUpdateBatchProof,
+    deadline: alloy::primitives::U256,
 ) -> AppResult<Vec<u8>> {
     let p_w = build_proof(&payload.proof)?;
     let pi_w = build_pub_inputs(&payload.pub_inputs)?;
     let tp_w = build_tu_proof(tu_proof)?;
-    let tpi_w = build_tu_pi_for_spend(slot, advanced, build_padded_spend_arrays(inputs));
+    let tpi_w = build_tu_pi_for_spend(slot, advanced, inputs);
     let aux_w = build_aux(&payload.aux)?;
     let deposit_d = build_deposit_request(&payload.swap.deposit_d)?;
     let aux_d = build_one_aux(&payload.swap.aux_d)?;
     let route_bytes = parse_hex_bytes(&payload.swap.route, "route")?;
-    let deadline = match &payload.swap.deadline {
-        Some(s) => parse_u256(s)?,
-        None => alloy::primitives::U256::MAX,
-    };
     Ok(ISwapWrapper::swapCall {
         a: ISwapWrapper::SwapArgs {
             p_w,
@@ -189,6 +227,20 @@ fn validate_swap_shape(
             "deposit_d.publicIn must be > 0".into(),
         ));
     }
+    // `minOut == 0` accepts any output at all, which is total sandwich
+    // exposure. The wrapper honours it; the relayer will not relay it.
+    if parse_u256(&p.swap.min_out)?.is_zero() {
+        return Err(AppError::BadRequest(
+            "swap.minOut must be > 0; a zero floor accepts any output".into(),
+        ));
+    }
+    // Leg 2's leaf is hashed into the tree by the flush that materialises it,
+    // so its field elements must be canonical for the same reason leg 1's are.
+    parse_field(&p.swap.deposit_d.out_cm, FieldRef::Named("deposit_d.outCm"))?;
+    for (i, v) in p.swap.deposit_d.cv_dep.iter().enumerate() {
+        parse_field(v, FieldRef::Index("deposit_d.cvDep", i))?;
+    }
+    parse_field(&p.swap.deposit_d.rcv, FieldRef::Named("deposit_d.rcv"))?;
     Ok(())
 }
 

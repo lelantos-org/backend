@@ -99,6 +99,16 @@ async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
 
 pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<()> {
     let cursors = PostgresCursorRepo::new(ctx.pool.clone());
+
+    // Retract before reading. The replacement rows for a reorged range come
+    // back with fresh, higher ids and so replay on their own, but the stats
+    // and ledger rows derived from the *deleted* rows sit below the cursor
+    // where nothing revisits them. Applying the reorg log first drops those
+    // and rewinds the cursor so the replay rebuilds them.
+    if database::reorg::apply_pending(&ctx.pool, NAME, chain_id).await? > 0 {
+        return Ok(());
+    }
+
     let (after, _) = cursors.fetch(NAME, chain_id).await?;
     let max_id = raw_events::max_id(&ctx.pool, chain_id).await?;
     if after > max_id {

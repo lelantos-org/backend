@@ -1,4 +1,4 @@
-use crate::domain::error::{FmdIndexerError, Result};
+use crate::domain::error::{Result, log_unique_violation};
 use async_trait::async_trait;
 use database::DbPool;
 use database::schema::spent_nullifiers;
@@ -69,21 +69,20 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
             return Ok(0);
         };
         let chain_id = first.chain_id;
-        let min_block = rows
-            .iter()
-            .map(|r| r.block_number)
-            .min()
-            .expect("rows non-empty");
+        // Bound the dedup read to the batch's own block range. `>= min_block`
+        // alone is open-ended, so a replay from the start of the chain loads
+        // almost the whole table on every batch — O(n^2) over a full rewind,
+        // for a check that only ever concerns these blocks.
+        let (min_block, max_block) = rows.iter().fold((i64::MAX, i64::MIN), |(lo, hi), r| {
+            (lo.min(r.block_number), hi.max(r.block_number))
+        });
 
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
 
         let stored: HashSet<(i64, i32)> = spent_nullifiers::table
             .filter(spent_nullifiers::chain_id.eq(chain_id))
             .filter(spent_nullifiers::block_number.ge(min_block))
+            .filter(spent_nullifiers::block_number.le(max_block))
             .select((spent_nullifiers::block_number, spent_nullifiers::log_index))
             .load::<(i64, i32)>(&mut conn)
             .await?
@@ -129,16 +128,13 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
             ))
             .do_nothing()
             .execute(&mut conn)
-            .await?;
+            .await
+            .inspect_err(|e| log_unique_violation("spent_nullifiers", e))?;
         Ok(n)
     }
 
     async fn delete_from_block(&self, chain_id: i64, from_block: i64) -> Result<usize> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        let mut conn = super::conn(&self.pool).await?;
         let n = diesel::delete(
             spent_nullifiers::table
                 .filter(spent_nullifiers::chain_id.eq(chain_id))

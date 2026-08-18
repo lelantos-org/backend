@@ -63,6 +63,12 @@ pub struct ChainCfg {
     /// Per-chain markup applied on top of the raw gas cost. bps: 1000 = 10%.
     #[serde(default = "default_fee_markup_bps")]
     pub fee_markup_bps: u32,
+    /// How long a swap the wallet did not pin a deadline on stays valid,
+    /// in seconds. The wrapper reverts `SwapExpired` past it. Without a
+    /// bound, a swap can sit in the mempool and execute at an arbitrarily
+    /// later price with only `min_out` protecting the user.
+    #[serde(default = "default_swap_deadline_s")]
+    pub swap_default_deadline_s: u64,
     /// Accepted fee tokens for `/v1/spend/estimate` and `/v1/swap/estimate`.
     #[serde(default)]
     pub accepted_fee_tokens: Vec<FeeTokenCfg>,
@@ -150,6 +156,15 @@ pub struct ProverCfg {
     pub r1cs_path: PathBuf,
     /// `circuits/build/tree_update_final.zkey` (snarkjs-compatible).
     pub zkey_path: PathBuf,
+    /// snarkjs `verification_key.json` for the deployed **transact** circuit
+    /// (`circuits/build/3x3_verification_key.json`).
+    ///
+    /// Optional so a deployment that has not shipped the artifact still boots,
+    /// but it should always be set: without it the relayer cannot tell a valid
+    /// wallet proof from a fabricated one until the contract does, which means
+    /// every junk payload costs a full `tree_update_batch` Groth16 first.
+    #[serde(default)]
+    pub transact_vkey_path: Option<PathBuf>,
 }
 
 fn default_receipt_timeout_s() -> u64 {
@@ -180,6 +195,10 @@ fn default_fee_markup_bps() -> u32 {
     1000
 }
 
+fn default_swap_deadline_s() -> u64 {
+    300
+}
+
 fn default_oracle_base_url() -> String {
     "https://api.coinbase.com/v2".to_string()
 }
@@ -200,11 +219,104 @@ fn default_oracle_allow_usd_cross() -> bool {
     true
 }
 
+/// `10u128.pow(n)` is the widest exponent that fits.
+const MAX_DECIMALS: u8 = 38;
+/// 100x. Anything above this is a typo, and `10_000 + bps` must not overflow.
+const MAX_MARKUP_BPS: u32 = 1_000_000;
+
+/// Everything wrong with a config, rendered as one message.
+#[derive(Debug)]
+pub struct ConfigErrors(Vec<String>);
+
+impl std::fmt::Display for ConfigErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} problem(s):", self.0.len())?;
+        for p in &self.0 {
+            write!(f, "\n  - {p}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ConfigErrors {}
+
+impl ChainCfg {
+    /// Everything wrong with this chain's settings.
+    fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut check = |ok: bool, msg: String| {
+            if !ok {
+                out.push(format!("chain {}: {msg}", self.chain_id));
+            }
+        };
+        check(
+            self.native_decimals <= MAX_DECIMALS,
+            format!(
+                "native_decimals {} exceeds {MAX_DECIMALS}",
+                self.native_decimals
+            ),
+        );
+        for t in &self.accepted_fee_tokens {
+            check(
+                t.decimals <= MAX_DECIMALS,
+                format!(
+                    "fee token {} decimals {} exceeds {MAX_DECIMALS}",
+                    t.symbol, t.decimals
+                ),
+            );
+        }
+        check(
+            self.fee_markup_bps <= MAX_MARKUP_BPS,
+            format!(
+                "fee_markup_bps {} exceeds {MAX_MARKUP_BPS}",
+                self.fee_markup_bps
+            ),
+        );
+        check(
+            self.flush_interval_s > 0,
+            "flush_interval_s must be > 0".to_string(),
+        );
+        out
+    }
+}
+
 impl RelayerConfig {
     /// Overlay env vars on top of TOML defaults, per chain. Convention:
     ///   RELAYER_CHAIN_<id>_POOL_ADDRESS=0x…
     ///   RELAYER_CHAIN_<id>_RPC_URL=http://…
     ///   RELAYER_CHAIN_<id>_SIGNER_KEY=0x…
+    /// Boot-time sanity checks on values the code later assumes are sane.
+    ///
+    /// Each of these is otherwise a runtime failure far from its cause: a
+    /// duplicate chain silently runs two independent tree mirrors against one
+    /// chain, and the decimal/markup bounds are arithmetic that panics rather
+    /// than erroring.
+    ///
+    /// Every problem is reported, not just the first — an operator fixing a
+    /// config should not have to restart once per mistake.
+    pub fn validate(&self) -> Result<(), ConfigErrors> {
+        let mut problems = Vec::new();
+        if self.chains.is_empty() {
+            problems.push("no chains configured".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for c in &self.chains {
+            if !seen.insert(c.chain_id) {
+                problems.push(format!(
+                    "chain_id {} is declared more than once; each chain owns one tree mirror \
+                     and one flush worker, so a duplicate desyncs both",
+                    c.chain_id
+                ));
+            }
+            problems.extend(c.problems());
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigErrors(problems))
+        }
+    }
+
     pub fn apply_env_overlay(&mut self) {
         for c in &mut self.chains {
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "POOL_ADDRESS") {
@@ -235,5 +347,104 @@ impl RelayerConfig {
                 c.fee_markup_bps = n;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain(chain_id: i64) -> ChainCfg {
+        ChainCfg {
+            chain_id,
+            rpc_url: "http://localhost:8545".into(),
+            pool_address: "0x0000000000000000000000000000000000000001".into(),
+            signer_key_hex: "0x01".into(),
+            receipt_timeout_s: default_receipt_timeout_s(),
+            receipt_poll_interval_ms: default_receipt_poll_interval_ms(),
+            flush_interval_s: default_flush_interval_s(),
+            flush_max_n: default_flush_max_n(),
+            native_adapter_address: None,
+            swap_wrapper_address: None,
+            native_symbol: default_native_symbol(),
+            native_decimals: default_native_decimals(),
+            fee_markup_bps: default_fee_markup_bps(),
+            swap_default_deadline_s: default_swap_deadline_s(),
+            accepted_fee_tokens: vec![],
+            public: ChainPublicCfg::default(),
+        }
+    }
+
+    fn cfg(chains: Vec<ChainCfg>) -> RelayerConfig {
+        RelayerConfig {
+            database_url: "postgres://localhost/x".into(),
+            listen_addr: "0.0.0.0:3003".into(),
+            chains,
+            prover: ProverCfg {
+                wasm_path: "/w".into(),
+                r1cs_path: "/r".into(),
+                zkey_path: "/z".into(),
+                transact_vkey_path: None,
+            },
+            price_oracle: PriceOracleCfg::default(),
+        }
+    }
+
+    #[test]
+    fn a_well_formed_config_validates() {
+        cfg(vec![chain(1), chain(2)]).validate().unwrap();
+    }
+
+    /// A duplicate silently built two independent `TreeMirror`s and two flush
+    /// workers for one chain — a guaranteed desync rather than a config typo.
+    #[test]
+    fn a_duplicate_chain_id_is_refused() {
+        let err = cfg(vec![chain(1), chain(1)]).validate().unwrap_err();
+        assert!(err.to_string().contains("more than once"), "got {err}");
+    }
+
+    /// An operator fixing a config should see every mistake at once.
+    #[test]
+    fn every_problem_is_reported_not_just_the_first() {
+        let mut c = chain(1);
+        c.native_decimals = 39;
+        c.fee_markup_bps = u32::MAX;
+        c.flush_interval_s = 0;
+
+        let err = cfg(vec![c]).validate().unwrap_err().to_string();
+
+        assert!(err.contains("native_decimals"), "got {err}");
+        assert!(err.contains("fee_markup_bps"), "got {err}");
+        assert!(err.contains("flush_interval_s"), "got {err}");
+    }
+
+    #[test]
+    fn decimals_that_would_overflow_the_fee_math_are_refused() {
+        let mut c = chain(1);
+        c.native_decimals = 39;
+        assert!(cfg(vec![c]).validate().is_err());
+
+        let mut c = chain(1);
+        c.accepted_fee_tokens.push(FeeTokenCfg {
+            symbol: "X".into(),
+            address: "0x0000000000000000000000000000000000000002".into(),
+            decimals: 77,
+            quote_symbol: "USDC".into(),
+        });
+        assert!(cfg(vec![c]).validate().is_err());
+    }
+
+    #[test]
+    fn an_absurd_markup_is_refused() {
+        let mut c = chain(1);
+        c.fee_markup_bps = u32::MAX;
+        assert!(cfg(vec![c]).validate().is_err());
+    }
+
+    #[test]
+    fn a_zero_flush_interval_is_refused() {
+        let mut c = chain(1);
+        c.flush_interval_s = 0;
+        assert!(cfg(vec![c]).validate().is_err());
     }
 }

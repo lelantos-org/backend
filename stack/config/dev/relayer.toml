@@ -84,3 +84,6 @@ permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 wasm_path = "/circuits/tree_update_batch.wasm"
 r1cs_path = "/circuits/tree_update_batch.r1cs"
 zkey_path = "/circuits/tree_update_batch_final.zkey"
+# Transact circuit verification key. Lets the relayer reject a bad wallet
+# proof before it spends a tree_update_batch Groth16 on it.
+transact_vkey_path = "/circuits/3x3_verification_key.json"

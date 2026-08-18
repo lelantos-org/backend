@@ -16,8 +16,9 @@ pub mod cursor;
 pub mod migrate;
 pub mod models;
 pub mod pool;
+pub mod reorg;
 pub mod schema;
 
 pub use advisory::{AdvisoryError, AdvisoryResult, ChainLock, chain_key};
 pub use cursor::{CursorError, CursorRepo, CursorResult, PostgresCursorRepo, UpsertCursor};
-pub use pool::{DbPool, PoolCfg, PoolError, build_pool};
+pub use pool::{DbConn, DbPool, PoolCfg, PoolError, build_pool};

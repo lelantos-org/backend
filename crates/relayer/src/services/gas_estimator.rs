@@ -71,5 +71,8 @@ impl GasEstimator {
 /// Total native wei = gas_used * effective_price * (10_000 + markup_bps) / 10_000
 pub fn apply_markup(gas_used: u64, effective_gas_price_wei: u128, markup_bps: u32) -> U256 {
     let raw = U256::from(gas_used) * U256::from(effective_gas_price_wei);
-    raw * U256::from(10_000u32 + markup_bps) / U256::from(10_000u32)
+    // Widened before the add: `10_000u32 + markup_bps` overflows for a large
+    // configured markup. `RelayerConfig::validate` rejects those, but the
+    // arithmetic here does not depend on it.
+    raw * (U256::from(10_000u32) + U256::from(markup_bps)) / U256::from(10_000u32)
 }

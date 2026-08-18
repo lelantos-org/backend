@@ -7,12 +7,13 @@ use crate::domain::responses::EstimateResponse;
 use crate::services::fee_quote::FeeQuoter;
 use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    SPEND_LEAVES, SpendInputs, TransactBinding, build_padded_spend_arrays, build_tu_pi_for_spend,
-    parse_spend_inputs, prove_spend,
+    SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend, check_known_root,
+    parse_spend_inputs, prove_spend, verify_transact_proof,
 };
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::submitter::{SubmissionReceipt, Submitter};
-use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
+use crate::services::transact_verifier::TransactVerifier;
+use crate::services::tree::{AdvancedState, MirrorSnapshot, ReservedSlot, TreeMirror};
 use alloy::primitives::Address;
 use alloy::sol_types::SolCall;
 use std::sync::Arc;
@@ -31,6 +32,9 @@ pub struct NativeRoute {
 pub struct SpendPipeline {
     pub chain_id: i64,
     pub mirror: Arc<Mutex<TreeMirror>>,
+    /// Lock-free view of `mirror`, so `/chains` does not queue behind a
+    /// submission holding the mutex through prove and confirmation.
+    pub snapshot: Arc<MirrorSnapshot>,
     pub submitter: Arc<Submitter>,
     pub prover: Arc<dyn TreeUpdateBatchProver>,
     pub fee_quoter: Arc<FeeQuoter>,
@@ -38,12 +42,22 @@ pub struct SpendPipeline {
     /// Built only for chains where `native_adapter_address` is configured.
     /// Without it, `withdrawNative` payloads are rejected.
     pub native: Option<Arc<NativeRoute>>,
+    /// Checks the wallet's transact proof before the prover and the mirror
+    /// lock are spent on it. `None` when the deployment shipped no transact
+    /// verification key — see `ProverCfg::transact_vkey_path`.
+    pub transact_verifier: Option<Arc<TransactVerifier>>,
 }
 
 impl SpendPipeline {
     #[instrument(skip_all, fields(chain_id = self.chain_id, kind = ?payload.kind, start_index))]
     pub async fn process(&self, payload: SubmitSpendPayload) -> AppResult<SubmissionReceipt> {
         self.validate(&payload)?;
+        verify_transact_proof(
+            self.transact_verifier.as_deref(),
+            &payload.proof,
+            &payload.pub_inputs,
+            &payload.aux,
+        )?;
         let inputs = parse_spend_inputs(&payload.pub_inputs)?;
         let entry = EntryPoint::from(payload.kind);
         let submitter = self.submitter_for(payload.kind)?;
@@ -55,6 +69,7 @@ impl SpendPipeline {
             leaf_count = mirror.committed_count(),
             "spend pipeline start"
         );
+        check_known_root(&mirror, &payload.pub_inputs)?;
         let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
         tracing::Span::current().record("start_index", slot.start_index);
 
@@ -142,7 +157,7 @@ fn encode_spend_calldata(
     let p = build_proof(&payload.proof)?;
     let pi = build_pub_inputs(&payload.pub_inputs)?;
     let tp = build_tu_proof(tu_proof)?;
-    let tpi = build_tu_pi_for_spend(slot, advanced, build_padded_spend_arrays(_inputs));
+    let tpi = build_tu_pi_for_spend(slot, advanced, _inputs);
     let aux = build_aux(&payload.aux)?;
     let out = match payload.kind {
         SpendKind::Transfer => IMasp::transferCall {

@@ -1,20 +1,28 @@
 //! Live-tail service.
 //!
-//! Owns one tick of the live ingestion loop: fetch tip, fetch logs since
-//! cursor, detect reorgs, commit. The handler layer's job is just to call
-//! `tick()` on a schedule and respect shutdown.
+//! Owns one tick: verify the reorg anchor, then scan forward from the cursor
+//! and commit. The handler layer only calls `tick()` on a schedule.
+//!
+//! # Head buffer
+//!
+//! This deliberately scans all the way to `tip` rather than stopping at
+//! `tip - reorg_depth`. `reorg_depth` bounds the backfill's safe range and the
+//! depth of the anchor walk, not the live head. That keeps head latency at
+//! zero at the cost of routinely ingesting blocks a reorg can still take away
+//! — which is why [`ReorgService::check_anchor`] runs first on every tick, and
+//! why a rewind emits a retraction signal for consumers.
 
 use crate::adapters::DynRpc;
 use crate::app::config::ChainConfig;
 use crate::domain::error::IngesterError;
 use crate::domain::models::TickOutcome;
 use crate::repositories::ChainStateRepo;
-use crate::services::decode::logs_to_rows;
+use crate::services::decode::{distinct_blocks, logs_to_rows};
 use crate::services::ingest::IngestService;
+use crate::services::log_range::fetch_adaptive;
 use crate::services::reorg::ReorgService;
 use alloy::primitives::Address;
 use async_trait::async_trait;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -34,6 +42,95 @@ pub struct LiveServiceImpl {
     pub reorg: Arc<ReorgService>,
 }
 
+/// What the next tick should scan, once the cursor is known to be sound.
+enum Plan {
+    /// Cursor is at tip.
+    UpToDate,
+    /// Too far behind for a tail; hand back to backfill.
+    Lagging {
+        lag: i64,
+    },
+    Scan {
+        from: i64,
+        to: i64,
+    },
+}
+
+impl LiveServiceImpl {
+    /// Re-verify the anchor and rewind if the chain has moved under us.
+    ///
+    /// Returns `Some` when a rewind happened, in which case the tick stops:
+    /// the cursor has changed and the next tick re-derives from it.
+    async fn settle_reorg(&self) -> Result<Option<TickOutcome>, IngesterError> {
+        let chain_id = self.cfg.chain_id;
+        let Some(divergence) = self
+            .reorg
+            .check_anchor(
+                chain_id,
+                &self.rpc,
+                self.cfg.start_block,
+                self.cfg.reorg_depth,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        warn!(chain_id, rewind_to = divergence.rewind_to, "reorg detected");
+        self.reorg.rewind(chain_id, &divergence).await?;
+        Ok(Some(TickOutcome::Reorg {
+            rewind_to: divergence.rewind_to,
+        }))
+    }
+
+    async fn plan(&self) -> Result<Plan, IngesterError> {
+        let cursor = self.chain_state.fetch(self.cfg.chain_id).await?;
+        let last_scanned = cursor
+            .as_ref()
+            .map(|c| c.last_scanned_block)
+            .unwrap_or(self.cfg.start_block - 1);
+        let tip = self.rpc.tip().await? as i64;
+        let from = last_scanned + 1;
+        if from > tip {
+            return Ok(Plan::UpToDate);
+        }
+        // Far enough behind that chunked, parallel backfill is the right tool.
+        // Handing control back lets the worker re-enter it instead of grinding
+        // through the gap one poll interval at a time.
+        let lag = tip - last_scanned;
+        if lag > self.cfg.backfill_threshold as i64 {
+            return Ok(Plan::Lagging { lag });
+        }
+        // Cap the span even inside the threshold: after a stall the gap can
+        // still be wider than a provider will serve in one `eth_getLogs`.
+        let to = tip.min(from + self.cfg.chunk_blocks as i64 - 1);
+        Ok(Plan::Scan { from, to })
+    }
+
+    async fn scan(&self, from: i64, to: i64) -> Result<TickOutcome, IngesterError> {
+        let chain_id = self.cfg.chain_id;
+        // The same adaptive fetcher the backfill uses, so a provider-side
+        // range cap narrows the window instead of failing the tick.
+        let logs = fetch_adaptive(&self.rpc, self.pool_addr, from as u64, to as u64).await?;
+        if logs.is_empty() {
+            self.ingest.advance_empty(chain_id, to).await?;
+            return Ok(TickOutcome::Empty { to });
+        }
+
+        let block_meta = self.rpc.fetch_block_meta(&distinct_blocks(&logs)).await?;
+        let rows = logs_to_rows(chain_id, logs, &block_meta)?;
+        let inserted = self.ingest.commit_batch(chain_id, &rows, to).await?;
+
+        debug!(chain_id, from, to, inserted, "live commit");
+        if inserted > 0 {
+            info!(chain_id, from, to, inserted, "live events committed");
+        }
+        Ok(TickOutcome::Committed {
+            count: inserted,
+            to,
+        })
+    }
+}
+
 #[async_trait]
 impl LiveService for LiveServiceImpl {
     fn chain_id(&self) -> i64 {
@@ -44,52 +141,16 @@ impl LiveService for LiveServiceImpl {
     }
 
     async fn tick(&self) -> Result<TickOutcome, IngesterError> {
-        let chain_id = self.cfg.chain_id;
-        let cursor = self.chain_state.fetch(chain_id).await?;
-        let last_scanned = cursor
-            .as_ref()
-            .map(|s| s.last_scanned_block)
-            .unwrap_or(self.cfg.start_block - 1);
-        let tip_n = self.rpc.tip().await? as i64;
-        let from = last_scanned + 1;
-        let to = tip_n;
-        if from > to {
-            return Ok(TickOutcome::Idle);
+        // Reorg check first. The cursor only means anything while the block it
+        // anchors to is still canonical, so scanning forward from an
+        // unverified cursor would extend a dead branch.
+        if let Some(outcome) = self.settle_reorg().await? {
+            return Ok(outcome);
         }
-
-        let logs = self
-            .rpc
-            .fetch_logs(self.pool_addr, from as u64, to as u64)
-            .await?;
-        if logs.is_empty() {
-            self.ingest.advance_empty(chain_id, to).await?;
-            return Ok(TickOutcome::Empty { to });
+        match self.plan().await? {
+            Plan::UpToDate => Ok(TickOutcome::Idle),
+            Plan::Lagging { lag } => Ok(TickOutcome::Lagging { lag }),
+            Plan::Scan { from, to } => self.scan(from, to).await,
         }
-
-        let block_numbers: Vec<u64> = logs
-            .iter()
-            .filter_map(|l| l.block_number)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let block_meta = self.rpc.fetch_block_meta(&block_numbers).await?;
-        let rows = logs_to_rows(chain_id, logs, &block_meta);
-
-        if let Some(rewind_to) = self.reorg.detect(chain_id, &rows).await? {
-            warn!(chain_id, rewind_to, "reorg detected");
-            self.reorg.rewind(chain_id, rewind_to).await?;
-            return Ok(TickOutcome::Reorg { rewind_to });
-        }
-
-        self.ingest.commit_batch(chain_id, &rows, to).await?;
-        let inserted = rows.len();
-        debug!(chain_id, from, to, inserted, "live commit");
-        if inserted > 0 {
-            info!(chain_id, from, to, inserted, "live events committed");
-        }
-        Ok(TickOutcome::Committed {
-            count: rows.len(),
-            to,
-        })
     }
 }
