@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use fmd_crypto::clue::CircomPoint;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use shared::tick::TickProgress;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,7 +44,7 @@ const BACKFILL_LAG: Duration = Duration::from_secs(5);
 
 #[async_trait]
 pub trait FilterService: Send + Sync {
-    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<()>;
+    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress>;
     async fn list_chain_ids(&self) -> Vec<i64>;
 }
 
@@ -73,20 +74,23 @@ impl FilterServiceImpl {
 
     /// Scan the notes ingested since this chain's cursor against every active
     /// subscription, then advance the cursor past them.
-    async fn forward_tick(&self, chain_id: i64, batch: i64) -> Result<()> {
+    async fn forward_tick(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
         let (after_note_id, _) = self.cursors.fetch(NAME, chain_id).await?;
         let new_notes = self
             .notes
             .fetch_after(chain_id, after_note_id, batch)
             .await?;
         let Some(last) = new_notes.last() else {
-            return Ok(());
+            return Ok(TickProgress::Idle);
         };
+        // A full batch means more notes are already waiting behind it.
+        let progress = TickProgress::from_batch(new_notes.len(), batch);
         let (last_id, last_block) = (last.id, last.block_number);
 
         let subs = self.subscriptions.list_active().await?;
         if subs.is_empty() {
-            return self.advance_cursor(chain_id, last_id, last_block).await;
+            self.advance_cursor(chain_id, last_id, last_block).await?;
+            return Ok(progress);
         }
 
         let outcome = scan(&new_notes, &subs, chain_id).await?;
@@ -108,7 +112,7 @@ impl FilterServiceImpl {
             last_block,
             "filter tick"
         );
-        Ok(())
+        Ok(progress)
     }
 
     /// Walk one lagging subscription forward over history by a single batch.
@@ -119,10 +123,10 @@ impl FilterServiceImpl {
     /// `notes.id`, so this pass is chain-agnostic; running it from several
     /// per-chain ticks only makes it converge faster, and re-scanning an
     /// overlapping range is absorbed by `ON CONFLICT DO NOTHING`.
-    async fn backfill_tick(&self, batch: i64) -> Result<()> {
+    async fn backfill_tick(&self, batch: i64) -> Result<TickProgress> {
         let head = self.head.lock().await.observe(self.notes.max_id().await?);
         let Some(sub) = self.subscriptions.next_backfilling(head).await? else {
-            return Ok(());
+            return Ok(TickProgress::Idle);
         };
         let sub_id = sub.id;
 
@@ -136,11 +140,16 @@ impl FilterServiceImpl {
         notes.retain(|n| n.id <= head);
         let Some(through) = notes.last().map(|n| n.id) else {
             // Nothing left below `head` for this subscription: mark it caught
-            // up so it stops being picked.
-            return self.subscriptions.advance_backfill(sub_id, head).await;
+            // up so it stops being picked. That retires one subscription, so
+            // the next tick may still find another — report progress, not idle.
+            self.subscriptions.advance_backfill(sub_id, head).await?;
+            return Ok(TickProgress::Partial);
         };
 
         let candidates = notes.len();
+        // `retain` above may have trimmed the batch below `head`, so measure
+        // saturation on what is actually being scanned.
+        let progress = TickProgress::from_batch(candidates, batch);
         let subs = [sub];
         let mut hits: Vec<NewMatch> = Vec::new();
         let mut stats = ScanStats::default();
@@ -164,7 +173,7 @@ impl FilterServiceImpl {
             head,
             "filter backfill"
         );
-        Ok(())
+        Ok(progress)
     }
 
     /// Monotonic, but not advisory-locked, unlike the consume loop. `matches`
@@ -188,9 +197,12 @@ impl FilterServiceImpl {
 
 #[async_trait]
 impl FilterService for FilterServiceImpl {
-    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<()> {
-        self.forward_tick(chain_id, batch).await?;
-        self.backfill_tick(batch).await
+    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
+        // Both passes run every tick; the driver must not sleep while either
+        // still has queued work, so take the higher of the two.
+        let forward = self.forward_tick(chain_id, batch).await?;
+        let backfill = self.backfill_tick(batch).await?;
+        Ok(forward.max(backfill))
     }
 
     async fn list_chain_ids(&self) -> Vec<i64> {
@@ -214,7 +226,7 @@ impl shared::tick::TickService for FilterServiceImpl {
     async fn list_chain_ids(&self) -> Vec<i64> {
         FilterService::list_chain_ids(self).await
     }
-    async fn tick_chain(&self, chain_id: i64, batch: i64) -> anyhow::Result<()> {
+    async fn tick_chain(&self, chain_id: i64, batch: i64) -> anyhow::Result<TickProgress> {
         FilterService::tick_chain(self, chain_id, batch)
             .await
             .map_err(Into::into)

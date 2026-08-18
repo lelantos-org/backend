@@ -199,7 +199,7 @@ async fn asset_registered_persists_registry_fields() {
     .await;
 
     let ctx = empty_ctx(pool.clone());
-    tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
 
     use database::schema::assets;
     let mut conn = pool.get().await.unwrap();
@@ -235,7 +235,7 @@ async fn root_advanced_appends_tree_advances() {
     .await;
 
     let ctx = empty_ctx(pool.clone());
-    tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
 
     use database::schema::tree_advances;
     let mut conn = pool.get().await.unwrap();
@@ -274,7 +274,7 @@ async fn idempotent_replay_keeps_single_row_per_advance() {
     .await;
 
     let ctx = empty_ctx(pool.clone());
-    tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
 
     {
         use database::schema::consumer_cursors;
@@ -287,7 +287,7 @@ async fn idempotent_replay_keeps_single_row_per_advance() {
             .await
             .unwrap();
     }
-    tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
 
     use database::schema::{assets, tree_advances};
     let mut conn = pool.get().await.unwrap();

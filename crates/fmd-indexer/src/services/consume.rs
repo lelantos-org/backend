@@ -16,6 +16,7 @@ use alloy::sol_types::SolEvent;
 use async_trait::async_trait;
 use chain_types::abi::DepositEscrowed;
 use shared::entities::EventKind;
+use shared::tick::TickProgress;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -44,7 +45,7 @@ const STALL_REPEAT_TICKS: u32 = STALL_TICKS * 10;
 
 #[async_trait]
 pub trait ConsumeService: Send + Sync {
-    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<()>;
+    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress>;
     async fn list_chain_ids(&self) -> Vec<i64>;
 }
 
@@ -56,7 +57,12 @@ enum Planned {
     Incomplete {
         rows: usize,
     },
-    Ready(CommitPlan),
+    Ready {
+        plan: CommitPlan,
+        /// The window came back full, so more rows are queued behind this
+        /// commit. Drives [`TickProgress::Saturated`].
+        window_full: bool,
+    },
 }
 
 pub struct ConsumeServiceImpl {
@@ -109,11 +115,14 @@ impl ConsumeServiceImpl {
             }
 
             let escrowed = self.resolve_escrowed(chain_id, &rows).await?;
+            let saturated = rows.len() as i64 == limit;
             if let Some(plan) = plan_commit(&rows, chain_id, after, &escrowed)? {
-                return Ok(Planned::Ready(plan));
+                return Ok(Planned::Ready {
+                    plan,
+                    window_full: saturated,
+                });
             }
 
-            let saturated = rows.len() as i64 == limit;
             if !saturated || limit >= batch * MAX_WINDOW_GROWTH {
                 return Ok(Planned::Incomplete { rows: rows.len() });
             }
@@ -208,9 +217,11 @@ impl ConsumeServiceImpl {
 
 #[async_trait]
 impl ConsumeService for ConsumeServiceImpl {
-    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<()> {
+    async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
+        // A standby replica has nothing to do; idling lets the backoff grow
+        // instead of polling the lock at full speed.
         if !self.locks.is_leader(chain_id).await? {
-            return Ok(());
+            return Ok(TickProgress::Idle);
         }
 
         // Retract before reading. Replacement rows for a reorged range come
@@ -219,25 +230,30 @@ impl ConsumeService for ConsumeServiceImpl {
         // where nothing revisits them — leaving the tree describing a branch
         // that no longer exists. Applying the reorg log first drops those and
         // rewinds the cursor so the replay rebuilds them.
+        // Retracting rewinds the cursor, so the replay is work queued right
+        // now — come straight back rather than sleeping on it.
         if database::reorg::apply_pending(&self.pool, NAME, chain_id).await? > 0 {
-            return Ok(());
+            return Ok(TickProgress::Saturated);
         }
 
         let (after, _last_block) = self.cursors.fetch(NAME, chain_id).await?;
         if after > self.raw_events.max_id(chain_id).await? {
-            return self.reset_cursor(chain_id).await;
+            self.reset_cursor(chain_id).await?;
+            return Ok(TickProgress::Saturated);
         }
 
         match self.plan_next(chain_id, after, batch).await? {
-            Planned::Drained => Ok(()),
+            Planned::Drained => Ok(TickProgress::Idle),
+            // The cursor did not move. Reporting progress here would spin the
+            // driver at zero delay against a tx it cannot yet commit.
             Planned::Incomplete { rows } => {
                 self.stalls.record_idle(chain_id, after, rows).await;
-                Ok(())
+                Ok(TickProgress::Idle)
             }
-            Planned::Ready(plan) => {
+            Planned::Ready { plan, window_full } => {
                 self.commit(chain_id, plan).await?;
                 self.stalls.clear(chain_id).await;
-                Ok(())
+                Ok(TickProgress::advanced(window_full))
             }
         }
     }
@@ -263,7 +279,7 @@ impl shared::tick::TickService for ConsumeServiceImpl {
     async fn list_chain_ids(&self) -> Vec<i64> {
         ConsumeService::list_chain_ids(self).await
     }
-    async fn tick_chain(&self, chain_id: i64, batch: i64) -> anyhow::Result<()> {
+    async fn tick_chain(&self, chain_id: i64, batch: i64) -> anyhow::Result<TickProgress> {
         ConsumeService::tick_chain(self, chain_id, batch)
             .await
             .map_err(Into::into)

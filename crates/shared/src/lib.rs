@@ -9,6 +9,7 @@
 //!   - May import: nothing internal (this is the bottom of the stack).
 //!   - Must NOT import: `database`, any binary, any service crate.
 
+pub mod backoff;
 pub mod chain;
 pub mod config;
 pub mod config_env;

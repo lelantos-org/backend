@@ -68,7 +68,8 @@ async fn fmd_consume_pairs_root_advanced_with_note_created() {
         fmd_indexer::adapters::locks::ChainLocks::disabled(),
     );
     use fmd_indexer::services::consume::ConsumeService;
-    svc.tick_chain(CHAIN_ID, 100)
+    let _ = svc
+        .tick_chain(CHAIN_ID, 100)
         .await
         .expect("fmd consume tick");
 
@@ -116,7 +117,7 @@ async fn explorer_consume_writes_tree_advances() {
         cfg,
         token_meta: Arc::new(std::collections::HashMap::new()),
     };
-    explorer_indexer::services::consume::tick_chain(&ctx, CHAIN_ID, 100)
+    let _ = explorer_indexer::services::consume::tick_chain(&ctx, CHAIN_ID, 100)
         .await
         .expect("explorer consume tick");
 

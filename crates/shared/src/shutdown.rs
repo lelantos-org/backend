@@ -25,6 +25,15 @@ impl Shutdown {
     pub async fn recv(&mut self) {
         let _ = self.rx.changed().await;
     }
+
+    /// Whether stop has already been signalled, without awaiting.
+    ///
+    /// A loop that can skip its `recv().await` — the tick driver does exactly
+    /// that while a service still has queued work — would otherwise never
+    /// observe shutdown and could not be killed during a long catch-up.
+    pub fn is_triggered(&self) -> bool {
+        *self.rx.borrow()
+    }
 }
 
 impl ShutdownTrigger {

@@ -1,5 +1,6 @@
 use super::events;
 use crate::adapters::DynTokenMetadata;
+use shared::tick::TickProgress;
 use crate::config::ExplorerIndexerConfig;
 use crate::error::{ExplorerIndexerError, Result};
 use crate::repositories::{asset_flows, assets, raw_events, tree_advances};
@@ -97,7 +98,7 @@ async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
     }
 }
 
-pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<()> {
+pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<TickProgress> {
     let cursors = PostgresCursorRepo::new(ctx.pool.clone());
 
     // Retract before reading. The replacement rows for a reorged range come
@@ -105,15 +106,17 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<(
     // and ledger rows derived from the *deleted* rows sit below the cursor
     // where nothing revisits them. Applying the reorg log first drops those
     // and rewinds the cursor so the replay rebuilds them.
+    // Retracting rewinds the cursor, so the replay is work queued right now.
     if database::reorg::apply_pending(&ctx.pool, NAME, chain_id).await? > 0 {
-        return Ok(());
+        return Ok(TickProgress::Saturated);
     }
 
     let (after, _) = cursors.fetch(NAME, chain_id).await?;
     let max_id = raw_events::max_id(&ctx.pool, chain_id).await?;
     if after > max_id {
         warn!(chain_id, "cursor ahead; reset");
-        return reset_cursor(&cursors, chain_id).await;
+        reset_cursor(&cursors, chain_id).await?;
+        return Ok(TickProgress::Saturated);
     }
 
     let rows = raw_events::batch_after(&ctx.pool, chain_id, after, &KINDS, batch).await?;
@@ -121,8 +124,11 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<(
         // Still sweep: a previous attempt may have failed, and an idle chain
         // is exactly when there is room to retry.
         fill_missing_metadata(ctx, chain_id).await;
-        return Ok(());
+        return Ok(TickProgress::Idle);
     }
+
+    // A full batch means more rows are already queued behind it.
+    let progress = TickProgress::from_batch(rows.len(), batch);
 
     let mut last_id = after;
     let mut last_block = 0i64;
@@ -173,7 +179,7 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<(
         })
         .await?;
     debug!(chain_id, processed = rows.len(), last_id, "explorer commit");
-    Ok(())
+    Ok(progress)
 }
 
 async fn dispatch(

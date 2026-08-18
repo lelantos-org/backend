@@ -66,9 +66,9 @@ DATABASE_URL=postgres://... cargo run -p fmd-indexer
 database_url    = "postgres://..."
 filter_workers  = 8       # default: available_parallelism, fallback 4
 filter_batch    = 1000    # default 1000
-filter_tick_ms  = 500     # default 500
+filter_tick_ms  = 500     # default 500 (idle ceiling, not a fixed period)
 consume_batch   = 1000    # default: filter_batch
-consume_tick_ms = 500     # default: filter_tick_ms
+consume_tick_ms = 500     # default: filter_tick_ms (idle ceiling)
 ```
 
 If the config file does not exist, the binary falls back to env vars (`DATABASE_URL` required) and defaults for the rest.
@@ -78,9 +78,24 @@ If the config file does not exist, the binary falls back to env vars (`DATABASE_
 | `database_url` | — | Postgres URL (required) |
 | `filter_workers` | cores | Rayon global pool size |
 | `filter_batch` | 1000 | Rows per filter pass |
-| `filter_tick_ms` | 500 | Filter loop cadence |
+| `filter_tick_ms` | 500 | Filter loop idle **ceiling** (see below) |
 | `consume_batch` | `filter_batch` | Raw events per consume pass |
-| `consume_tick_ms` | `filter_tick_ms` | Consume loop cadence |
+| `consume_tick_ms` | `filter_tick_ms` | Consume loop idle **ceiling** (see below) |
+
+### Tick cadence
+
+`*_tick_ms` bounds how long an **idle** loop waits, not how often a busy one
+runs. Each tick reports `shared::tick::TickProgress`, and the driver sleeps
+only when there is nothing left to do:
+
+- `Saturated` (batch came back full) — no sleep at all; the loop goes straight
+  round. Initial sync is limited by Postgres, not by the tick.
+- `Partial` (advanced, queue drained) — sleep, but from the 50 ms floor, so an
+  event landing just after a tick is picked up in ~50 ms.
+- `Idle` (cursor did not move) — sleep, doubling up to `*_tick_ms`.
+
+A chain wedged on a too-wide tx reports `Idle`, so a stall backs off instead of
+spinning.
 
 `consume_batch` is not only a throughput knob. A tx is committable only once all
 of its events fit inside one window, so the batch also bounds the widest tx the
@@ -108,11 +123,6 @@ the slowest consumer's cursor, and `matches` retention is a privacy question
   `SpentNullifiersRepo::delete_from_block` implement the rewind that migrations
   000008/000014 describe, but nothing calls them and no cursor rewinds on a
   reorg. Re-orged rows stay.
-- **No catch-up between ticks.** `shared::tick::run` always sleeps
-  `tick_ms`, even when the batch came back full and there is provably more
-  queued, which caps initial sync at `batch / tick_ms`. Fixing it means
-  `TickService::tick_chain` reporting whether work remains, which is a
-  cross-crate change (`explorer-indexer` implements the same trait).
 - **`ChainLocks::is_leader` holds its mutex across a TCP connect.** One slow
   `ChainLock::try_acquire` delays the leadership check for every other chain in
   the same replica.

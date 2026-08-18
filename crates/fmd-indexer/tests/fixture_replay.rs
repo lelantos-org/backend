@@ -391,8 +391,8 @@ async fn consume_populates_notes_with_leaf_index_per_chain() {
     .await;
 
     let consume = build_consume(&pool);
-    consume.tick_chain(CHAIN_A, 100).await.unwrap();
-    consume.tick_chain(CHAIN_B, 100).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_B, 100).await.unwrap();
 
     assert_eq!(count_notes(&pool, CHAIN_A).await, 4);
     assert_eq!(count_notes(&pool, CHAIN_B).await, 2);
@@ -428,7 +428,7 @@ async fn consume_idempotent_replay() {
     .await;
 
     let consume = build_consume(&pool);
-    consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
     let n1 = count_notes(&pool, CHAIN_A).await;
 
     {
@@ -442,7 +442,7 @@ async fn consume_idempotent_replay() {
             .await
             .unwrap();
     }
-    consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
 
     assert_eq!(count_notes(&pool, CHAIN_A).await, n1);
 }
@@ -469,11 +469,11 @@ async fn filter_emits_match_via_test_clue() {
     )
     .await;
     let consume = build_consume(&pool);
-    consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
     assert_eq!(count_notes(&pool, CHAIN_A).await, 2);
 
     let filter = build_filter(&pool);
-    filter.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = filter.tick_chain(CHAIN_A, 100).await.unwrap();
     assert_eq!(
         count_matches(&pool).await,
         2,
@@ -499,7 +499,7 @@ async fn filter_emits_match_via_test_clue() {
             .await
             .unwrap();
     }
-    filter.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = filter.tick_chain(CHAIN_A, 100).await.unwrap();
     assert_eq!(count_matches(&pool).await, 2, "ON CONFLICT DO NOTHING");
 }
 
@@ -730,7 +730,7 @@ async fn standby_replica_does_no_work_until_the_leader_releases() {
     .unwrap()
     .expect("leader lock");
 
-    standby.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = standby.tick_chain(CHAIN_A, 100).await.unwrap();
     assert_eq!(
         count_notes(&pool, CHAIN_A).await,
         0,
@@ -744,7 +744,7 @@ async fn standby_replica_does_no_work_until_the_leader_releases() {
 
     // Leader dies; the standby is promoted on its next tick.
     drop(leader);
-    standby.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = standby.tick_chain(CHAIN_A, 100).await.unwrap();
     assert_eq!(
         count_notes(&pool, CHAIN_A).await,
         2,
@@ -786,8 +786,8 @@ async fn concurrent_replicas_keep_spent_nullifier_seq_dense() {
     };
     let (a, b) = (build(), build());
     let (ra, rb) = tokio::join!(a.tick_chain(CHAIN_A, 100), b.tick_chain(CHAIN_A, 100));
-    ra.unwrap();
-    rb.unwrap();
+    let _ = ra.unwrap();
+    let _ = rb.unwrap();
 
     assert_eq!(count_notes(&pool, CHAIN_A).await, 6);
     // `seq` is assigned by a read-then-write with no transaction; a second
@@ -908,7 +908,7 @@ async fn an_unusable_leaf_leaves_a_hole_instead_of_wedging_the_chain() {
     .await;
 
     let consume = build_consume(&pool);
-    consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
 
     assert_eq!(
         count_notes(&pool, CHAIN_A).await,
@@ -961,7 +961,7 @@ async fn a_tx_wider_than_the_batch_still_commits() {
     }
 
     let consume = build_consume(&pool);
-    consume.tick_chain(CHAIN_A, 2).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 2).await.unwrap();
 
     assert_eq!(
         count_notes(&pool, CHAIN_A).await,
@@ -1038,7 +1038,7 @@ async fn a_spend_only_tx_commits_and_keeps_the_cursor_block() {
     .await;
 
     let consume = build_consume(&pool);
-    consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
 
     assert_eq!(seqs(&pool, CHAIN_A).await, vec![0, 1], "nullifiers indexed");
     assert!(
@@ -1085,7 +1085,7 @@ async fn backfill_will_not_page_past_freshly_written_notes() {
         0x56,
     )
     .await;
-    build_consume(&pool).tick_chain(CHAIN_A, 100).await.unwrap();
+    let _ = build_consume(&pool).tick_chain(CHAIN_A, 100).await.unwrap();
 
     let sub_id = insert_subscription(&pool, dk_bytes_from_dec(&GAMMA3_DK), GAMMA3_GAMMA).await;
     let subs = PostgresSubscriptionsRepo::new(pool.clone());
@@ -1097,7 +1097,7 @@ async fn backfill_will_not_page_past_freshly_written_notes() {
     // this instant, is no id at all. Advancing here would mark the
     // subscription caught up on rows it never scanned.
     for _ in 0..3 {
-        filter.tick_chain(CHAIN_A, 100).await.unwrap();
+        let _ = filter.tick_chain(CHAIN_A, 100).await.unwrap();
     }
     let pointer = subs
         .next_backfilling(i64::MAX)

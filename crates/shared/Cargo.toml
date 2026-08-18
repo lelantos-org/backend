@@ -20,6 +20,11 @@ futures = { workspace = true }
 axum = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
 
+[dev-dependencies]
+# `test-util` gives the tick-driver tests a paused clock, so their timing
+# assertions are exact virtual durations rather than wall-clock tolerances.
+tokio = { workspace = true, features = ["test-util"] }
+
 [features]
 default = []
 webserver = ["dep:axum", "dep:moka"]
