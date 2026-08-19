@@ -29,7 +29,7 @@ futures = "0.3"
 # http
 axum = "0.7"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "timeout"] }
 
 # openapi / swagger
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
@@ -51,6 +51,10 @@ alloy = { version = "0.5", default-features = false, features = [
     "contract",
     "signer-local",
     "network",
+    # `RpcError::ErrorResp(ErrorPayload)` is matched on in the relayer's
+    # submitter to tell a node that refused a broadcast from one that never
+    # answered; the payload type has to be nameable for that.
+    "json-rpc",
     "transport-http",
     "reqwest-rustls-tls",
 ] }

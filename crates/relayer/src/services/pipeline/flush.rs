@@ -2,10 +2,13 @@ use crate::adapters::abi::IMasp;
 use crate::adapters::calldata::{
     DepositLeaf, PaddedBatch, build_tu_batch_pub_inputs, build_tu_proof,
 };
-use crate::domain::error::AppResult;
+use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
-use crate::services::deposit_mempool::DepositMempool;
+use crate::services::deposit_mempool::{DepositMempool, PendingDeposit};
+use crate::services::escrow::EscrowReader;
 use crate::services::events::{DepositEvent, EventBroadcaster};
+use crate::services::pipeline::deposit_failures::DepositFailures;
+use crate::services::pipeline::deposit_preflight::{Verdict, classify};
 use crate::services::prover::{Priority, TreeUpdateBatchProver};
 use crate::services::submitter::Submitter;
 use crate::services::tree::TreeMirror;
@@ -14,7 +17,7 @@ use alloy::primitives::{Address, B256, FixedBytes, U256};
 use alloy::sol_types::SolCall;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 pub struct FlushPipeline {
     pub chain_id: i64,
@@ -22,8 +25,10 @@ pub struct FlushPipeline {
     pub submitter: Arc<Submitter>,
     pub prover: Arc<dyn TreeUpdateBatchProver>,
     pub mempool: Arc<DepositMempool>,
+    pub escrow: Arc<EscrowReader>,
     pub max_n: usize,
     pub events: Arc<EventBroadcaster>,
+    pub failures: DepositFailures,
 }
 
 impl FlushPipeline {
@@ -33,7 +38,27 @@ impl FlushPipeline {
     /// and `actualCount = n` — an odd count included.
     #[instrument(skip_all, fields(chain_id = self.chain_id, n, start_index))]
     pub async fn tick(&self) -> AppResult<Option<B256>> {
-        let pending = self.mempool.pop_pending(self.max_n).await?;
+        // `Priority::Flush` never queues for the process-wide prover permit, so
+        // a busy prover means this tick cannot finish. Bail out before the DB
+        // read, the escrow eth_calls and — the point — the mirror lock:
+        // reserving leaves only to unwind them blocks this chain's spends for
+        // nothing, and at `flush_interval_s = 3` that is a frequent tick.
+        if self.prover.is_busy() {
+            return Err(AppError::ProverBusy);
+        }
+
+        let limit = self.failures.batch_limit(self.max_n);
+        let pending = self
+            .mempool
+            .pop_pending(limit, &self.failures.quarantined_ids())
+            .await?;
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        // Everything below this line is paid for — a `tree_update_batch`
+        // Groth16 and a transaction — and `flushBatch` is all-or-nothing, so
+        // deposits that cannot land are dropped first.
+        let pending = self.preflight(pending).await?;
         if pending.is_empty() {
             return Ok(None);
         }
@@ -91,10 +116,9 @@ impl FlushPipeline {
         let prove_started = std::time::Instant::now();
         let tu_proof = match self.prover.prove(tu_witness, Priority::Flush).await {
             Ok(p) => p,
-            // Another chain holds the prover. Roll the reservation back the
-            // same way any other failed stage does and let the worker retry
-            // on its next tick, rather than queueing ahead of a spend.
-            Err(e) => return Err(mirror.unwind(n, e)),
+            // `ProverBusy` means another chain holds the prover — expected
+            // under load, and `abandon` does not charge it to the batch.
+            Err(e) => return Err(self.abandon(&mut mirror, n, &ids_u64, e)),
         };
         info!(
             elapsed_ms = prove_started.elapsed().as_millis() as u64,
@@ -114,10 +138,11 @@ impl FlushPipeline {
         .abi_encode();
         let receipt = match self.submitter.submit(calldata).await {
             Ok(r) => r,
-            Err(e) => return Err(mirror.unwind(n, e)),
+            Err(e) => return Err(self.abandon(&mut mirror, n, &ids_u64, e)),
         };
         // Drop the mirror lock before the DB write so other pipelines can proceed.
         drop(mirror);
+        self.failures.note_success();
 
         // Optimistic mark — keeps these IDs out of subsequent `pop_pending`
         // until the ingester observes the on-chain `DepositFlushed` event
@@ -171,5 +196,97 @@ impl FlushPipeline {
             });
         }
         Ok(Some(receipt.tx_hash))
+    }
+
+    /// Roll the mirror back after a failed stage and charge the batch for it.
+    ///
+    /// Which failures are the batch's own is [`DepositFailures::note_failure`]'s
+    /// call; infrastructure faults pass through uncounted.
+    #[must_use = "the returned error must be propagated"]
+    fn abandon(
+        &self,
+        mirror: &mut TreeMirror,
+        leaves: usize,
+        ids: &[u64],
+        cause: AppError,
+    ) -> AppError {
+        let cause = mirror.unwind(leaves, cause);
+        self.failures.note_failure(ids, &cause);
+        cause
+    }
+
+    /// Drop deposits `flushBatch` would refuse, before the prover runs.
+    ///
+    /// The contract keeps only `escrowed[id]`, a digest over every field the
+    /// relayer replays. Reading it back and re-deriving the digest locally
+    /// reproduces the per-deposit guards in `_drainDeposit` for one `eth_call`
+    /// each, instead of one wasted Groth16 per tick. [`classify`] holds the
+    /// decision table; this applies it.
+    ///
+    /// An RPC failure aborts the tick rather than rejecting anything: a
+    /// deposit must never be judged unflushable because the node was down.
+    async fn preflight(&self, pending: Vec<PendingDeposit>) -> AppResult<Vec<PendingDeposit>> {
+        let ids: Vec<u64> = pending.iter().map(|d| d.id).collect();
+        let stored = self.escrow.digests(&ids).await?;
+        // Deposits are matched to slots by position, so a short read would
+        // silently judge deposits against the wrong slot.
+        if stored.len() != pending.len() {
+            return Err(AppError::Internal(format!(
+                "escrow read returned {} digests for {} deposits",
+                stored.len(),
+                pending.len()
+            )));
+        }
+        let masp = self.escrow.pool_address();
+        let chain_id = self.chain_id as u64;
+
+        let mut flushable = Vec::with_capacity(pending.len());
+        let mut mismatched = Vec::new();
+        for (deposit, stored) in std::iter::zip(pending, stored) {
+            match classify(&deposit, stored, masp, chain_id) {
+                Verdict::Flushable => flushable.push(deposit),
+                Verdict::Skip(why) => warn!(
+                    chain_id = self.chain_id,
+                    deposit_id = deposit.id,
+                    why,
+                    "deposit left for a later tick"
+                ),
+                Verdict::Reject(why) => self.failures.quarantine(deposit.id, why),
+                Verdict::DigestMismatch => mismatched.push(deposit.id),
+            }
+        }
+        // One deposit that hashed correctly proves the derivation agrees with
+        // this pool, which is what makes the mismatches below trustworthy.
+        if !flushable.is_empty() {
+            self.failures.note_digest_verified();
+        }
+        self.judge_mismatches(&mismatched);
+        Ok(flushable)
+    }
+
+    /// Act on deposits whose replayed fields did not hash to their escrow slot.
+    ///
+    /// A wrong derivation in `deposit_digest` — or a misconfigured
+    /// `pool_address` — looks exactly like every deposit being corrupt, and
+    /// acting on that would quarantine the whole mempool on a single bug. So a
+    /// mismatch is only believed once some deposit on this pool has matched.
+    /// Until then the deposits are still dropped from the batch, which costs
+    /// an `eth_call` per tick and no proof.
+    fn judge_mismatches(&self, ids: &[u64]) {
+        if ids.is_empty() {
+            return;
+        }
+        if !self.failures.digest_verified() {
+            error!(
+                chain_id = self.chain_id,
+                n = ids.len(),
+                "every escrowed digest mismatched and none has ever matched; suspect the local \
+                 derivation or pool_address, not the deposits"
+            );
+            return;
+        }
+        for id in ids {
+            self.failures.quarantine(*id, "escrow digest mismatch");
+        }
     }
 }

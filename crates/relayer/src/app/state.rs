@@ -5,6 +5,7 @@ use crate::domain::error::AppError;
 use crate::domain::error::AppResult;
 use crate::domain::responses::ChainConfigOut;
 use crate::services::deposit_mempool::DepositMempool;
+use crate::services::escrow::EscrowReader;
 use crate::services::events::EventBroadcaster;
 use crate::services::fee_quote::{FeeQuoter, FeeToken};
 use crate::services::gas_estimator::GasEstimator;
@@ -12,6 +13,7 @@ use crate::services::gas_witness::GasWitness;
 use crate::services::idempotency::IdempotencyCache;
 use crate::services::nullifier_guard::NullifierGuards;
 use crate::services::oracle::{CoinbaseOracle, PriceOracle};
+use crate::services::pipeline::deposit_failures::DepositFailures;
 use crate::services::pipeline::{FlushPipeline, NativeRoute, SpendPipeline, SwapPipeline};
 use crate::services::prover::TreeUpdateBatchProver;
 use crate::services::submitter::Submitter;
@@ -236,14 +238,20 @@ async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
         submitter,
         prover: shared.prover.clone(),
         mempool: Arc::new(DepositMempool::new(shared.pool.clone(), c.chain_id)),
+        escrow: Arc::new(
+            EscrowReader::new(rpc.clone(), &c.pool_address)
+                .map_err(|e| boot_err(c.chain_id, "escrow reader", e))?,
+        ),
         max_n: c.flush_max_n.clamp(1, MAX_L_BATCH),
         events: shared.events.clone(),
+        failures: DepositFailures::new(c.chain_id, c.flush_max_attempts),
     });
 
     info!(
         chain_id = c.chain_id,
         flush_interval_s = c.flush_interval_s,
         flush_max_n = flush.max_n,
+        flush_max_attempts = c.flush_max_attempts,
         swap = swap.is_some(),
         native = spend.native.is_some(),
         "relayer pipelines ready"

@@ -16,6 +16,8 @@
 // two concurrent submissions cannot interleave and reorder on chain.
 
 pub mod common;
+pub mod deposit_failures;
+pub mod deposit_preflight;
 pub mod flush;
 pub mod spend;
 pub mod swap;

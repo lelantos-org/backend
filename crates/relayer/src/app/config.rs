@@ -42,6 +42,14 @@ pub struct ChainCfg {
     /// is one leaf, so this is capped at the contract's `MAX_L_BATCH = 8`.
     #[serde(default = "default_flush_max_n")]
     pub flush_max_n: usize,
+    /// How many attributable failures one deposit is allowed before the flush
+    /// worker stops batching it. `flushBatch` is all-or-nothing and the oldest
+    /// deposits are always batched first, so without a cap a single deposit
+    /// that can never land blocks every newer one on its chain. `0` disables
+    /// quarantine. Skipping is safe: the payer can still reclaim the deposit
+    /// with `cancelDeposit`.
+    #[serde(default = "default_flush_max_attempts")]
+    pub flush_max_attempts: u32,
     /// Optional. When set, enables `withdrawNative` for this chain: the
     /// submitter targets this address, and the SNARK must name it as both
     /// `recipient` and `relayer`. Mirrors `NativeAdapter.sol` deployed
@@ -181,6 +189,10 @@ fn default_flush_interval_s() -> u64 {
 
 fn default_flush_max_n() -> usize {
     8
+}
+
+fn default_flush_max_attempts() -> u32 {
+    5
 }
 
 fn default_native_symbol() -> String {
@@ -364,6 +376,7 @@ mod tests {
             receipt_poll_interval_ms: default_receipt_poll_interval_ms(),
             flush_interval_s: default_flush_interval_s(),
             flush_max_n: default_flush_max_n(),
+            flush_max_attempts: default_flush_max_attempts(),
             native_adapter_address: None,
             swap_wrapper_address: None,
             native_symbol: default_native_symbol(),

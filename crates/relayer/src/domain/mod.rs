@@ -1,3 +1,4 @@
+pub mod deposit_digest;
 pub mod dto;
 pub mod error;
 pub mod fiat_shamir;

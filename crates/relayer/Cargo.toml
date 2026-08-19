@@ -54,6 +54,10 @@ rand = "0.8"
 parking_lot = "0.12"
 rayon = { workspace = true }
 
+[dev-dependencies]
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+
 [build-dependencies]
 vergen-gix = "9"
 

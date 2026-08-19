@@ -13,6 +13,7 @@ use database::DbPool;
 use database::schema::deposit_escrowed_events;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
+use tracing::warn;
 
 /// One escrowed deposit awaiting a flush. A deposit occupies exactly one
 /// leaf, so this carries a single `cm` / `cv_dep` / `rcv`.
@@ -36,6 +37,57 @@ pub struct PendingDeposit {
     pub rcv: U256,
 }
 
+/// The `pop_pending` projection. Narrower than the table: the flush path
+/// needs the escrow digest preimage and the leaf, nothing else.
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = deposit_escrowed_events)]
+struct DepositRow {
+    deposit_id: BigDecimal,
+    cm: Vec<u8>,
+    public_asset_id: i64,
+    public_in: BigDecimal,
+    fee_bps_at_submit: i32,
+    payer: Vec<u8>,
+    submitted_at_block: i64,
+    cv_dep_x: BigDecimal,
+    cv_dep_y: BigDecimal,
+    rcv: BigDecimal,
+}
+
+impl TryFrom<DepositRow> for PendingDeposit {
+    type Error = AppError;
+
+    fn try_from(r: DepositRow) -> AppResult<Self> {
+        let id = bigdecimal_to_u64(&r.deposit_id)?;
+        Ok(PendingDeposit {
+            id,
+            cm: fixed_bytes(&r.cm, "cm")?,
+            public_asset_id: r.public_asset_id as u64,
+            public_in: bigdecimal_to_u64(&r.public_in)?,
+            fee_bps_at_submit: u16::try_from(r.fee_bps_at_submit).map_err(|_| {
+                AppError::Internal(format!(
+                    "deposit {id}: fee_bps_at_submit {} out of u16 range",
+                    r.fee_bps_at_submit
+                ))
+            })?,
+            payer: fixed_bytes(&r.payer, "payer")?,
+            // The contract hashed `uint32(block.number)`; anything wider
+            // never matches the stored digest.
+            submitted_at: u32::try_from(r.submitted_at_block).map_err(|_| {
+                AppError::Internal(format!(
+                    "deposit {id}: submitted_at_block {} out of u32 range",
+                    r.submitted_at_block
+                ))
+            })?,
+            cv_dep: [
+                bigdecimal_to_u256(&r.cv_dep_x)?,
+                bigdecimal_to_u256(&r.cv_dep_y)?,
+            ],
+            rcv: bigdecimal_to_u256(&r.rcv)?,
+        })
+    }
+}
+
 pub struct DepositMempool {
     pool: DbPool,
     chain_id: i64,
@@ -46,30 +98,32 @@ impl DepositMempool {
         Self { pool, chain_id }
     }
 
-    /// Return up to `limit` oldest pending deposits on this chain.
-    pub async fn pop_pending(&self, limit: usize) -> AppResult<Vec<PendingDeposit>> {
+    /// Return up to `limit` oldest pending deposits on this chain, skipping
+    /// `exclude`.
+    ///
+    /// Exclusion happens in SQL rather than after the fact: quarantined
+    /// deposits are the oldest ones by construction, so post-filtering would
+    /// let them consume the whole `LIMIT` window and starve the batch.
+    pub async fn pop_pending(
+        &self,
+        limit: usize,
+        exclude: &[u64],
+    ) -> AppResult<Vec<PendingDeposit>> {
         let mut conn = self
             .pool
             .get()
             .await
             .map_err(|e| AppError::Db(e.to_string()))?;
 
-        type Row = (
-            BigDecimal,
-            Vec<u8>,
-            i64,
-            BigDecimal,
-            i32,
-            Vec<u8>,
-            i64,
-            BigDecimal,
-            BigDecimal,
-            BigDecimal,
-        );
-        let rows: Vec<Row> = deposit_escrowed_events::table
+        let mut query = deposit_escrowed_events::table
             .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
             .filter(deposit_escrowed_events::flushed_at_block.is_null())
             .filter(deposit_escrowed_events::canceled_at_block.is_null())
+            .into_boxed();
+        if !exclude.is_empty() {
+            query = query.filter(deposit_escrowed_events::deposit_id.ne_all(to_id_bds(exclude)?));
+        }
+        let rows: Vec<DepositRow> = query
             // `deposit_id` breaks ties inside a block. Without it the subset
             // a limited flush picks — and the leaf order it commits — is
             // whatever the planner happens to return.
@@ -78,48 +132,27 @@ impl DepositMempool {
                 deposit_escrowed_events::deposit_id.asc(),
             ))
             .limit(limit as i64)
-            .select((
-                deposit_escrowed_events::deposit_id,
-                deposit_escrowed_events::cm,
-                deposit_escrowed_events::public_asset_id,
-                deposit_escrowed_events::public_in,
-                deposit_escrowed_events::fee_bps_at_submit,
-                deposit_escrowed_events::payer,
-                deposit_escrowed_events::submitted_at_block,
-                deposit_escrowed_events::cv_dep_x,
-                deposit_escrowed_events::cv_dep_y,
-                deposit_escrowed_events::rcv,
-            ))
+            .select(DepositRow::as_select())
             .load(&mut conn)
             .await
             .map_err(|e| AppError::Db(e.to_string()))?;
 
         let mut out = Vec::with_capacity(rows.len());
-        for (id_bd, cm, asset, public_in_bd, fbps, payer, submitted_at, cvx, cvy, rcv) in rows {
-            let id = bigdecimal_to_u64(&id_bd)?;
-            let public_in = bigdecimal_to_u64(&public_in_bd)?;
-            let fee_bps_at_submit = u16::try_from(fbps).map_err(|_| {
-                AppError::Internal(format!("fee_bps_at_submit {} out of u16 range", fbps))
-            })?;
-            // The contract hashed `uint32(block.number)`; anything wider
-            // never matches the stored digest.
-            let submitted_at = u32::try_from(submitted_at).map_err(|_| {
-                AppError::Internal(format!(
-                    "submitted_at_block {} out of u32 range for deposit {}",
-                    submitted_at, id
-                ))
-            })?;
-            out.push(PendingDeposit {
-                id,
-                cm: vec_to_arr32(&cm)?,
-                public_asset_id: asset as u64,
-                public_in,
-                fee_bps_at_submit,
-                payer: vec_to_arr20(&payer)?,
-                submitted_at,
-                cv_dep: [bigdecimal_to_u256(&cvx)?, bigdecimal_to_u256(&cvy)?],
-                rcv: bigdecimal_to_u256(&rcv)?,
-            });
+        for row in rows {
+            let id_bd = row.deposit_id.clone();
+            match PendingDeposit::try_from(row) {
+                Ok(d) => out.push(d),
+                // One unreadable row must not fail the query. It used to, and
+                // since the flush worker re-runs the same query every tick
+                // that meant a single malformed row stopped the chain from
+                // ever flushing again.
+                Err(e) => warn!(
+                    chain_id = self.chain_id,
+                    deposit_id = %id_bd,
+                    error = %e,
+                    "skipping unreadable pending deposit row"
+                ),
+            }
         }
         Ok(out)
     }
@@ -193,26 +226,9 @@ fn to_id_bds(ids: &[u64]) -> AppResult<Vec<BigDecimal>> {
         .collect()
 }
 
-fn vec_to_arr32(v: &[u8]) -> AppResult<[u8; 32]> {
-    if v.len() != 32 {
-        return Err(AppError::Internal(format!(
-            "expected 32-byte cm, got {}",
-            v.len()
-        )));
-    }
-    let mut a = [0u8; 32];
-    a.copy_from_slice(v);
-    Ok(a)
-}
-
-fn vec_to_arr20(v: &[u8]) -> AppResult<[u8; 20]> {
-    if v.len() != 20 {
-        return Err(AppError::Internal(format!(
-            "expected 20-byte address, got {}",
-            v.len()
-        )));
-    }
-    let mut a = [0u8; 20];
-    a.copy_from_slice(v);
-    Ok(a)
+/// A `bytea` column the schema does not constrain to a width the code does.
+/// `field` names the column so a bad row is diagnosable from the log alone.
+fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> AppResult<[u8; N]> {
+    v.try_into()
+        .map_err(|_| AppError::Internal(format!("expected {N}-byte {field}, got {}", v.len())))
 }

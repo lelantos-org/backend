@@ -1,0 +1,180 @@
+//! Off-chain twin of `MASP._depositDigest`.
+//!
+//! The contract stores a deposit as a single keccak digest and drops every
+//! field that went into it. `flushBatch` re-derives the digest from the
+//! `DepositMeta` the relayer replays and reverts `DigestMismatch(id)` if it
+//! differs — for the *whole* batch. Deriving it here lets the flush pipeline
+//! drop a deposit whose replayed fields cannot possibly match before it pays
+//! for a `tree_update_batch` Groth16.
+//!
+//! Must stay byte-identical to `contracts/src/MASP.sol::_depositDigest`.
+
+use crate::services::deposit_mempool::PendingDeposit;
+use alloy::primitives::{Address, B256, U256, keccak256};
+use alloy::sol_types::SolValue;
+
+/// The contract narrows `publicIn` to `uint48` after bounding it, so a wider
+/// value hashes differently *and* reverts `PublicInTooLarge` first.
+pub const MAX_PUBLIC_IN: u64 = (1u64 << 48) - 1;
+
+/// `keccak256(abi.encode(address(this), block.chainid, id, cm, cvDep,
+/// publicAssetId, publicIn, feeBpsAtSubmit, payer, submittedAt))`.
+///
+/// `abi.encode` is not packed, so every static field occupies a full word and
+/// the declared Solidity widths (`uint64` / `uint48` / `uint16` / `uint32`)
+/// encode identically to `U256` as long as the value fits — which
+/// [`MAX_PUBLIC_IN`] and the `PendingDeposit` field types already guarantee.
+/// `cvDep` is a static `uint256[2]`, so it lands inline as two words.
+pub fn deposit_digest(masp: Address, chain_id: u64, d: &PendingDeposit) -> B256 {
+    let preimage = (
+        masp,
+        U256::from(chain_id),
+        U256::from(d.id),
+        B256::from(d.cm),
+        d.cv_dep,
+        U256::from(d.public_asset_id),
+        U256::from(d.public_in),
+        U256::from(d.fee_bps_at_submit),
+        Address::from(d.payer),
+        U256::from(d.submitted_at),
+    );
+    keccak256(preimage.abi_encode_params())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field distinct and non-zero, so a swapped pair or a dropped
+    /// field cannot coincidentally hash to the same digest.
+    fn deposit() -> PendingDeposit {
+        PendingDeposit {
+            id: 1,
+            cm: [0xab; 32],
+            public_asset_id: 2,
+            public_in: 3,
+            fee_bps_at_submit: 4,
+            payer: [0xcd; 20],
+            submitted_at: 5,
+            cv_dep: [U256::from(6), U256::from(7)],
+            rcv: U256::from(8),
+        }
+    }
+
+    fn b256(hex: &str) -> B256 {
+        hex.parse().expect("golden digest is valid hex")
+    }
+
+    /// Golden vector from `cast`, which encodes exactly as Solidity's
+    /// `abi.encode` does:
+    ///
+    /// ```sh
+    /// cast keccak "$(cast abi-encode \
+    ///   'f(address,uint256,uint256,bytes32,uint256[2],uint64,uint48,uint16,address,uint32)' \
+    ///   0x1111111111111111111111111111111111111111 31337 42 \
+    ///   0x2222222222222222222222222222222222222222222222222222222222222222 \
+    ///   '[3,4]' 7 1000000 25 0x3333333333333333333333333333333333333333 123456)"
+    /// ```
+    ///
+    /// A drift here quarantines every deposit on every chain, so both this and
+    /// the test below pin against outside encoders rather than against
+    /// `deposit_digest` itself.
+    #[test]
+    fn the_digest_matches_the_contract_encoding() {
+        let d = PendingDeposit {
+            id: 42,
+            cm: [0x22; 32],
+            public_asset_id: 7,
+            public_in: 1_000_000,
+            fee_bps_at_submit: 25,
+            payer: [0x33; 20],
+            submitted_at: 123_456,
+            cv_dep: [U256::from(3), U256::from(4)],
+            rcv: U256::ZERO,
+        };
+        assert_eq!(
+            deposit_digest(Address::from([0x11; 20]), 31337, &d),
+            b256("0xd690ccb708eda517cb94bf1153d42c0aa19fe48dcaf5129e45adbd6a8459953e")
+        );
+    }
+
+    /// The same check against a real deployment rather than an encoder: a
+    /// `MASP.deposit()` in the Foundry harness
+    /// (`contracts/test/MASP.escrowEventRoundtrip.t.sol`), with the preimage
+    /// taken from the `DepositEscrowed` log exactly as the indexer takes it
+    /// and `submittedAt` from the emitting block. Catches what the encoder
+    /// test cannot: a field the relayer sources from the wrong column.
+    #[test]
+    fn the_digest_matches_a_deposit_a_deployed_masp_escrowed() {
+        let d = PendingDeposit {
+            id: 0,
+            cm: U256::from(0x111).to_be_bytes(),
+            public_asset_id: 1,
+            public_in: 100,
+            fee_bps_at_submit: 25,
+            payer: address("0x000000000000000000000000000000000000Face").into(),
+            submitted_at: 1,
+            cv_dep: [U256::from(0xaa1), U256::from(0xaa2)],
+            rcv: U256::from(0xccc),
+        };
+        assert_eq!(
+            deposit_digest(
+                address("0xc7183455a4C133Ae270771860664b6B7ec320bB1"),
+                31337,
+                &d
+            ),
+            b256("0xe42d20070c82c14b5c4799e3d0047aa7ff1d9b96c8c31d380b9abb5015da756b")
+        );
+    }
+
+    /// `rcv` is the private blinder; it is not part of the escrow preimage.
+    #[test]
+    fn the_private_blinder_does_not_enter_the_digest() {
+        let mut d = deposit();
+        let without = deposit_digest(Address::ZERO, 1, &d);
+        d.rcv += U256::from(9999);
+        assert_eq!(without, deposit_digest(Address::ZERO, 1, &d));
+    }
+
+    /// Every replayed field is bound, so a wrong one is caught before proving.
+    #[test]
+    fn every_replayed_field_changes_the_digest() {
+        type Mutation = (&'static str, fn(&mut PendingDeposit));
+        const MUTATIONS: &[Mutation] = &[
+            ("id", |d| d.id += 1),
+            ("cm", |d| d.cm[0] ^= 1),
+            ("public_asset_id", |d| d.public_asset_id += 1),
+            ("public_in", |d| d.public_in += 1),
+            ("fee_bps_at_submit", |d| d.fee_bps_at_submit += 1),
+            ("payer", |d| d.payer[0] ^= 1),
+            ("submitted_at", |d| d.submitted_at += 1),
+            ("cv_dep.x", |d| d.cv_dep[0] += U256::from(1)),
+            ("cv_dep.y", |d| d.cv_dep[1] += U256::from(1)),
+        ];
+
+        let expected = deposit_digest(Address::ZERO, 1, &deposit());
+        for (field, mutate) in MUTATIONS {
+            let mut d = deposit();
+            mutate(&mut d);
+            assert_ne!(
+                deposit_digest(Address::ZERO, 1, &d),
+                expected,
+                "changing {field} left the digest untouched"
+            );
+        }
+    }
+
+    /// The anti-replay prefix: the same deposit in another pool, or on another
+    /// chain, is a different digest.
+    #[test]
+    fn the_digest_is_bound_to_the_pool_and_the_chain() {
+        let d = deposit();
+        let here = deposit_digest(Address::from([0x11; 20]), 1, &d);
+        assert_ne!(here, deposit_digest(Address::from([0x12; 20]), 1, &d));
+        assert_ne!(here, deposit_digest(Address::from([0x11; 20]), 2, &d));
+    }
+
+    fn address(hex: &str) -> Address {
+        hex.parse().expect("test address is valid hex")
+    }
+}

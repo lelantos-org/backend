@@ -1,4 +1,5 @@
 pub mod deposit_mempool;
+pub mod escrow;
 pub mod events;
 pub mod fee_quote;
 pub mod gas_estimator;

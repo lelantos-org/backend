@@ -71,6 +71,16 @@ pub trait TreeUpdateBatchProver: Send + Sync {
         witness: TreeUpdateBatchWitness,
         priority: Priority,
     ) -> AppResult<TreeUpdateBatchProof>;
+
+    /// Whether a [`Priority::Flush`] prove would be refused right now.
+    ///
+    /// Advisory: the answer can go stale before the caller acts on it, and a
+    /// stale answer only costs what the caller would have paid anyway. It lets
+    /// a background tick bail out *before* taking a chain's tree-mirror lock
+    /// instead of reserving leaves and unwinding them.
+    fn is_busy(&self) -> bool {
+        false
+    }
 }
 
 /// Everything a proof needs from the zkey, parsed once at startup.
@@ -256,6 +266,10 @@ fn run_proof(
 
 #[async_trait]
 impl TreeUpdateBatchProver for ArkCircomProver {
+    fn is_busy(&self) -> bool {
+        self.gate.available_permits() == 0
+    }
+
     async fn prove(
         &self,
         witness: TreeUpdateBatchWitness,

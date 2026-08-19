@@ -133,6 +133,17 @@ impl TreeMirror {
         }
     }
 
+    /// Drop `root` from the accepted window, if it is still the newest entry.
+    ///
+    /// The inverse of [`Self::remember_root`], for an advance that is being
+    /// undone. Only the newest entry is eligible: an identical root deeper in
+    /// the window was reached by a path that did land, and is still valid.
+    fn forget_newest_root(&mut self, root: &Field) {
+        if self.recent_roots.back() == Some(root) {
+            self.recent_roots.pop_back();
+        }
+    }
+
     /// Append `root` to the accepted window, newest last, dropping the oldest
     /// once it is full. A repeat of the newest entry is a no-op, so a mutation
     /// that leaves the root unchanged does not consume a slot.
@@ -424,9 +435,18 @@ impl TreeMirror {
                 n, before, self.chain_id
             )));
         }
+        // Captured before the truncation, and retracted after it: the advance
+        // being undone published a root the chain never held. Left in the
+        // accepted window it would let a wallet that read it from `/chains`
+        // pass `check_known_root` and then revert `StaleOldRoot` on-chain —
+        // the exact failure that check exists to prevent.
+        let speculative = self.tree.root().ok();
         self.tree
             .truncate_leaves(n)
             .map_err(|e| AppError::Internal(e.to_string()))?;
+        if let Some(root) = speculative {
+            self.forget_newest_root(&root);
+        }
         self.publish();
         info!(
             chain_id = self.chain_id,

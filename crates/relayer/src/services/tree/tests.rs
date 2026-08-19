@@ -206,6 +206,46 @@ fn root_history_remembers_what_the_mirror_has_held() {
     assert!(!m.knows_root(&[0xEEu8; 32]));
 }
 
+/// A rolled-back advance published a root the chain never held. Leaving it in
+/// the accepted window lets a wallet that read it from `/chains` pass
+/// `check_known_root` and then revert `StaleOldRoot` on-chain — the exact
+/// failure that check exists to prevent.
+#[test]
+fn a_rolled_back_root_stops_being_accepted() {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    let before = m.current_root().unwrap();
+
+    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
+    let speculative = m.current_root().unwrap();
+    assert!(m.knows_root(&speculative), "published while in flight");
+
+    m.rollback(2).unwrap();
+    assert!(
+        !m.knows_root(&speculative),
+        "retracted root is still accepted"
+    );
+    assert!(
+        m.knows_root(&before),
+        "the root it reverted to is still valid"
+    );
+    assert_eq!(m.current_root().unwrap(), before);
+}
+
+/// Only the newest entry is retracted. An identical root deeper in the window
+/// was reached by an advance that did land, and stays valid.
+#[test]
+fn a_rollback_retracts_only_the_advance_it_undid() {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
+    let landed = m.current_root().unwrap();
+
+    advance2(&mut m, cm(3), cm(4), cv(3), cv(4)).unwrap();
+    m.rollback(2).unwrap();
+
+    assert!(m.knows_root(&landed));
+    assert_eq!(m.current_root().unwrap(), landed);
+}
+
 /// A rollback restores an earlier root, which must not be pushed twice.
 #[test]
 fn an_unchanged_root_does_not_consume_a_slot() {

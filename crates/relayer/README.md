@@ -74,6 +74,19 @@ payload is a 400 rather than something cached against a key; the nullifier
 reservation happens *inside* it, because a resubmission under a known key must
 replay the first answer rather than be refused as a double-spend.
 
+Every RPC call carries a deadline and a retry budget (`adapters/rpc.rs`), and
+routes other than the SSE stream carry one too. That is not belt-and-braces:
+the mirror mutex is held from reserve through confirmation, so an untimed call
+against a hung node holds the whole chain — and everything queued behind it —
+for as long as the node stays hung.
+
+Filling a transaction and broadcasting it are separate steps, because their
+failures mean different things. A filler round trip fails before anything is
+signed, so nothing landed and the mirror may roll back. An *unanswered*
+broadcast may already be in the mempool, so the hash — known before the send —
+is resolved against the chain instead of assumed. Only a node that explicitly
+refuses is treated as "nothing landed".
+
 ### Nullifier guard
 
 Three layers, cheapest first, all before the tree lock so a doomed submission
@@ -138,13 +151,77 @@ One cron task per chain, every `flush_interval_s`. It re-reads
 oldest first by `submitted_at_block`, batches up to `flush_max_n` (clamped to
 the contract's `MAX_L_BATCH = 8`, one leaf per deposit), and submits one
 `flushBatch`. Each success publishes a `DepositEvent::Flushed` on the broadcast
-channel behind `/v1/deposits/stream`.
+channel behind `/v1/deposits/stream` — 256 slots, dropping oldest for a lagging
+receiver, which is ample at ≤ 8 deposits per tick.
 
-The channel holds 256 events and drops oldest for a lagging receiver, which is
-ample at ≤ 8 deposits per tick.
+```
+read pending deposits          oldest first, skipping quarantined ids
+  └─ pre-flight                escrowed(id) + local digest, before the prover
+       └─ tree mirror lock
+            ├─ reserve leaves
+            ├─ tree_update_batch Groth16
+            ├─ submit + await receipt
+            └─ commit, or roll back and charge the batch
+```
 
-Because the ledger is re-read every tick, the worker is stateless: a restart
-resumes from whatever the indexer has recorded, not from memory.
+Two properties shape the two sections below. `flushBatch` is
+**all-or-nothing**: one deposit `_drainDeposit` refuses reverts the batch. And
+the head of the queue is always in the batch, because the ordering is fixed. So
+a single deposit that can never land blocks every newer deposit on its chain —
+and, without a bound, does so forever, rebuilding and reproving the same doomed
+batch every tick.
+
+### Pre-flight
+
+The contract keeps only `escrowed[id]`, a keccak digest over every field the
+relayer replays at flush time. Reading that slot back and re-deriving the digest
+locally (`domain::deposit_digest`, byte-identical to `MASP._depositDigest`)
+reproduces the per-deposit guards in `_drainDeposit` for one `eth_call` each,
+instead of one wasted Groth16 per tick. The decision table is
+`services::pipeline::deposit_preflight::classify`, kept pure so it is testable
+without a node:
+
+* **`public_in` over `uint48`** — `_drainDeposit` bounds it before narrowing,
+  so it reverts however it is replayed. Quarantined; the deposit's own fields
+  prove it.
+* **empty escrow slot** — zero is the contract's "no pending deposit" sentinel:
+  canceled, or flushed by someone else with the indexer still catching up.
+  Dropped from this batch and nothing more — it resolves on its own, so it is
+  not held against the deposit.
+* **digest mismatch** — the replayed fields cannot hash to the slot, so the
+  deposit is quarantined. But only once some deposit on this pool *has*
+  matched: until then a mismatch is likelier a bug in the local derivation, or
+  a misconfigured `pool_address`, than a bad deposit — and acting on it would
+  take out the whole mempool. Until that proof arrives the mismatches are still
+  dropped from the batch, which costs an `eth_call` and no proof.
+
+An RPC failure aborts the tick rather than rejecting anything. A deposit must
+never be judged unflushable because the node was unreachable.
+
+### Failure budget
+
+What pre-flight cannot classify is bounded by attempt count
+(`flush_max_attempts`, `services::pipeline::deposit_failures`). Only reverts,
+contract rejections and prover errors are charged — an RPC outage or a busy
+prover must not quarantine the mempool.
+
+A failed batch of more than one deposit names no culprit, and charging all of
+them would quarantine the innocent majority. So nothing is charged; instead the
+worker drops to one deposit per tick until a failure identifies itself, then
+counts against that deposit alone. Any success clears the counts and restores
+full-size batches, on the grounds that a chain that can flush at all was
+probably never the deposits' fault.
+
+Skipping a deposit is safe: it is not lost funds, because the payer can still
+reclaim it with `cancelDeposit` after `cancelDelay`.
+
+### State
+
+The ledger is re-read every tick, so a restart resumes from whatever the indexer
+has recorded. The one piece of in-process state is the quarantine set, which a
+restart therefore re-admits: deterministic rejections are caught again by the
+next tick's pre-flight, and counted ones have to re-earn their attempts. That is
+the intended trade for keeping the worker free of tables of its own.
 
 ## Fee estimation
 
@@ -220,6 +297,7 @@ signer_key_hex = "0x…"
 | `receipt_poll_interval_ms` | no | 250 | Pick ~¼ of block time |
 | `flush_interval_s` | no | 30 | Must be > 0 |
 | `flush_max_n` | no | 8 | Clamped to `MAX_L_BATCH = 8` |
+| `flush_max_attempts` | no | 5 | Attributable failures before a deposit is skipped. `0` disables quarantine |
 | `native_adapter_address` | no | — | Enables `withdrawNative`. The SNARK must name it as both `recipient` and `relayer` — the adapter is the pool's caller there |
 | `swap_wrapper_address` | no | — | Enables `/v1/swap` |
 | `native_symbol` | no | `ETH` | Oracle base for the native gas token |
@@ -248,6 +326,7 @@ overlapping leaf ranges and race each other's `flushBatch`.
 
 ## Layering
 
-Standard binary layout, plus `services/pipeline/` (spend, swap, flush over a
-shared `common`) and `services/tree/`. `build.rs` stamps the version and git SHA
-that `/health` reports. See [ARCHITECTURE.md](../../ARCHITECTURE.md).
+Standard binary layout, plus `services/pipeline/` (spend, swap and flush over a
+shared `common`, with the flush worker's decision table in `deposit_preflight`
+and its attempt bookkeeping in `deposit_failures`) and `services/tree/`.
+`build.rs` stamps the version and git SHA that `/health` reports. See [ARCHITECTURE.md](../../ARCHITECTURE.md).
