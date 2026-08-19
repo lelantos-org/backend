@@ -169,7 +169,7 @@ impl Submitter {
             }
             Err(e) => {
                 return self
-                    .resolve_by_hash(tx_hash, Unresolved::Unanswered(&e.to_string()))
+                    .resolve_by_hash(tx_hash, Unresolved::Unanswered(e.to_string()))
                     .await;
             }
         };
@@ -180,7 +180,7 @@ impl Submitter {
         match pending.get_receipt().await {
             Ok(receipt) => Ok(receipt),
             Err(e) => {
-                self.resolve_by_hash(tx_hash, Unresolved::NoReceipt(&e.to_string()))
+                self.resolve_by_hash(tx_hash, Unresolved::NoReceipt(e.to_string()))
                     .await
             }
         }
@@ -251,7 +251,7 @@ impl Submitter {
     async fn resolve_by_hash(
         &self,
         tx_hash: B256,
-        unresolved: Unresolved<'_>,
+        unresolved: Unresolved,
     ) -> AppResult<ChainReceipt> {
         warn!(
             %tx_hash,
@@ -292,15 +292,15 @@ impl Submitter {
 /// Carried into [`Submitter::resolve_by_hash`] so its log line and its error
 /// name the real situation. Collapsing the two into one "no receipt" message
 /// throws away the only clue worth having.
-enum Unresolved<'a> {
+enum Unresolved {
     /// The node never answered the broadcast. It may hold the transaction, or
     /// may never have seen it.
-    Unanswered(&'a str),
+    Unanswered(String),
     /// The broadcast was accepted, but no receipt arrived inside the window.
-    NoReceipt(&'a str),
+    NoReceipt(String),
 }
 
-impl Unresolved<'_> {
+impl Unresolved {
     /// Fixed text: safe to log, stable enough to alert on.
     fn cause(&self) -> &'static str {
         match self {
