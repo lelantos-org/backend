@@ -6,7 +6,7 @@ use crate::domain::error::AppResult;
 use crate::domain::fiat_shamir;
 use crate::services::deposit_mempool::DepositMempool;
 use crate::services::events::{DepositEvent, EventBroadcaster};
-use crate::services::prover::TreeUpdateBatchProver;
+use crate::services::prover::{Priority, TreeUpdateBatchProver};
 use crate::services::submitter::Submitter;
 use crate::services::tree::TreeMirror;
 use crate::services::witness::{self, LeafDeposit};
@@ -89,8 +89,11 @@ impl FlushPipeline {
         let tu_witness = witness::build_batch(&slot, &advanced, &cms_real, &deposits, z);
 
         let prove_started = std::time::Instant::now();
-        let tu_proof = match self.prover.prove(tu_witness).await {
+        let tu_proof = match self.prover.prove(tu_witness, Priority::Flush).await {
             Ok(p) => p,
+            // Another chain holds the prover. Roll the reservation back the
+            // same way any other failed stage does and let the worker retry
+            // on its next tick, rather than queueing ahead of a spend.
             Err(e) => return Err(mirror.unwind(n, e)),
         };
         info!(

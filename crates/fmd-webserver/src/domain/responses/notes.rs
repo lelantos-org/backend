@@ -9,13 +9,12 @@ pub struct NoteOut {
     pub block_number: i64,
     pub leaf_index: i64,
     pub commitment_hex: String,
-    /// First 2 bytes of `ciphertext` decoded as a big-endian u16, formatted
-    /// `0xNNNN`. Convenience for FMD bucket scans.
-    pub clue_bits_hex: String,
     pub ciphertext_hex: String,
-    /// Sender's ECDH ephemeral public point (Baby-Jubjub coordinates as
-    /// `0x`-prefixed 32-byte field elements). Receiver feeds these into
-    /// `decryptNote` to recover the note plaintext.
-    pub eph_pub_x: String,
-    pub eph_pub_y: String,
+    /// Sender's ECDH ephemeral public point, packed the way circomlibjs
+    /// `babyJub.packPoint` does: 32 bytes of `y` **little-endian**, high bit
+    /// of the last byte set when `x > (q-1)/2`. Bare hex, like
+    /// `ciphertext_hex`, because it is a byte string and not a number.
+    ///
+    /// The receiver feeds these bytes to `decryptNote` as `epk` unchanged.
+    pub eph_pub_packed_hex: String,
 }

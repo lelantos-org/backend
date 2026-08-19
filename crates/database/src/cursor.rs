@@ -44,7 +44,13 @@ pub trait CursorRepo: Send + Sync {
     /// processes that fetched the same cursor can otherwise have the slower
     /// one overwrite the faster one's watermark, dragging the cursor backwards
     /// and re-processing an unbounded range.
-    async fn upsert_monotonic(&self, row: UpsertCursor) -> CursorResult<()>;
+    ///
+    /// Returns whether the row was written. `false` means a peer's watermark
+    /// was already at or past this one — benign where concurrent writers are
+    /// expected (the filter loop), and a split brain where they are not (the
+    /// consume loop holds a per-chain advisory lock precisely so that one
+    /// writer exists).
+    async fn upsert_monotonic(&self, row: UpsertCursor) -> CursorResult<bool>;
     async fn list_chain_ids(&self) -> CursorResult<Vec<i64>>;
 }
 
@@ -115,14 +121,16 @@ impl CursorRepo for PostgresCursorRepo {
         Ok(())
     }
 
-    async fn upsert_monotonic(&self, row: UpsertCursor) -> CursorResult<()> {
+    async fn upsert_monotonic(&self, row: UpsertCursor) -> CursorResult<bool> {
         let mut conn = self
             .pool
             .get()
             .await
             .map_err(|e| CursorError::Pool(e.to_string()))?;
-        monotonic_stmt(&row).execute(&mut conn).await?;
-        Ok(())
+        // The `WHERE last_event_id < $new` predicate lives in the `DO UPDATE`
+        // clause, so a rejected advance is reported as zero affected rows
+        // rather than an error.
+        Ok(monotonic_stmt(&row).execute(&mut conn).await? > 0)
     }
 
     async fn list_chain_ids(&self) -> CursorResult<Vec<i64>> {

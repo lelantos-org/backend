@@ -13,7 +13,7 @@ use crate::adapters::parse::{FieldRef, parse_address, parse_field};
 use crate::domain::dto::{OutputAuxDto, PointDto, ProofDto, PubInputsDto, TRANSACT_OUT};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
-use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
+use crate::services::prover::{Priority, TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use crate::services::witness;
@@ -205,7 +205,7 @@ pub async fn prove_spend(
         &inputs.padded(),
     );
     let w = witness::build_spend(slot, advanced, &inputs.cms, &inputs.cv_deps, z);
-    prover.prove(w).await
+    prover.prove(w, Priority::Spend).await
 }
 
 /// Encode the `TreeUpdateBatch` public-inputs struct that both spend and swap

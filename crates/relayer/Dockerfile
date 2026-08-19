@@ -24,11 +24,24 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ---------- builder ----------
 FROM chef AS builder
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
         pkg-config \
         cmake \
     && rm -rf /var/lib/apt/lists/*
+
+# ark-ff ships an asm Montgomery multiply for BN254 but gates it on
+# `target_feature = "bmi2"` *and* `"adx"`, neither of which is in the baseline
+# x86-64 target — so a plain `cargo build --release` compiles it out and every
+# field multiply in the Groth16 MSMs and FFTs runs the generic CIOS loop.
+# Enable exactly those two features — not a whole `target-cpu` level, which
+# pulls in AVX2 and friends. The image then needs Haswell-era hardware (2013+).
+# No equivalent gate exists on aarch64, so arm64 builds are left alone.
+RUN mkdir -p /app/.cargo && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        printf '[build]\nrustflags = ["-C", "target-feature=+bmi2,+adx"]\n' > /app/.cargo/config.toml; \
+    fi
 
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --bin relayer

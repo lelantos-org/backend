@@ -183,7 +183,11 @@ impl FilterServiceImpl {
     /// which the consume lock already rules out. See [`BACKFILL_LAG`] for why
     /// the global backfill pointer does not get the same guarantee for free.
     async fn advance_cursor(&self, chain_id: i64, last_id: i64, last_block: i64) -> Result<()> {
-        self.cursors
+        // Discarded deliberately: this loop is unlocked by design and several
+        // per-chain ticks race to advance the same cursor, so losing the race
+        // is the normal path, not a fault. See the doc on this method.
+        let _ = self
+            .cursors
             .upsert_monotonic(UpsertCursor {
                 name: NAME.to_string(),
                 chain_id,

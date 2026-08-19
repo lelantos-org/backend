@@ -1,22 +1,22 @@
 // `tree_update_batch` prover. In-process Groth16 over ark-bn254 against the
 // snarkjs-compatible `.zkey`; the proving key is parsed once at startup.
 
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::{AppError, AppResult, ErrorContext};
+use crate::services::witness_calc::{self, WitnessCalculator};
 use async_trait::async_trait;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tracing::info;
 
 use ark_bn254::{Bn254, Fr};
-use ark_circom::read_zkey;
-use ark_circom::{CircomCircuit, CircomConfig, CircomReduction};
-use ark_ff::PrimeField;
-use ark_groth16::{Groth16, ProvingKey};
+use ark_circom::{CircomReduction, read_zkey};
+use ark_ff::{PrimeField, UniformRand};
+use ark_groth16::{Groth16, PreparedVerifyingKey, Proof, ProvingKey};
+use ark_relations::utils::matrix::Matrix;
 use ark_snark::SNARK;
 use num_bigint::BigInt;
 use parking_lot::Mutex;
@@ -55,124 +55,251 @@ pub struct TreeUpdateBatchProof {
     pub public_signals: Vec<String>,
 }
 
-#[async_trait]
-pub trait TreeUpdateBatchProver: Send + Sync {
-    async fn prove(&self, witness: TreeUpdateBatchWitness) -> AppResult<TreeUpdateBatchProof>;
+/// Who is waiting on a proof. A spend has an HTTP caller blocked on it; a
+/// flush is a background tick that will come round again in seconds, so it
+/// yields the prover rather than queueing ahead of a spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    Spend,
+    Flush,
 }
 
-/// In-process Groth16 prover. The proving key (~150MB zkey) *and* the circom
-/// config (wasm module + parsed r1cs) are loaded once at startup and reused;
-/// a prove then costs only the witness calculation and the proof itself.
+#[async_trait]
+pub trait TreeUpdateBatchProver: Send + Sync {
+    async fn prove(
+        &self,
+        witness: TreeUpdateBatchWitness,
+        priority: Priority,
+    ) -> AppResult<TreeUpdateBatchProof>;
+}
+
+/// Everything a proof needs from the zkey, parsed once at startup.
 ///
-/// Proving is serialized — `Groth16::prove` already saturates the machine —
-/// but the gate is a `Semaphore` held *outside* `spawn_blocking`, not a mutex
-/// inside it. Queuing on a blocking-pool thread would let a burst of requests
-/// park the whole pool, which the DB and everything else also draws from.
+/// The A/B/C matrices are the point: the zkey already carries them, so
+/// `create_proof_with_reduction_and_matrices` can be handed them directly.
+/// The alternative — `Groth16::prove` over a `CircomCircuit` — rebuilds them
+/// from the `.r1cs` on *every* proof: clone the constraint list, re-emit every
+/// linear combination, inline them, then materialise the matrices again inside
+/// the QAP witness map.
+struct Groth16Params {
+    pk: ProvingKey<Bn254>,
+    /// `[a, b, c]`, in the order `create_proof_with_reduction_and_matrices`
+    /// indexes them.
+    matrices: Vec<Matrix<Fr>>,
+    /// Verifies the proof we just produced, in place of circom's per-signal
+    /// sanity check. Three pairings, against a whole-witness re-check.
+    pvk: PreparedVerifyingKey<Bn254>,
+    /// Length of the witness prefix that is public — the `1` at the head plus
+    /// the circuit's public outputs and inputs.
+    num_inputs: usize,
+    num_constraints: usize,
+}
+
+impl Groth16Params {
+    fn load(zkey_path: &Path) -> AppResult<Self> {
+        let mut file = std::fs::File::open(zkey_path).prover("open zkey")?;
+        let (pk, m) = read_zkey(&mut file).prover("read zkey")?;
+        let pvk = Groth16::<Bn254, CircomReduction>::process_vk(&pk.vk).prover("process vk")?;
+        Ok(Self {
+            pk,
+            matrices: vec![m.a, m.b, m.c],
+            pvk,
+            num_inputs: m.num_instance_variables,
+            num_constraints: m.num_constraints,
+        })
+    }
+
+    /// The public prefix of a full witness.
+    ///
+    /// Element 0 is circom's constant `1`, which the verifier supplies itself.
+    /// This is the same slice `CircomCircuit::get_public_inputs` returns once
+    /// the wire mapping is dropped, so the signals reaching the contract are
+    /// unchanged by proving from matrices.
+    fn public_inputs<'w>(&self, witness: &'w [Fr]) -> AppResult<&'w [Fr]> {
+        witness
+            .get(1..self.num_inputs)
+            .ok_or_else(|| AppError::Prover("witness shorter than its public inputs".into()))
+    }
+
+    fn prove(&self, witness: &[Fr]) -> AppResult<Proof<Bn254>> {
+        let mut rng = rand::rngs::OsRng;
+        let (r, s) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
+        Groth16::<Bn254, CircomReduction>::create_proof_with_reduction_and_matrices(
+            &self.pk,
+            r,
+            s,
+            &self.matrices,
+            self.num_inputs,
+            self.num_constraints,
+            witness,
+        )
+        .prover("groth16 prove")
+    }
+
+    /// Check our own output before it becomes calldata.
+    ///
+    /// This stands in for circom's `sanity_check`: a witness that does not
+    /// satisfy the constraints cannot yield a proof that verifies, and failing
+    /// here is a failed submission rather than an opaque on-chain revert.
+    fn verify(&self, public_inputs: &[Fr], proof: &Proof<Bn254>) -> AppResult<()> {
+        let ok = Groth16::<Bn254, CircomReduction>::verify_with_processed_vk(
+            &self.pvk,
+            public_inputs,
+            proof,
+        )
+        .prover("verify own proof")?;
+        if !ok {
+            return Err(AppError::Prover("own proof failed verification".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Where one proof spent its time. `elapsed_ms` alone cannot say whether it
+/// went to the wasm witness build or to the MSMs, and the two have completely
+/// different fixes.
+#[derive(Debug, Default)]
+struct Timings {
+    witness_ms: u64,
+    groth16_ms: u64,
+    verify_ms: u64,
+}
+
+/// Run `f`, recording how long it took into `slot`.
+fn timed<T>(slot: &mut u64, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let out = f();
+    *slot = start.elapsed().as_millis() as u64;
+    out
+}
+
+/// In-process Groth16 prover. The proving key (~150MB zkey), the A/B/C
+/// matrices it carries, and the circom witness generator are loaded once at
+/// startup and reused; a prove then costs only the witness calculation and the
+/// proof itself.
+///
+/// Proving is serialized — the MSMs already saturate the machine — but the
+/// gate is a `Semaphore` held *outside* `spawn_blocking`, not a mutex inside
+/// it. Queuing on a blocking-pool thread would let a burst of requests park
+/// the whole pool, which the DB and everything else also draws from.
 pub struct ArkCircomProver {
-    pk: Arc<ProvingKey<Bn254>>,
+    params: Arc<Groth16Params>,
     /// Guarded by `gate`, so the inner lock is always uncontended.
-    cfg: Arc<Mutex<CircomConfig<Fr>>>,
-    gate: Arc<Semaphore>,
+    wtns: Arc<Mutex<WitnessCalculator>>,
+    gate: Semaphore,
 }
 
 impl ArkCircomProver {
-    pub fn new(wasm_path: &PathBuf, r1cs_path: &PathBuf, zkey_path: &PathBuf) -> AppResult<Self> {
-        let mut cfg = CircomConfig::<Fr>::new(wasm_path, r1cs_path)
-            .map_err(|e| AppError::Prover(format!("circom config: {}", e)))?;
-        cfg.sanity_check = true;
-        let mut zk = std::fs::File::open(zkey_path)
-            .map_err(|e| AppError::Prover(format!("open zkey: {}", e)))?;
-        let (pk, _matrices) =
-            read_zkey(&mut zk).map_err(|e| AppError::Prover(format!("read zkey: {}", e)))?;
+    /// `r1cs_path` is accepted and ignored: the constraint matrices now come
+    /// from the zkey, which already carries them. The config key stays so
+    /// deployed `relayer.toml`s keep loading.
+    pub fn new(wasm_path: &Path, _r1cs_path: &Path, zkey_path: &Path) -> AppResult<Self> {
+        let wtns = WitnessCalculator::new(wasm_path)?;
+        let params = Groth16Params::load(zkey_path)?;
+        info!(
+            threads = rayon::current_num_threads(),
+            available_parallelism = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(0),
+            num_constraints = params.num_constraints,
+            num_inputs = params.num_inputs,
+            "ark-circom prover ready"
+        );
         Ok(Self {
-            pk: Arc::new(pk),
-            cfg: Arc::new(Mutex::new(cfg)),
-            gate: Arc::new(Semaphore::new(1)),
+            params: Arc::new(params),
+            wtns: Arc::new(Mutex::new(wtns)),
+            gate: Semaphore::new(1),
         })
     }
+
+    /// Take the prover.
+    ///
+    /// The gate is FIFO, so a background flush that queued first would make a
+    /// spend wait a whole proof. [`Priority::Flush`] therefore never queues:
+    /// it takes the permit only if it is free, and its worker retries on the
+    /// next tick. Within one chain the mirror mutex already excludes the two;
+    /// this is the cross-chain case, where several chains share one prover.
+    async fn acquire(&self, priority: Priority) -> AppResult<SemaphorePermit<'_>> {
+        match priority {
+            Priority::Spend => self.gate.acquire().await.prover("prove gate"),
+            Priority::Flush => self.gate.try_acquire().map_err(|_| AppError::ProverBusy),
+        }
+    }
+}
+
+/// Witness → proof, start to finish. Blocking and CPU-bound; the caller runs
+/// this on a blocking thread while holding the prover's permit.
+fn run_proof(
+    params: &Groth16Params,
+    wtns: &Mutex<WitnessCalculator>,
+    inputs: witness_calc::Inputs,
+) -> AppResult<(TreeUpdateBatchProof, Timings)> {
+    let mut timings = Timings::default();
+
+    let witness = timed(&mut timings.witness_ms, || wtns.lock().calculate(inputs))?;
+    let public_inputs = params.public_inputs(&witness)?;
+    let proof = timed(&mut timings.groth16_ms, || params.prove(&witness))?;
+    timed(&mut timings.verify_ms, || {
+        params.verify(public_inputs, &proof)
+    })?;
+
+    Ok((
+        TreeUpdateBatchProof {
+            pi_a: g1_to_dec(&proof.a),
+            pi_b: g2_to_dec(&proof.b),
+            pi_c: g1_to_dec(&proof.c),
+            public_signals: public_inputs.iter().map(fr_to_dec).collect(),
+        },
+        timings,
+    ))
 }
 
 #[async_trait]
 impl TreeUpdateBatchProver for ArkCircomProver {
-    async fn prove(&self, witness: TreeUpdateBatchWitness) -> AppResult<TreeUpdateBatchProof> {
-        let pk = self.pk.clone();
-        let cfg = self.cfg.clone();
-
+    async fn prove(
+        &self,
+        witness: TreeUpdateBatchWitness,
+        priority: Priority,
+    ) -> AppResult<TreeUpdateBatchProof> {
         info!(
             start_index = %witness.start_index,
             actual_count = %witness.actual_count,
+            ?priority,
             "ark-circom groth16 prove queued"
         );
-        let _permit = self
-            .gate
-            .acquire()
-            .await
-            .map_err(|e| AppError::Prover(format!("prove gate: {}", e)))?;
+
+        let queued = Instant::now();
+        let _permit = self.acquire(priority).await?;
+        let queue_wait_ms = queued.elapsed().as_millis() as u64;
 
         let inputs = circom_inputs(&witness)?;
+        let (params, wtns) = (self.params.clone(), self.wtns.clone());
 
         let started = Instant::now();
-        let result = tokio::task::spawn_blocking(move || -> AppResult<TreeUpdateBatchProof> {
-            let mut cfg = cfg.lock();
-            let circom = build_circuit(&mut cfg, inputs)?;
+        let (proof, timings) =
+            tokio::task::spawn_blocking(move || run_proof(&params, &wtns, inputs))
+                .await
+                .prover("prove join")??;
 
-            let public_inputs_fr = circom
-                .get_public_inputs()
-                .ok_or_else(|| AppError::Prover("no public inputs".into()))?;
-
-            let mut rng = rand::rngs::OsRng;
-            let proof = Groth16::<Bn254, CircomReduction>::prove(&pk, circom, &mut rng)
-                .map_err(|e| AppError::Prover(format!("groth16 prove: {}", e)))?;
-
-            let pi_a = g1_to_dec(&proof.a);
-            let pi_b = g2_to_dec(&proof.b);
-            let pi_c = g1_to_dec(&proof.c);
-            let public_signals = public_inputs_fr.iter().map(fr_to_dec).collect();
-
-            Ok(TreeUpdateBatchProof {
-                pi_a,
-                pi_b,
-                pi_c,
-                public_signals,
-            })
-        })
-        .await
-        .map_err(|e| AppError::Prover(format!("prove join: {}", e)))??;
-
+        let Timings {
+            witness_ms,
+            groth16_ms,
+            verify_ms,
+        } = timings;
         info!(
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "ark-circom prove ok"
+            queue_wait_ms, witness_ms, groth16_ms, verify_ms, "ark-circom prove ok"
         );
-        Ok(result)
+        Ok(proof)
     }
-}
-
-/// `CircomBuilder::build` consumes its `CircomConfig`, which would force a
-/// wasm + r1cs reload per prove. This is the same sequence against a borrowed
-/// config, so the expensive parts stay resident.
-fn build_circuit(
-    cfg: &mut CircomConfig<Fr>,
-    inputs: HashMap<String, Vec<BigInt>>,
-) -> AppResult<CircomCircuit<Fr>> {
-    let mut r1cs = cfg.r1cs.clone();
-    // Disable the wire mapping, as `CircomBuilder::setup` does.
-    r1cs.wire_mapping = None;
-    let witness = cfg
-        .wtns
-        .calculate_witness_element::<Fr, _>(&mut cfg.store, inputs, cfg.sanity_check)
-        .map_err(|e| AppError::Prover(format!("witness build: {}", e)))?;
-    Ok(CircomCircuit {
-        r1cs,
-        witness: Some(witness),
-    })
 }
 
 /// Witness → circom signal map, in the shape `tree_update_batch.circom`
 /// declares. Kept separate from proving so the mapping is checkable without a
 /// zkey; a wrong length here otherwise surfaces from circom as an opaque
 /// witness-build failure.
-fn circom_inputs(w: &TreeUpdateBatchWitness) -> AppResult<HashMap<String, Vec<BigInt>>> {
-    let mut inputs: HashMap<String, Vec<BigInt>> = HashMap::new();
+fn circom_inputs(w: &TreeUpdateBatchWitness) -> AppResult<witness_calc::Inputs> {
+    let mut inputs = witness_calc::Inputs::new();
     let mut signal = |name: &str, decs: &mut dyn Iterator<Item = &str>| -> AppResult<()> {
         let values = decs
             .map(|d| {
@@ -373,6 +500,7 @@ mod zkey_compat {
             eprintln!("ZKEY_COMPAT_DIR unset; skipping");
             return;
         };
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
         let dir = Path::new(&dir);
         let vector: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("vector.json")).unwrap())
@@ -416,7 +544,7 @@ mod zkey_compat {
             &dir.join("tree_update_batch_final.zkey"),
         )
         .expect("load zkey");
-        let p = prover.prove(witness).await.expect("prove");
+        let p = prover.prove(witness, Priority::Spend).await.expect("prove");
 
         std::fs::write(
             dir.join("proof.json"),

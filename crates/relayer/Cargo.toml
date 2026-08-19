@@ -43,8 +43,13 @@ ark-groth16 = "0.6"
 ark-bn254 = "0.6"
 ark-ec = "0.6"
 ark-ff = "0.6"
+ark-relations = "0.6"
 ark-snark = "0.6"
 num-bigint = { version = "0.4", features = ["rand"] }
+num-traits = "0.2"
+# Runs the circom-generated witness generator. Same version ark-circom pulls
+# in, so there is one wasmer in the graph.
+wasmer = "6.1"
 rand = "0.8"
 parking_lot = "0.12"
 rayon = { workspace = true }

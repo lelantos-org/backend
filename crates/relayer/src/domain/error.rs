@@ -15,6 +15,11 @@ pub enum AppError {
     Rpc(String),
     #[error("prover: {0}")]
     Prover(String),
+    /// The prover was busy and the caller declined to queue. Only the flush
+    /// worker yields like this — it retries on its next tick — so this never
+    /// reaches an HTTP caller.
+    #[error("prover busy")]
+    ProverBusy,
     #[error("submit reverted: {0}")]
     Reverted(String),
     /// Broadcast succeeded but the outcome is unknown (no receipt within the
@@ -64,6 +69,24 @@ pub enum AppError {
     },
 }
 
+/// Turn a foreign error into an [`AppError`] with a bit of context in front of
+/// it, so a failure names the step it came from rather than only its cause.
+///
+/// The context is a `&'static str` on purpose: this is used inside the
+/// prover's per-signal loops, where building a `String` per call would cost
+/// more than the operation it describes. Where an error genuinely needs
+/// runtime detail, use `map_err` with a closure so the formatting stays on the
+/// failure path.
+pub trait ErrorContext<T> {
+    fn prover(self, step: &'static str) -> AppResult<T>;
+}
+
+impl<T, E: std::fmt::Display> ErrorContext<T> for Result<T, E> {
+    fn prover(self, step: &'static str) -> AppResult<T> {
+        self.map_err(|e| AppError::Prover(format!("{step}: {e}")))
+    }
+}
+
 /// The chain's revert reason, if `err` carries one.
 ///
 /// Returns only the text from `execution reverted` onward. Everything before
@@ -108,6 +131,7 @@ impl AppError {
             AppError::Db(_)
             | AppError::Rpc(_)
             | AppError::Prover(_)
+            | AppError::ProverBusy
             | AppError::Oracle(_)
             | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Mirrored { status, .. } => *status,
@@ -138,6 +162,7 @@ impl AppError {
             AppError::Db(_)
             | AppError::Rpc(_)
             | AppError::Prover(_)
+            | AppError::ProverBusy
             | AppError::Oracle(_)
             | AppError::Internal(_) => "internal error".into(),
         }

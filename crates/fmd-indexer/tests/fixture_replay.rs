@@ -811,14 +811,28 @@ async fn cursor_advance_is_monotonic_but_reset_still_rewinds() {
         last_block_number: last_event_id,
     };
 
-    repo.upsert_monotonic(row(100)).await.unwrap();
+    assert!(
+        repo.upsert_monotonic(row(100)).await.unwrap(),
+        "first write"
+    );
     assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 100);
 
-    // A slower replica landing late must not drag the watermark backwards.
-    repo.upsert_monotonic(row(50)).await.unwrap();
+    // A slower replica landing late must not drag the watermark backwards —
+    // and must say it did not write, so a caller holding the chain lock can
+    // tell a lost race from a successful advance.
+    assert!(
+        !repo.upsert_monotonic(row(50)).await.unwrap(),
+        "a rejected advance must report false"
+    );
     assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 100, "no regression");
 
-    repo.upsert_monotonic(row(150)).await.unwrap();
+    // Equal is not greater: re-writing the same watermark is also a no-op.
+    assert!(
+        !repo.upsert_monotonic(row(100)).await.unwrap(),
+        "an equal watermark must report false"
+    );
+
+    assert!(repo.upsert_monotonic(row(150)).await.unwrap(), "advances");
     assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 150, "advances");
 
     // The reset path is a deliberate rewind and keeps using plain `upsert`.

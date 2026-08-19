@@ -1,6 +1,5 @@
 use super::events;
 use crate::adapters::DynTokenMetadata;
-use shared::tick::TickProgress;
 use crate::config::ExplorerIndexerConfig;
 use crate::error::{ExplorerIndexerError, Result};
 use crate::repositories::{asset_flows, assets, raw_events, tree_advances};
@@ -8,6 +7,7 @@ use alloy::primitives::Address;
 use chain_types::decode::{self, DecodedEvent};
 use database::{CursorRepo, DbPool, PostgresCursorRepo, UpsertCursor};
 use shared::entities::EventKind;
+use shared::tick::TickProgress;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};

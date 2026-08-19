@@ -54,9 +54,7 @@ enum Planned {
     /// Nothing queued past the cursor.
     Drained,
     /// Rows are queued, but the tx at the head is not fully observed.
-    Incomplete {
-        rows: usize,
-    },
+    Incomplete { rows: usize },
     Ready {
         plan: CommitPlan,
         /// The window came back full, so more rows are queued behind this
@@ -168,7 +166,8 @@ impl ConsumeServiceImpl {
         // Monotonic: never drag the cursor backwards if a peer is ahead. The
         // reset in `tick_chain` deliberately stays on plain `upsert` —
         // rewinding is its whole purpose.
-        self.cursors
+        let advanced = self
+            .cursors
             .upsert_monotonic(UpsertCursor {
                 name: NAME.to_string(),
                 chain_id,
@@ -176,6 +175,19 @@ impl ConsumeServiceImpl {
                 last_block_number: plan.last_block_number,
             })
             .await?;
+        if !advanced {
+            // This tick holds the chain's advisory lock, so nothing else
+            // should be able to move this cursor. A rejected advance means a
+            // second writer got the lock — the rows above were still written,
+            // so the damage is duplicate work rather than loss, but it must
+            // not pass silently.
+            error!(
+                chain_id,
+                last_event_id = plan.last_event_id,
+                "cursor advance rejected while holding the chain lock; \
+                 a second writer is active for this chain"
+            );
+        }
 
         let (notes, spent_nfs) = (plan.notes.len(), plan.spent_nfs.len());
         debug!(

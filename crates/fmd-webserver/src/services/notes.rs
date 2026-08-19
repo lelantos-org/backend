@@ -2,18 +2,8 @@ use crate::app::AppState;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::NoteOut;
 use crate::repositories::notes;
-use crate::services::field::bigdec_to_hex;
+use crate::services::field::pack_point_hex;
 use std::sync::Arc;
-
-fn clue_bits_hex(ciphertext: &[u8]) -> String {
-    if ciphertext.len() < 2 {
-        return "0x0000".to_string();
-    }
-    format!(
-        "0x{:04x}",
-        u16::from_be_bytes([ciphertext[0], ciphertext[1]])
-    )
-}
 
 #[tracing::instrument(skip(st))]
 pub async fn list(
@@ -37,10 +27,8 @@ pub async fn list(
                         block_number: n.block_number,
                         leaf_index: n.leaf_index,
                         commitment_hex: hex::encode(&n.cm),
-                        clue_bits_hex: clue_bits_hex(&n.ciphertext),
                         ciphertext_hex: hex::encode(&n.ciphertext),
-                        eph_pub_x: bigdec_to_hex(&n.eph_pub_x)?,
-                        eph_pub_y: bigdec_to_hex(&n.eph_pub_y)?,
+                        eph_pub_packed_hex: pack_point_hex(&n.eph_pub_x, &n.eph_pub_y)?,
                     })
                 })
                 .collect::<AppResult<Vec<_>>>()?;

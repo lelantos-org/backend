@@ -126,7 +126,12 @@ pub async fn run(svc: Arc<dyn TickService>, tick_ms: u64, batch: i64, mut shutdo
         }
 
         let delay = backoff.next_delay();
-        debug!(name, ?round, delay_ms = delay.as_millis(), "tick driver idle");
+        debug!(
+            name,
+            ?round,
+            delay_ms = delay.as_millis(),
+            "tick driver idle"
+        );
         tokio::select! {
             _ = sleep(delay) => {}
             _ = shutdown.recv() => break,
@@ -254,10 +259,7 @@ mod tests {
         ]);
         drive_until(svc.clone(), 4).await;
         // Two idles escalate; the Partial must drop back to the floor.
-        assert_eq!(
-            svc.gaps(),
-            [TICK_MIN, TICK_MIN * TICK_FACTOR, TICK_MIN]
-        );
+        assert_eq!(svc.gaps(), [TICK_MIN, TICK_MIN * TICK_FACTOR, TICK_MIN]);
     }
 
     #[tokio::test(start_paused = true)]

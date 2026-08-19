@@ -6027,6 +6027,7 @@ dependencies = [
  "ark-ec 0.6.0",
  "ark-ff 0.6.0",
  "ark-groth16",
+ "ark-relations",
  "ark-snark",
  "async-trait",
  "axum",
@@ -6040,6 +6041,7 @@ dependencies = [
  "hex",
  "moka",
  "num-bigint",
+ "num-traits",
  "parking_lot",
  "rand 0.8.6",
  "rayon",
@@ -6057,6 +6059,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "vergen-gix",
+ "wasmer",
 ]
 
 [[package]]

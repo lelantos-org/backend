@@ -12,3 +12,4 @@ pub mod submitter;
 pub mod transact_verifier;
 pub mod tree;
 pub mod witness;
+pub mod witness_calc;

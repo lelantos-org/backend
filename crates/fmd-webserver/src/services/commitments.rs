@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::domain::error::AppResult;
+use crate::domain::error::{AppError, AppResult};
 use crate::repositories::notes;
 use crate::services::field::{bigdec_to_field, bytes_to_field, field_to_hex};
 use crate::services::poseidon::leaf_hash;
@@ -28,6 +28,28 @@ pub struct ChunkResponse {
     pub is_complete: bool,
 }
 
+/// Reject a chunk whose `leaf_index` values are not `from, from+1, ...`.
+///
+/// The tree is positional: a hole shifts every later leaf by one, so the
+/// client builds a root no wallet can verify — and the failure surfaces far
+/// away, as a rejected proof, with nothing pointing back here.
+///
+/// `services::tree` makes the same check for the mirror it serves
+/// `/v1/tree-state` from, but nothing checked this feed, which is the one
+/// clients actually build their tree out of.
+fn ensure_dense(rows: &[notes::CommitmentChunkEntry], from: i64) -> AppResult<()> {
+    for (i, row) in rows.iter().enumerate() {
+        let expected = from + i as i64;
+        if row.leaf_index != expected {
+            return Err(AppError::Internal(format!(
+                "commitment chunk is not dense: note has leaf_index {} (expected {expected})",
+                row.leaf_index
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_chunk(
     st: &AppState,
     chain_id: i64,
@@ -42,6 +64,7 @@ pub async fn get_chunk(
     let to = from + CHUNK_SIZE as i64;
     let rows = notes::list_chunk(&st.pool, chain_id, from, to).await?;
     let is_complete = rows.len() as u64 == CHUNK_SIZE;
+    ensure_dense(&rows, from)?;
     let entries = rows
         .into_iter()
         .map(|r| {
@@ -70,4 +93,47 @@ pub async fn get_chunk(
     }
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bigdecimal::BigDecimal;
+
+    fn row(leaf_index: i64) -> notes::CommitmentChunkEntry {
+        notes::CommitmentChunkEntry {
+            leaf_index,
+            cm: vec![0u8; 32],
+            cv_dep_x: BigDecimal::from(1),
+            cv_dep_y: BigDecimal::from(2),
+        }
+    }
+
+    #[test]
+    fn accepts_a_dense_run() {
+        let rows: Vec<_> = (1024..1027).map(row).collect();
+        assert!(ensure_dense(&rows, 1024).is_ok());
+    }
+
+    #[test]
+    fn accepts_an_empty_chunk() {
+        // Past the end of the tree: not a gap, just nothing there.
+        assert!(ensure_dense(&[], 4096).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_gap() {
+        let rows = vec![row(0), row(2)];
+        let err = ensure_dense(&rows, 0).unwrap_err().to_string();
+        assert!(err.contains("leaf_index 2"), "{err}");
+        assert!(err.contains("expected 1"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_chunk_that_does_not_start_at_its_own_boundary() {
+        // A short first page would otherwise be served as if it began at the
+        // chunk boundary, shifting every leaf in it.
+        let rows = vec![row(1025)];
+        assert!(ensure_dense(&rows, 1024).is_err());
+    }
 }

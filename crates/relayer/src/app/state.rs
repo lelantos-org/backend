@@ -24,7 +24,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -401,6 +401,11 @@ fn spawn_flush_worker(flush: Arc<FlushPipeline>, interval: Duration) {
                 Err(e @ AppError::MirrorDesynced(_)) => {
                     error!(chain_id = flush.chain_id, error = %e, "flush worker stopping");
                     return;
+                }
+                // The prover was busy with another chain's proof. Expected
+                // under load, and the next tick is seconds away.
+                Err(AppError::ProverBusy) => {
+                    debug!(chain_id = flush.chain_id, "flush deferred; prover busy")
                 }
                 Err(e) => warn!(chain_id = flush.chain_id, error = %e, "flush tick failed"),
             }
