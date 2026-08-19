@@ -2,11 +2,18 @@ use crate::app::AppState;
 use crate::handlers::http as handlers;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::routing::{get, post};
 use std::time::Duration;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+
+/// Cache-Control for one route, matching the helper of the same name in
+/// fmd-webserver's router.
+fn cc(value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static(value))
+}
 
 /// Largest submission body accepted. A transact payload is a few kB plus the
 /// per-output ciphertexts; 256 kB is generous for that and far below the 2 MB
@@ -33,8 +40,25 @@ pub fn build(state: AppState) -> Router {
     // inside this block. One added after the merge below would silently escape
     // the deadline.
     let timed = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/chains", get(handlers::chains))
+        // Never cacheable: `useSystemHealth` in the webapp polls this to decide
+        // whether to tell the user the relayer is reachable, and a cached
+        // answer would report a dead relayer as up.
+        .route("/health", get(handlers::health).layer(cc("no-store")))
+        // Global deployment config — chain ids, RPCs, contract addresses, the
+        // token table. Identical for every caller and carrying nothing
+        // per-user, so it is the one route here a shared cache may hold.
+        //
+        // This header is load-bearing at the edge. `cache_chain_registry` in
+        // infra/terraform/cache.tf caches this path with
+        // `edge_ttl = respect_origin`, so without a Cache-Control to respect
+        // Cloudflare would fall back to its own default TTL — cached, but for
+        // an interval nothing here chose. 60s is enough to take the fetch off
+        // the webapp's first-paint path and to collapse a herd onto the single
+        // relayer, while keeping a redeploy visible within the minute.
+        .route(
+            "/chains",
+            get(handlers::chains).layer(cc("public, max-age=60")),
+        )
         .route("/v1/spend", post(handlers::submit_spend))
         .route("/v1/spend/estimate", post(handlers::estimate_spend))
         .route("/v1/swap", post(handlers::submit_swap))
