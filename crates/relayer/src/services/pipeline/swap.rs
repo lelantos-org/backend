@@ -52,9 +52,15 @@ pub struct SwapPipeline {
 }
 
 impl SwapPipeline {
+    /// Neither `start_index` nor the token pair is recorded. See
+    /// `SpendPipeline::process` for `start_index`; the pair is omitted for the
+    /// same reason `metaquoter`'s `post_quote` omits it — a quote and a swap
+    /// from one client are already adjacent in the access log, and naming the
+    /// pair in both is what turns that adjacency into a trade record. `adapter`
+    /// stays: it identifies the venue, not the trade.
     #[instrument(
         skip_all,
-        fields(chain_id = self.chain_id, adapter = %payload.swap.adapter, start_index),
+        fields(chain_id = self.chain_id, adapter = %payload.swap.adapter),
     )]
     pub async fn process(&self, payload: SubmitSwapPayload) -> AppResult<SubmissionReceipt> {
         self.validate(&payload)?;
@@ -67,15 +73,9 @@ impl SwapPipeline {
         let inputs = parse_spend_inputs(&payload.pub_inputs)?;
 
         let mut mirror = self.mirror.lock().await;
-        info!(
-            leaf_count = mirror.committed_count(),
-            token_in = %payload.swap.token_in,
-            token_out = %payload.swap.token_out,
-            "swap pipeline start"
-        );
+        info!(leaf_count = mirror.committed_count(), "swap pipeline start");
         check_known_root(&mirror, &payload.pub_inputs)?;
         let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
-        tracing::Span::current().record("start_index", slot.start_index);
 
         let tu_proof = match prove_spend(&self.prover, &slot, &advanced, &inputs).await {
             Ok(p) => p,
@@ -105,9 +105,9 @@ impl SwapPipeline {
     }
 
     /// Fee quote for `/v1/swap/estimate`. See `SpendPipeline::estimate` — no
-    /// mirror access, no prove.
-    pub async fn estimate(&self, payload: SubmitSwapPayload) -> AppResult<EstimateResponse> {
-        self.validate(&payload)?;
+    /// mirror access, no prove, and no payload: every swap prices as
+    /// `EntryPoint::Swap`.
+    pub async fn estimate(&self) -> AppResult<EstimateResponse> {
         self.fee_quoter
             .quote_for_gas(self.gas_witness.gas_for(EntryPoint::Swap))
             .await

@@ -22,35 +22,31 @@ const MAX_SLIPPAGE_BPS: u16 = 5_000;
         (status = 502, description = "All venues failed or RPC error"),
     )
 )]
+/// A quote names the pair and the amount a user is about to trade, minutes or
+/// seconds before the swap reaches the chain. Nothing on chain ties that quote
+/// to the requester — but this log line and the access-log line share a
+/// timestamp, and `POST /relayer/v1/swap` follows from the same client shortly
+/// after. Logging the pair here is therefore the only server-side record of
+/// that correlation, so none of `token_in`, `token_out`, `amount_in` or
+/// `expected_out` is recorded. `expected_out` alone is enough: with the pair
+/// and the venue it reconstructs `amount_in`.
+///
+/// What is left — chain, venue, outcome class — is what operating the service
+/// actually needs. Diagnosing one pair is a reproduction, not a log grep.
 pub async fn post_quote(
     State(st): State<AppState>,
     Json(req): Json<QuoteRequest>,
 ) -> AppResult<Json<Quote>> {
     validate(&req)?;
-    debug!(
-        chain_id = req.chain_id,
-        token_in = %req.token_in,
-        token_out = %req.token_out,
-        amount_in = %req.amount_in,
-        "quote requested"
-    );
     let chain_id = req.chain_id;
-    let token_in = req.token_in;
-    let token_out = req.token_out;
+    debug!(chain_id, "quote requested");
     match st.quote_service.best_quote(req).await {
         Ok(q) => {
-            info!(
-                chain_id,
-                token_in = %token_in,
-                token_out = %token_out,
-                expected_out = %q.expected_out,
-                venue = ?q.venue,
-                "quote served"
-            );
+            info!(chain_id, venue = ?q.venue, "quote served");
             Ok(Json(q))
         }
         Err(e) => {
-            warn!(chain_id, token_in = %token_in, token_out = %token_out, error = %e, "quote failed");
+            warn!(chain_id, error = e.class(), "quote failed");
             Err(e)
         }
     }

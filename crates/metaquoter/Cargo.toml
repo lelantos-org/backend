@@ -9,7 +9,7 @@ name = "metaquoter"
 path = "src/main.rs"
 
 [dependencies]
-shared = { path = "../shared" }
+shared = { path = "../shared", features = ["webserver"] }
 tokio = { workspace = true }
 futures = { workspace = true }
 axum = { workspace = true }

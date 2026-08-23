@@ -49,7 +49,14 @@ pub struct SpendPipeline {
 }
 
 impl SpendPipeline {
-    #[instrument(skip_all, fields(chain_id = self.chain_id, kind = ?payload.kind, start_index))]
+    /// `start_index` is deliberately absent from this span. It is the tree slot
+    /// this caller's outputs land in, and pairing it with a timestamp maps a
+    /// submission to its leaves. The chain publishes it anyway —
+    /// `CommitmentTree.RootAdvanced(uint64 indexed startIndex, ...)` — so
+    /// dropping it denies an observer nothing they cannot already read. It goes
+    /// because a log line duplicating a public index is not worth the shape it
+    /// gives an internal reader.
+    #[instrument(skip_all, fields(chain_id = self.chain_id, kind = ?payload.kind))]
     pub async fn process(&self, payload: SubmitSpendPayload) -> AppResult<SubmissionReceipt> {
         self.validate(&payload)?;
         verify_transact_proof(
@@ -71,8 +78,6 @@ impl SpendPipeline {
         );
         check_known_root(&mirror, &payload.pub_inputs)?;
         let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
-        tracing::Span::current().record("start_index", slot.start_index);
-
         let tu_proof = match prove_spend(&self.prover, &slot, &advanced, &inputs).await {
             Ok(p) => p,
             Err(e) => return Err(mirror.unwind(SPEND_LEAVES, e)),
@@ -94,18 +99,20 @@ impl SpendPipeline {
         }
     }
 
-    /// Fee quote for `/v1/spend/estimate`. Validates the payload shape, then
-    /// prices this entry point's observed gas — it neither touches the tree
-    /// mirror nor proves, so it cannot stall a real submission.
+    /// Fee quote for `/v1/spend/estimate`: prices this entry point's observed
+    /// gas. Touches neither the tree mirror nor the prover, so it cannot stall
+    /// a real submission.
     ///
-    /// Unlike the old `eth_estimateGas` path, this does not detect a payload
-    /// that would revert on-chain; the shape checks below are the only
-    /// pre-flight the estimate performs.
-    pub async fn estimate(&self, payload: SubmitSpendPayload) -> AppResult<EstimateResponse> {
-        self.validate(&payload)?;
-        let entry = EntryPoint::from(payload.kind);
+    /// Takes a `SpendKind`, not a payload. The answer depends on the entry
+    /// point alone, so asking for a full `SubmitSpendPayload` bought a shape
+    /// check on a spend the caller may never submit, in exchange for a number
+    /// that check could not change — see `EstimateSpendRequest`. There is
+    /// consequently no pre-flight here at all: unlike the old
+    /// `eth_estimateGas` path, an estimate does not tell a wallet whether its
+    /// spend would revert on chain.
+    pub async fn estimate(&self, kind: SpendKind) -> AppResult<EstimateResponse> {
         self.fee_quoter
-            .quote_for_gas(self.gas_witness.gas_for(entry))
+            .quote_for_gas(self.gas_witness.gas_for(EntryPoint::from(kind)))
             .await
     }
 

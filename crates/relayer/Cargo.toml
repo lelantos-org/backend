@@ -9,7 +9,7 @@ name = "relayer"
 path = "src/main.rs"
 
 [dependencies]
-shared = { path = "../shared" }
+shared = { path = "../shared", features = ["webserver"] }
 database = { path = "../database" }
 fmd-crypto = { path = "../fmd-crypto" }
 tokio = { workspace = true, features = ["fs"] }

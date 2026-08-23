@@ -19,6 +19,7 @@ toml = { workspace = true }
 futures = { workspace = true }
 axum = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-util` gives the tick-driver tests a paused clock, so their timing
@@ -27,4 +28,4 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = []
-webserver = ["dep:axum", "dep:moka"]
+webserver = ["dep:axum", "dep:moka", "dep:tower-http"]

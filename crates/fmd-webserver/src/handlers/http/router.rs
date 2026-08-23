@@ -2,26 +2,15 @@ use crate::app::AppState;
 use crate::handlers::http as handlers;
 use crate::handlers::http::openapi::ApiDoc;
 use axum::Router;
-use axum::body::Body;
-use axum::http::{HeaderValue, Request, header};
+use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
+use shared::request_span;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tower_http::trace::TraceLayer;
-use tracing::{Span, info_span};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 fn cc(value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
     SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static(value))
-}
-
-/// Request span carrying the path only.
-///
-/// `DefaultMakeSpan` records the full URI including the query string, whose
-/// paging cursors are per-caller access patterns. The path alone is enough to
-/// debug routing.
-fn make_span(req: &Request<Body>) -> Span {
-    info_span!("http", method = %req.method(), path = %req.uri().path())
 }
 
 pub fn build(state: AppState) -> Router {
@@ -56,6 +45,6 @@ pub fn build(state: AppState) -> Router {
             "/v1/tree-state",
             get(handlers::get_tree_state).layer(cc("public, max-age=5")),
         )
-        .layer(TraceLayer::new_for_http().make_span_with(make_span))
+        .layer(request_span::trace_layer())
         .with_state(state)
 }

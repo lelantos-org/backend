@@ -4,10 +4,10 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::routing::{get, post};
+use shared::request_span;
 use std::time::Duration;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
 
 /// Cache-Control for one route, matching the helper of the same name in
 /// fmd-webserver's router.
@@ -76,6 +76,6 @@ pub fn build(state: AppState) -> Router {
     timed
         .merge(streaming)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(TraceLayer::new_for_http())
+        .layer(request_span::trace_layer())
         .with_state(state)
 }

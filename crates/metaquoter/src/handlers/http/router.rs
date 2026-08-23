@@ -3,7 +3,7 @@ use crate::handlers::http as handlers;
 use crate::handlers::http::openapi::ApiDoc;
 use axum::Router;
 use axum::routing::{get, post};
-use tower_http::trace::TraceLayer;
+use shared::request_span;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -12,7 +12,7 @@ pub fn build(state: AppState) -> Router {
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/health", get(health))
         .route("/v1/quotes", post(handlers::post_quote))
-        .layer(TraceLayer::new_for_http())
+        .layer(request_span::trace_layer())
         .with_state(state)
 }
 

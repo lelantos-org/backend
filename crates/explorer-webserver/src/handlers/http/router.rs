@@ -4,8 +4,8 @@ use crate::handlers::http::openapi::ApiDoc;
 use axum::Router;
 use axum::http::{HeaderValue, header};
 use axum::routing::get;
+use shared::request_span;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -55,6 +55,6 @@ pub fn build(state: AppState) -> Router {
             "/v1/tx-kinds",
             get(handlers::tx_kinds).layer(cc_layer(analytic.clone())),
         )
-        .layer(TraceLayer::new_for_http())
+        .layer(request_span::trace_layer())
         .with_state(state)
 }

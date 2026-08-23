@@ -22,3 +22,5 @@ pub mod tracing_init;
 pub mod cache;
 #[cfg(feature = "webserver")]
 pub mod http;
+#[cfg(feature = "webserver")]
+pub mod request_span;
