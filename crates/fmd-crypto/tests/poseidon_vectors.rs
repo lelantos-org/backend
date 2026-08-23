@@ -15,6 +15,7 @@ use ark_ff::{BigInteger, PrimeField};
 use fmd_crypto::poseidon::hash;
 use serde::Deserialize;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 #[derive(Debug, Deserialize)]
 struct VectorFile {
@@ -31,14 +32,16 @@ struct Vector {
     digest: String,
 }
 
-fn load() -> VectorFile {
+/// Read and parsed once: both tests below want the whole file, and each is
+/// otherwise a fresh read plus a parse of the same ~200 vectors.
+static FILE: LazyLock<VectorFile> = LazyLock::new(|| {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/vectors/poseidon.json"
     ))
     .expect("read tests/vectors/poseidon.json");
     serde_json::from_str(&text).expect("parse poseidon.json")
-}
+});
 
 fn dec(s: &str) -> Fq {
     Fq::from_str(s).expect("decimal field element")
@@ -58,18 +61,16 @@ fn check(v: &Vector) {
 /// The circomlib-published digests. If these fail, the constants moved.
 #[test]
 fn anchors_match_circomlib() {
-    let f = load();
-    assert!(!f.anchors.is_empty(), "anchors must not be empty");
-    for v in &f.anchors {
+    assert!(!FILE.anchors.is_empty(), "anchors must not be empty");
+    for v in &FILE.anchors {
         check(v);
     }
 }
 
 #[test]
 fn vectors_match_the_sdk() {
-    let f = load();
-    assert!(!f.vectors.is_empty(), "vectors must not be empty");
-    for v in &f.vectors {
+    assert!(!FILE.vectors.is_empty(), "vectors must not be empty");
+    for v in &FILE.vectors {
         check(v);
     }
 }
