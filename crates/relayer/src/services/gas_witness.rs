@@ -6,10 +6,11 @@
 //! proof on an unauthenticated request path, ahead of every real submission
 //! waiting on the same prover.
 //!
-//! Gas for these entry points is dominated by fixed costs (two pairing checks,
-//! one tree advance, one token transfer), so the last observed value is a good
-//! predictor of the next one, and `fee_markup_bps` absorbs the jitter. Each
-//! successful submission feeds its `gas_used` back here.
+//! Gas for these entry points is dominated by fixed costs (one batched pairing
+//! check covering both proofs, one tree advance, one token transfer), so the
+//! last observed value is a good predictor of the next one, and
+//! `fee_markup_bps` absorbs the jitter. Each successful submission feeds its
+//! `gas_used` back here.
 //!
 //! Note this is a *fee* quote, not a gas limit: submissions still take their
 //! limit from alloy's own per-tx estimate, so a stale value here only shifts a

@@ -25,7 +25,7 @@ pool_address = "0x0000000000000000000000000000000000000000"
 signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 receipt_timeout_s = 60
 flush_interval_s = 5
-flush_max_n = 8
+flush_max_n = 4
 flush_max_attempts = 5
 
 # swap_wrapper_address / native_adapter_address are injected by deploy.sh via
@@ -72,7 +72,7 @@ pool_address = "0x0165878A594ca255338adfa4d48449f69242Eb8F"
 signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 receipt_timeout_s = 60
 flush_interval_s = 5
-flush_max_n = 8
+flush_max_n = 4
 flush_max_attempts = 5
 
 [chains.public]

@@ -6,6 +6,12 @@
 //! per-deposit guards in `_drainDeposit` are reproducible off-chain from the
 //! escrow slot and the deposit's own fields, which is what this does.
 //!
+//! One guard here is the circuit's rather than the contract's: `rcv` never
+//! enters the escrow digest, so `flushBatch` would accept a blinder the batch
+//! circuit cannot witness. That failure lands even earlier — in witness
+//! generation — and costs the same whole batch, so it belongs in the same
+//! table.
+//!
 //! [`classify`] is pure on purpose: the decision table is the part worth
 //! testing, and keeping the RPC read and the bookkeeping out of it means the
 //! table can be tested without either.
@@ -13,6 +19,16 @@
 use crate::domain::deposit_digest::{MAX_PUBLIC_IN, deposit_digest};
 use crate::services::deposit_mempool::PendingDeposit;
 use alloy::primitives::{Address, B256};
+
+/// `rcv` is decomposed by `Num2Bits(RCV_BITS)` inside `MulH`, with
+/// `RCV_BITS = 252` (`circuits/src/lib/value_commit.circom`). A wider blinder
+/// has no witness, so the deposit can never be proven — and the contract
+/// cannot screen for it, since `rcv` is not part of the escrow digest.
+///
+/// The bound narrowed from 253 bits when the batch circuit moved to
+/// `FixedBaseMul`; a deposit escrowed under the old bound with `rcv` in
+/// `[2^252, 2^253)` is stranded and must be reclaimed with `cancelDeposit`.
+const RCV_BITS: usize = 252;
 
 /// What pre-flight decided about one deposit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +61,12 @@ pub fn classify(d: &PendingDeposit, stored: B256, masp: Address, chain_id: u64) 
     }
     if deposit_digest(masp, chain_id, d) != stored {
         return Verdict::DigestMismatch;
+    }
+    // Checked after the digest so a mismatched replay is still reported as
+    // one: an `rcv` that did not come from the escrowed deposit says nothing
+    // about the deposit itself.
+    if d.rcv.bit_len() > RCV_BITS {
+        return Verdict::Reject("rcv exceeds the circuit's 252-bit blinder");
     }
     Verdict::Flushable
 }
@@ -123,6 +145,41 @@ mod tests {
             classify(&d, stored, MASP, CHAIN),
             Verdict::Reject(_)
         ));
+    }
+
+    /// A blinder the batch circuit cannot decompose strands the deposit: the
+    /// contract would accept it, so nothing on-chain screens it out and every
+    /// flush tick that includes it fails in witness generation.
+    #[test]
+    fn an_rcv_wider_than_the_circuit_blinder_is_rejected() {
+        let mut d = deposit();
+        d.rcv = U256::from(1u8) << RCV_BITS;
+        let stored = escrowed(&d);
+        assert!(matches!(
+            classify(&d, stored, MASP, CHAIN),
+            Verdict::Reject(_)
+        ));
+    }
+
+    /// The widest blinder `Num2Bits(252)` still witnesses.
+    #[test]
+    fn the_widest_representable_rcv_is_still_flushable() {
+        let mut d = deposit();
+        d.rcv = (U256::from(1u8) << RCV_BITS) - U256::from(1u8);
+        let stored = escrowed(&d);
+        assert_eq!(classify(&d, stored, MASP, CHAIN), Verdict::Flushable);
+    }
+
+    /// `rcv` is not in the escrow preimage, so a replay that disagrees with
+    /// the chain must still be reported as a mismatch rather than blamed on
+    /// the blinder.
+    #[test]
+    fn an_oversized_rcv_does_not_mask_a_digest_mismatch() {
+        let mut d = deposit();
+        let stored = escrowed(&d);
+        d.rcv = U256::from(1u8) << RCV_BITS;
+        d.public_asset_id += 1;
+        assert_eq!(classify(&d, stored, MASP, CHAIN), Verdict::DigestMismatch);
     }
 
     #[test]

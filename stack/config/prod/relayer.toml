@@ -17,7 +17,7 @@ pool_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
 signer_key_hex = "0000000000000000000000000000000000000000000000000000000000000000"
 receipt_timeout_s = 60
 flush_interval_s = 3
-flush_max_n = 8
+flush_max_n = 4
 swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
 
 [prover]

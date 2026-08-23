@@ -39,7 +39,7 @@ pub struct ChainCfg {
     #[serde(default = "default_flush_interval_s")]
     pub flush_interval_s: u64,
     /// Upper bound on per-flush batch size, counted in deposits. A deposit
-    /// is one leaf, so this is capped at the contract's `MAX_L_BATCH = 8`.
+    /// is one leaf, so this is capped at the contract's `MAX_L_BATCH = 4`.
     #[serde(default = "default_flush_max_n")]
     pub flush_max_n: usize,
     /// How many attributable failures one deposit is allowed before the flush
@@ -188,7 +188,7 @@ fn default_flush_interval_s() -> u64 {
 }
 
 fn default_flush_max_n() -> usize {
-    8
+    4
 }
 
 fn default_flush_max_attempts() -> u32 {

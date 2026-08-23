@@ -14,7 +14,7 @@ use fmd_crypto::tree::Field;
 /// Max leaves per `tree_update_batch` proof (mirrors `PubInputs.MAX_L_BATCH`).
 /// Counted in leaves, not pairs: a deposit is one leaf, a spend is
 /// `TRANSACT_OUT`.
-pub const MAX_L_BATCH: usize = 8;
+pub const MAX_L_BATCH: usize = 4;
 
 /// The batch circuit's leaf-indexed arrays, at full width.
 ///

@@ -6,7 +6,7 @@
 //
 // Backed by a `tokio::sync::broadcast` channel — bounded queue, lagging
 // receivers drop oldest events. 256 slots is enough for steady-state
-// flush rates (≤ MAX_L_BATCH per tick, default 8).
+// flush rates (≤ MAX_L_BATCH per tick, default 4).
 
 use serde::Serialize;
 use tokio::sync::broadcast::{self, Receiver, Sender};

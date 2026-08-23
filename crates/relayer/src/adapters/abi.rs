@@ -41,11 +41,11 @@ sol! {
             bytes32 newRoot;
             uint64 startIndex;
             uint64 actualCount;
-            bytes32[8] cms;
-            uint256[2][8] cvDeps;
-            uint64[8] leafAsset;
-            uint64[8] leafPublicIn;
-            uint8[8] isDeposit;
+            bytes32[4] cms;
+            uint256[2][4] cvDeps;
+            uint64[4] leafAsset;
+            uint64[4] leafPublicIn;
+            uint8[4] isDeposit;
         }
         /// `PubInputs.DepositRequest`. A deposit occupies exactly one leaf,
         /// whose `cvDep` the batch circuit pins to `publicIn` units of

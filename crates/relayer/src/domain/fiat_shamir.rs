@@ -2,7 +2,7 @@
 // Mirrors `contracts/src/libs/PubInputs.sol :: compress(TreeUpdateBatch)`
 // so the relayer feeds the same `z` to the prover that the contract derives
 // from calldata. Every array is leaf-indexed; coefficient layout
-// (4 + 6*MAX_L_BATCH = 52 entries):
+// (4 + 6*MAX_L_BATCH = 28 entries):
 //   [0]                                  oldRoot
 //   [1]                                  newRoot
 //   [2]                                  startIndex
@@ -44,14 +44,16 @@ pub fn compute_z(
 #[cfg(test)]
 mod tests {
     //! Golden `z` vectors copied from
-    //! `circuits/vectors/tree-update-batch-8.json` (schema
-    //! `lelantos.circuits.vectors/1`, template `TreeUpdateBatch(10, 8)`).
+    //! `circuits/vectors/tree-update-batch-4.json` (schema
+    //! `lelantos.circuits.vectors/1`, template `TreeUpdateBatch(10, 4)`).
     //!
     //! `compute_z` mirrors `PubInputs.compress(TreeUpdateBatch)`, and the
-    //! circuit Horner-evaluates the same 52 coefficients at the same `z`. All
+    //! circuit Horner-evaluates the same 28 coefficients at the same `z`. All
     //! three must agree, so pinning the published vectors here catches a
-    //! layout drift that would otherwise surface only as an on-chain
-    //! `TreeUpdateRejected`.
+    //! layout drift that would otherwise surface only on-chain — as
+    //! `TreeUpdateRejected` on the flush path, and as `ProofRejected` on a
+    //! spend, whose two proofs the batched verifier checks in one pairing and
+    //! cannot attribute.
 
     use super::*;
     use alloy::primitives::FixedBytes;
@@ -102,10 +104,6 @@ mod tests {
             "0",
             "0",
             "0",
-            "0",
-            "0",
-            "0",
-            "0",
         ]);
         let cv_deps = cvs([
             [
@@ -115,14 +113,10 @@ mod tests {
             ["0", "0"],
             ["0", "0"],
             ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
         ]);
-        let leaf_asset: [u64; MAX_L_BATCH] = [7, 0, 0, 0, 0, 0, 0, 0];
-        let leaf_public_in: [u64; MAX_L_BATCH] = [1000, 0, 0, 0, 0, 0, 0, 0];
-        let is_deposit: [u8; MAX_L_BATCH] = [1, 0, 0, 0, 0, 0, 0, 0];
+        let leaf_asset: [u64; MAX_L_BATCH] = [7, 0, 0, 0];
+        let leaf_public_in: [u64; MAX_L_BATCH] = [1000, 0, 0, 0];
+        let is_deposit: [u8; MAX_L_BATCH] = [1, 0, 0, 0];
 
         let z = compute_z(
             &field("8609704094418396324511832574933371601208234217740666943293213721288143421607"),
@@ -132,7 +126,7 @@ mod tests {
         );
         assert_eq!(
             z,
-            "17267541336846232388362336227324604667294183574518833641069617997010098573254"
+            "4939234609355588114356729475655222661844490388866714772471033493963803554156"
         );
     }
 
@@ -143,10 +137,6 @@ mod tests {
             "1951742967319165803530964451547598624285840444203806646147021883492439581115",
             "19012133309391560335674557331482321887540911804271599306674289147830016117931",
             "21626009417826109968351082352763953063437352730508107439663320624509030242742",
-            "0",
-            "0",
-            "0",
-            "0",
             "0",
         ]);
         let cv_deps = cvs([
@@ -163,14 +153,10 @@ mod tests {
                 "21101527770759580632635866186811689111475176968401354171953005562139633329171",
             ],
             ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
         ]);
-        let leaf_asset: [u64; MAX_L_BATCH] = [7, 0, 9, 0, 0, 0, 0, 0];
-        let leaf_public_in: [u64; MAX_L_BATCH] = [10, 0, 30, 0, 0, 0, 0, 0];
-        let is_deposit: [u8; MAX_L_BATCH] = [1, 0, 1, 0, 0, 0, 0, 0];
+        let leaf_asset: [u64; MAX_L_BATCH] = [7, 0, 9, 0];
+        let leaf_public_in: [u64; MAX_L_BATCH] = [10, 0, 30, 0];
+        let is_deposit: [u8; MAX_L_BATCH] = [1, 0, 1, 0];
 
         let z = compute_z(
             &field("8609704094418396324511832574933371601208234217740666943293213721288143421607"),
@@ -180,7 +166,7 @@ mod tests {
         );
         assert_eq!(
             z,
-            "17792741129732719477701832572349940029552602962144411169337637320282997319894"
+            "12166870973147045876668445569252918269814644531438373425846117441015825080760"
         );
     }
 
@@ -190,10 +176,6 @@ mod tests {
         let cms = cms([
             "10281311150437369658962254566811096262498888568221979102702155486735590083785",
             "3156928210729585595544303566872776843119585788599500213068457138534823449031",
-            "0",
-            "0",
-            "0",
-            "0",
             "0",
             "0",
         ]);
@@ -208,14 +190,10 @@ mod tests {
             ],
             ["0", "0"],
             ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
-            ["0", "0"],
         ]);
-        let leaf_asset: [u64; MAX_L_BATCH] = [7, 0, 0, 0, 0, 0, 0, 0];
-        let leaf_public_in: [u64; MAX_L_BATCH] = [42, 0, 0, 0, 0, 0, 0, 0];
-        let is_deposit: [u8; MAX_L_BATCH] = [1, 0, 0, 0, 0, 0, 0, 0];
+        let leaf_asset: [u64; MAX_L_BATCH] = [7, 0, 0, 0];
+        let leaf_public_in: [u64; MAX_L_BATCH] = [42, 0, 0, 0];
+        let is_deposit: [u8; MAX_L_BATCH] = [1, 0, 0, 0];
 
         let z = compute_z(
             &field("16317179763850847199255836009578461868788906640504234318695444798435183315946"),
@@ -225,7 +203,7 @@ mod tests {
         );
         assert_eq!(
             z,
-            "5335692762263294252472382464233011278535323805570288607810997750021653647581"
+            "11390806752935300840939243126852028309282981710394294449703199603346036642258"
         );
     }
 }
