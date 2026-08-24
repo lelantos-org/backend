@@ -5,6 +5,7 @@ members = [
     "crates/chain-types",
     "crates/fmd-crypto",
     "crates/database",
+    "crates/prices",
     "crates/ingester",
     "crates/fmd-indexer",
     "crates/explorer-indexer",
@@ -71,6 +72,17 @@ anyhow = "1"
 # tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# metrics
+#
+# The facade is unconditional in `shared`: with no recorder installed every
+# macro is a no-op, so the six binaries that expose no `/metrics` pay nothing
+# for the instrumentation sites they share (`shared::tick::run`).
+metrics = "0.24"
+# `default-features = false` drops push-gateway, rustls and hyper-rustls. Only
+# `http-listener` is needed — the exporter serves the scrape endpoint itself,
+# which is why `fmd-indexer` needs no axum server of its own.
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 # config
 dotenvy = "0.15"

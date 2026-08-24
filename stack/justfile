@@ -15,7 +15,7 @@ export STACK_ENV := env_var_or_default("STACK_ENV", "dev")
 export DEBUG := env_var_or_default("DEBUG", "0")
 export TRACE := env_var_or_default("TRACE", "0")
 
-CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.9.2")
+CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.10.0")
 DC := "docker compose"
 
 default:

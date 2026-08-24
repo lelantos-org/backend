@@ -452,6 +452,9 @@ async fn spawn_fmd_webserver(pool: &database::DbPool) -> String {
         cfg: Arc::new(fmd_webserver::FmdWebserverConfig {
             database_url: String::new(),
             bind_addr: String::new(),
+            // Unused: this test drives the router directly and never installs
+            // a metrics recorder, so nothing binds this address.
+            metrics_addr: String::new(),
             indexer_lag_warn_blocks: 50,
         }),
         cache: fmd_webserver::app::cache::AppCache::new(),

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +73,42 @@ pub struct TokenOut {
     /// `symbol()`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+}
+
+/// Spot USD prices for the registered assets, across every chain.
+///
+/// A separate route rather than a field on [`TokenOut`] because the two have
+/// nothing in common but their key: `/chains` is a boot registry a client reads
+/// once and holds, while a price is stale within the minute. Bolting one onto
+/// the other would mean either refetching the registry to move a price or
+/// showing a price fixed at page load.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricesResponse {
+    /// Shared with the response cache rather than copied out of it. `serde`'s
+    /// `rc` feature is on workspace-wide, which is what lets this serialize in
+    /// place — the same shape `explorer-webserver`'s handlers return.
+    pub prices: Arc<Vec<PriceOut>>,
+}
+
+/// One priced token.
+///
+/// A token the provider does not know — a local test token, or any token on a
+/// chain it does not cover — is **absent** from `prices` rather than carried
+/// with a zero. Absence means "unknown", and a client must render nothing
+/// rather than `$0.00`, which would read as a measurement.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceOut {
+    pub chain_id: i64,
+    /// 0x-prefixed ERC-20 address, spelled exactly as [`TokenOut::token`] so a
+    /// client can join the two without normalising either.
+    pub token: String,
+    /// Spot USD price of one whole token.
+    pub price_usd: f64,
+    /// Provider's own timestamp for the quote, not our fetch time, so a client
+    /// can age it rather than trusting it indefinitely.
+    pub price_at: i64,
 }
 
 impl From<crate::repositories::assets::AssetRow> for TokenOut {

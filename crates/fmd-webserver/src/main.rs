@@ -11,6 +11,12 @@ async fn main() -> Result<()> {
     build_info::log_banner();
 
     let cfg = FmdWebserverConfig::from_env()?;
+    let metrics_addr: std::net::SocketAddr = cfg
+        .metrics_addr
+        .parse()
+        .with_context(|| format!("METRICS_ADDR {}", cfg.metrics_addr))?;
+    shared::metrics::init(metrics_addr).context("install metrics listener")?;
+
     let pool = database::build_pool(&cfg.database_url, database::PoolCfg::webserver())
         .await
         .context("build pool")?;

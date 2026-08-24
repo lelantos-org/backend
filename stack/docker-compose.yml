@@ -164,6 +164,10 @@ services:
             FILTER_WORKERS: "${FILTER_WORKERS:-4}"
             FILTER_BATCH:   "${FILTER_BATCH:-1000}"
             FILTER_TICK_MS: "${FILTER_TICK_MS:-500}"
+            # 0.0.0.0 inside the container so the published port can reach it;
+            # loopback on the host side. Same split as prod.
+            METRICS_ADDR:   "0.0.0.0:3012"
+        ports: ["127.0.0.1:3012:3012"]
 
     explorer-indexer:
         <<: *backend-base
@@ -185,8 +189,11 @@ services:
         environment:
             <<: *backend-env
             BIND_ADDR: 0.0.0.0:3001
+            METRICS_ADDR: 0.0.0.0:3011
             INDEXER_LAG_WARN_BLOCKS: "50"
-        ports: ["3001:3001"]
+        ports:
+            - "3001:3001"
+            - "127.0.0.1:3011:3011"
         healthcheck:
             <<: *tcp-healthcheck
             test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3001' >/dev/null 2>&1"]

@@ -55,6 +55,18 @@ impl TickProgress {
         }
     }
 
+    /// Stable label value for the `progress` metric dimension.
+    ///
+    /// Spelled out rather than derived from `Debug`: a rename of a variant must
+    /// not silently rename a time series that dashboards and alerts key on.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Partial => "partial",
+            Self::Saturated => "saturated",
+        }
+    }
+
     /// [`advanced`](Self::advanced), deriving fullness from the row count.
     ///
     /// `>=` rather than `==` so a repository that over-reads its limit cannot
@@ -82,9 +94,41 @@ pub trait TickService: Send + Sync {
 async fn run_round(svc: &dyn TickService, batch: i64) -> TickProgress {
     let mut round = TickProgress::Idle;
     for chain_id in svc.list_chain_ids().await {
-        match svc.tick_chain(chain_id, batch).await {
-            Ok(progress) => round = round.max(progress),
-            Err(error) => warn!(name = svc.name(), chain_id, %error, "tick failed"),
+        // Instrumented here rather than in each service: this is the one place
+        // that sees every tick of every tick service together with its name,
+        // chain and outcome. Binaries that install no recorder emit nothing.
+        let started = std::time::Instant::now();
+        let outcome = svc.tick_chain(chain_id, batch).await;
+        let service = svc.name();
+        let chain = chain_id.to_string();
+
+        metrics::histogram!(
+            crate::metrics::name::TICK_DURATION,
+            "service" => service,
+            "chain_id" => chain.clone(),
+        )
+        .record(started.elapsed().as_secs_f64());
+
+        match outcome {
+            Ok(progress) => {
+                metrics::counter!(
+                    crate::metrics::name::TICK_PROGRESS,
+                    "service" => service,
+                    "chain_id" => chain,
+                    "progress" => progress.label(),
+                )
+                .increment(1);
+                round = round.max(progress);
+            }
+            Err(error) => {
+                metrics::counter!(
+                    crate::metrics::name::TICK_ERRORS,
+                    "service" => service,
+                    "chain_id" => chain,
+                )
+                .increment(1);
+                warn!(name = service, chain_id, %error, "tick failed");
+            }
         }
     }
     round

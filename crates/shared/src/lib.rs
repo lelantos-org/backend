@@ -14,6 +14,7 @@ pub mod chain;
 pub mod config;
 pub mod config_env;
 pub mod entities;
+pub mod metrics;
 pub mod shutdown;
 pub mod tick;
 pub mod tracing_init;

@@ -56,7 +56,9 @@ pub async fn get_chunk(
     chunk_id: u64,
 ) -> AppResult<Arc<ChunkResponse>> {
     // Only complete (immutable) chunks are cached; see `AppCache::chunks`.
-    if let Some(cached) = st.cache.chunks.get(&(chain_id, chunk_id)).await {
+    let cached = st.cache.chunks.get(&(chain_id, chunk_id)).await;
+    shared::metrics::record_cache("chunks", cached.is_some());
+    if let Some(cached) = cached {
         return Ok(cached);
     }
 

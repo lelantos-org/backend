@@ -189,6 +189,14 @@ impl ConsumeServiceImpl {
             );
         }
 
+        if let Some(max_leaf) = plan.notes.iter().map(|n| n.leaf_index).max() {
+            metrics::gauge!(
+                shared::metrics::name::NOTES_LEAF_INDEX_MAX,
+                "chain_id" => chain_id.to_string(),
+            )
+            .set(max_leaf as f64);
+        }
+
         let (notes, spent_nfs) = (plan.notes.len(), plan.spent_nfs.len());
         debug!(
             chain_id,
@@ -232,7 +240,15 @@ impl ConsumeService for ConsumeServiceImpl {
     async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
         // A standby replica has nothing to do; idling lets the backoff grow
         // instead of polling the lock at full speed.
-        if !self.locks.is_leader(chain_id).await? {
+        let leader = self.locks.is_leader(chain_id).await?;
+        // Gauged on both branches: failover is otherwise only visible as one
+        // replica going quiet, which is indistinguishable from a stall.
+        metrics::gauge!(
+            shared::metrics::name::CHAIN_LEADER,
+            "chain_id" => chain_id.to_string(),
+        )
+        .set(if leader { 1.0 } else { 0.0 });
+        if !leader {
             return Ok(TickProgress::Idle);
         }
 
@@ -244,12 +260,35 @@ impl ConsumeService for ConsumeServiceImpl {
         // rewinds the cursor so the replay rebuilds them.
         // Retracting rewinds the cursor, so the replay is work queued right
         // now — come straight back rather than sleeping on it.
-        if database::reorg::apply_pending(&self.pool, NAME, chain_id).await? > 0 {
+        let reorgs = database::reorg::apply_pending(&self.pool, NAME, chain_id).await?;
+        if reorgs > 0 {
+            metrics::counter!(
+                shared::metrics::name::REORGS_APPLIED,
+                "chain_id" => chain_id.to_string(),
+            )
+            .increment(reorgs as u64);
             return Ok(TickProgress::Saturated);
         }
 
         let (after, _last_block) = self.cursors.fetch(NAME, chain_id).await?;
-        if after > self.raw_events.max_id(chain_id).await? {
+        let max_id = self.raw_events.max_id(chain_id).await?;
+        // The pair is the lag signal: `max_id - cursor` is how far behind this
+        // consumer is. Emitted as two gauges rather than a difference so a
+        // stalled ingester and a stalled consumer stay distinguishable.
+        let chain = chain_id.to_string();
+        metrics::gauge!(
+            shared::metrics::name::CONSUMER_CURSOR_EVENT_ID,
+            "service" => NAME,
+            "chain_id" => chain.clone(),
+        )
+        .set(after as f64);
+        metrics::gauge!(
+            shared::metrics::name::RAW_EVENTS_MAX_ID,
+            "service" => NAME,
+            "chain_id" => chain,
+        )
+        .set(max_id as f64);
+        if after > max_id {
             self.reset_cursor(chain_id).await?;
             return Ok(TickProgress::Saturated);
         }

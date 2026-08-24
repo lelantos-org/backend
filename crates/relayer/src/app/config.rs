@@ -11,6 +11,8 @@ pub struct RelayerConfig {
     pub prover: ProverCfg,
     #[serde(default)]
     pub price_oracle: PriceOracleCfg,
+    #[serde(default)]
+    pub token_prices: TokenPricesCfg,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -156,6 +158,36 @@ impl Default for PriceOracleCfg {
     }
 }
 
+/// Spot USD prices for the registered assets, as `/v1/prices` publishes them.
+///
+/// Deliberately not `price_oracle` above. That one prices a *fee* from a symbol
+/// pair and a failure there fails a submission; this one prices a *token* from
+/// its address so a wallet can label a balance, and a failure here is a missing
+/// line of text. Different keys, different provider, different consequence.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TokenPricesCfg {
+    /// DefiLlama-compatible price API root.
+    #[serde(default = "default_token_price_base_url")]
+    pub base_url: String,
+    /// How long a spot price is served without refetching.
+    #[serde(default = "default_token_price_ttl_s")]
+    pub ttl_s: u64,
+    /// Upstream deadline. Prices are decoration — a slow provider must not hold
+    /// the endpoint open.
+    #[serde(default = "default_token_price_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for TokenPricesCfg {
+    fn default() -> Self {
+        Self {
+            base_url: default_token_price_base_url(),
+            ttl_s: default_token_price_ttl_s(),
+            timeout_ms: default_token_price_timeout_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProverCfg {
     /// `circuits/build/tree_update_js/tree_update.wasm`.
@@ -229,6 +261,18 @@ fn default_oracle_max_stale_s() -> u64 {
 
 fn default_oracle_allow_usd_cross() -> bool {
     true
+}
+
+fn default_token_price_base_url() -> String {
+    "https://coins.llama.fi".to_string()
+}
+
+fn default_token_price_ttl_s() -> u64 {
+    300
+}
+
+fn default_token_price_timeout_ms() -> u64 {
+    5_000
 }
 
 /// `10u128.pow(n)` is the widest exponent that fits.
@@ -400,6 +444,29 @@ mod tests {
                 transact_vkey_path: None,
             },
             price_oracle: PriceOracleCfg::default(),
+            token_prices: TokenPricesCfg::default(),
+        }
+    }
+
+    /// The shipped TOMLs declare no `[token_prices]` section, so every field of
+    /// it comes from a serde default. If one ever loses its `#[serde(default)]`
+    /// the relayer stops booting — and it would do so only in a deployment,
+    /// since nothing else here parses a real config file.
+    #[test]
+    fn the_shipped_configs_still_parse_without_a_token_prices_section() {
+        for path in [
+            "../../stack/config/dev/relayer.toml",
+            "../../stack/config/prod/relayer.toml",
+        ] {
+            let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert!(
+                !raw.contains("[token_prices]"),
+                "{path} now sets the section; this test no longer proves the defaults work",
+            );
+            let cfg: RelayerConfig = toml::from_str(&raw).unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert_eq!(cfg.token_prices.base_url, "https://coins.llama.fi");
+            assert_eq!(cfg.token_prices.ttl_s, 300);
+            assert_eq!(cfg.token_prices.timeout_ms, 5_000);
         }
     }
 

@@ -19,7 +19,7 @@ pub async fn by_chain(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec
                 .iter()
                 .map(|r| (r.chain_id, r.token_hex.clone()))
                 .collect();
-            let prices = super::prices::for_tokens(&st, keys).await;
+            let prices = super::prices::for_tokens(&st, &keys).await;
             Ok::<_, AppError>(Arc::new(fold(rows, &prices)))
         })
         .await

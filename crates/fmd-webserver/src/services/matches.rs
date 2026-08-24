@@ -42,9 +42,13 @@ impl ListRequest {
 pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>> {
     let key = req.cache_key();
     let pool = st.pool.clone();
-    st.cache
+    let probe = shared::metrics::CacheProbe::new("matches_pages");
+    let miss = probe.marker();
+    let out = st
+        .cache
         .matches_pages
         .try_get_with(key, async move {
+            miss.mark();
             let rows = matches::list_for_subscription(
                 &pool,
                 req.subscription_id,
@@ -73,5 +77,9 @@ pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>
             }))
         })
         .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
+    // After the await, and on the error path too: a load that failed still
+    // missed, and counting it as a hit would flatter the cache.
+    probe.record();
+    out
 }

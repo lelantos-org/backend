@@ -61,5 +61,6 @@ pub async fn get_commitment_chunk(
     let mut resp = Json(out).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    shared::metrics::record_chunk_feed_bytes("commitments", &resp);
     Ok(resp)
 }

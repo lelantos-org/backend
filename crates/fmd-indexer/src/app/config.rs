@@ -22,6 +22,11 @@ pub struct FmdIndexerConfig {
     pub consume_batch: Option<usize>,
     #[serde(default)]
     pub consume_tick_ms: Option<u64>,
+    /// Where `/metrics` is served. This is the process's only listener.
+    /// Defaults to loopback; under compose it is set to `0.0.0.0:<port>` and
+    /// the host publish restricts it (see `shared::metrics::init`).
+    #[serde(default = "default_metrics_addr")]
+    pub metrics_addr: String,
 }
 
 impl FmdIndexerConfig {
@@ -48,9 +53,15 @@ impl FmdIndexerConfig {
                 filter_tick_ms: default_filter_tick_ms(),
                 consume_batch: None,
                 consume_tick_ms: None,
+                metrics_addr: std::env::var("METRICS_ADDR")
+                    .unwrap_or_else(|_| default_metrics_addr()),
             })
         }
     }
+}
+
+fn default_metrics_addr() -> String {
+    "127.0.0.1:3012".into()
 }
 
 fn default_filter_workers() -> usize {

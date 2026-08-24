@@ -3,7 +3,7 @@ use crate::adapters::rpc::RpcEndpoint;
 use crate::app::config::{ChainCfg, ChainPublicCfg, RelayerConfig};
 use crate::domain::error::AppError;
 use crate::domain::error::AppResult;
-use crate::domain::responses::ChainConfigOut;
+use crate::domain::responses::{ChainConfigOut, PriceOut};
 use crate::services::deposit_mempool::DepositMempool;
 use crate::services::escrow::EscrowReader;
 use crate::services::events::EventBroadcaster;
@@ -21,6 +21,8 @@ use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{self, TreeMirror};
 use alloy::primitives::Address;
 use database::DbPool;
+use moka::future::Cache;
+use prices::{PriceCache, PriceClient};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -50,6 +52,19 @@ pub struct AppState {
     /// served by `/chains`. Holds only what a client may see — never the
     /// signer key or the relayer's internal RPC.
     pub descriptors: Arc<HashMap<i64, ChainDescriptor>>,
+    /// Upstream spot-price provider for `/v1/prices`.
+    pub prices: Arc<PriceClient>,
+    /// Per-token price cache, including the negatives: a token the provider
+    /// cannot price is asked about once per TTL, not once per request.
+    pub price_cache: PriceCache,
+    /// The whole `/v1/prices` body, cached under the unit key.
+    ///
+    /// Not redundant with `price_cache`. That one spares the *provider*; this
+    /// one spares the *database*: the handler reads the asset table once per
+    /// chain, exactly as `/chains` does, and the relayer's pool is
+    /// `PoolCfg::relayer()` — four connections. Without this, one poll from
+    /// every open wallet tab lands on those four.
+    pub prices_response: Cache<(), Arc<Vec<PriceOut>>>,
 }
 
 /// The half of `ChainCfg` that is safe to publish.
@@ -148,8 +163,31 @@ pub async fn build_state(
                 .map(|c| (c.chain_id, ChainDescriptor::from_cfg(c)))
                 .collect(),
         ),
+        prices: Arc::new(
+            PriceClient::new(
+                cfg.token_prices.base_url.clone(),
+                Duration::from_millis(cfg.token_prices.timeout_ms),
+            )
+            .map_err(|e| AppError::Internal(format!("build price client: {e}")))?,
+        ),
+        price_cache: shared::cache::build(
+            PRICE_CACHE_CAPACITY,
+            Duration::from_secs(cfg.token_prices.ttl_s.max(1)),
+        ),
+        prices_response: shared::cache::build(1, PRICES_RESPONSE_TTL),
     })
 }
+
+/// Room for every registered asset on every chain a deployment serves, with
+/// slack. The value is two `f64`s and an `i64`, so the ceiling costs nothing.
+const PRICE_CACHE_CAPACITY: u64 = 1_024;
+
+/// How long one `/v1/prices` body is reused.
+///
+/// Shorter than the per-token TTL on purpose: this bounds how long a price that
+/// *has* refreshed upstream stays invisible, while `token_prices.ttl_s` bounds
+/// how often we ask upstream at all.
+const PRICES_RESPONSE_TTL: Duration = Duration::from_secs(30);
 
 /// Dependencies every chain's pipelines share. Built once so the per-chain
 /// code below reads as "what this chain adds", not as a list of clones.

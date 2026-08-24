@@ -61,11 +61,19 @@ pub async fn cursor_state_for_token(st: &AppState, token: &TokenHash) -> AppResu
 /// for why this must not hit the database per request.
 async fn note_count(st: &AppState) -> AppResult<i64> {
     let pool = st.pool.clone();
-    st.cache
+    let probe = shared::metrics::CacheProbe::new("note_count");
+    let miss = probe.marker();
+    let out = st
+        .cache
         .note_count
-        .try_get_with((), async move { notes::count_all(&pool).await })
+        .try_get_with((), async move {
+            miss.mark();
+            notes::count_all(&pool).await
+        })
         .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
+    probe.record();
+    out
 }
 
 /// Check γ against the protocol range and against the current note count,

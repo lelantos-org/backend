@@ -46,5 +46,11 @@ pub fn build(state: AppState) -> Router {
             get(handlers::get_tree_state).layer(cc("public, max-age=5")),
         )
         .layer(request_span::trace_layer())
+        // Outside `trace_layer` so it observes the same responses the tracing
+        // layer does. Must stay above `with_state` and below the routes: the
+        // `route` label comes from `MatchedPath`, which only exists once axum
+        // has matched, and a request that matched nothing is bucketed under a
+        // single label rather than by its path.
+        .layer(axum::middleware::from_fn(shared::metrics::track_http))
         .with_state(state)
 }

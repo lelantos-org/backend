@@ -19,9 +19,11 @@ pub async fn list(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<Ass
                 .collect();
             // One upstream call for the whole registry, and only for tokens
             // the price cache has not already answered for.
-            let prices =
-                super::prices::for_tokens(&st, keyed.iter().map(|(k, _)| k.clone()).collect())
-                    .await;
+            let prices = super::prices::for_tokens(
+                &st,
+                &keyed.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            )
+            .await;
 
             let out: Vec<AssetOut> = keyed
                 .into_iter()

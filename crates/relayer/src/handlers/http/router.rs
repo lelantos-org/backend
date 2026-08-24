@@ -59,6 +59,15 @@ pub fn build(state: AppState) -> Router {
             "/chains",
             get(handlers::chains).layer(cc("public, max-age=60")),
         )
+        // Spot USD prices for the registered assets. Identical for every
+        // caller like `/chains`, but on its own route because it goes stale on
+        // its own schedule — see `PricesResponse`. 60s matches the registry's:
+        // long enough to collapse a herd of wallet polls onto one relayer,
+        // short enough that a moving market shows up within the minute.
+        .route(
+            "/v1/prices",
+            get(handlers::prices).layer(cc("public, max-age=60")),
+        )
         .route("/v1/spend", post(handlers::submit_spend))
         .route("/v1/spend/estimate", post(handlers::estimate_spend))
         .route("/v1/swap", post(handlers::submit_swap))

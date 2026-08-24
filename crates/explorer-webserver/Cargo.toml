@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 shared = { path = "../shared", features = ["webserver"] }
 database = { path = "../database" }
+prices = { path = "../prices" }
 # NOTE: must NOT depend on fmd-crypto. Privacy gate enforced in CI.
 tokio = { workspace = true }
 futures = { workspace = true }

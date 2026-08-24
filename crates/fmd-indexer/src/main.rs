@@ -26,6 +26,12 @@ async fn main() -> Result<()> {
 
     let cfg = FmdIndexerConfig::load().context("load config")?;
 
+    let metrics_addr: std::net::SocketAddr = cfg
+        .metrics_addr
+        .parse()
+        .with_context(|| format!("metrics_addr {}", cfg.metrics_addr))?;
+    shared::metrics::init(metrics_addr).context("install metrics listener")?;
+
     #[cfg(feature = "parallel")]
     rayon::ThreadPoolBuilder::new()
         .num_threads(cfg.filter_workers)

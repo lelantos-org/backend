@@ -57,8 +57,24 @@ fn append_leaves(tree: &mut MerkleTree, rows: &[notes::LeafInputsRow]) -> AppRes
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// Count a rebuild from leaf 0 under the cause that forced it.
+///
+/// The `reason` dimension is the whole value of this counter: `tip_backwards`
+/// is a reorg the mirror survived, while `cold` is a full re-hash that a warm
+/// mirror should never pay again. Distinguishing them after the fact is
+/// impossible from a bare total.
+fn record_rebuild(chain_id: i64, reason: &'static str) {
+    metrics::counter!(
+        shared::metrics::name::TREE_MIRROR_REBUILDS,
+        "chain_id" => chain_id.to_string(),
+        "reason" => reason,
+    )
+    .increment(1);
+}
+
 /// Bring this chain's mirror up to the current tip, hashing only new leaves.
 async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> AppResult<()> {
+    let started = std::time::Instant::now();
     let tip = notes::max_leaf_index(pool, chain_id).await?;
     let db_leaves = tip.map_or(0, |t| t + 1);
     let have = mirror.tree.leaf_count() as i64;
@@ -72,10 +88,25 @@ async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> A
             db_leaves,
             "notes tip moved backwards; rebuilding tree mirror"
         );
+        record_rebuild(chain_id, "tip_backwards");
         mirror.tree = MerkleTree::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
+    } else if have == 0 && db_leaves > 0 {
+        // An empty mirror with leaves to fold is the cold build: every leaf
+        // hashed, holding the chain's mutex. This is the one the boot warm-up
+        // exists to move off the request path.
+        record_rebuild(chain_id, "cold");
     }
 
     let from = mirror.tree.leaf_count() as i64;
+    // Published before the early return: this is a state gauge, and the
+    // steady state *is* "nothing to append". Setting it only on the work path
+    // makes the series vanish from a caught-up chain — missing precisely when
+    // it would be read.
+    metrics::gauge!(
+        shared::metrics::name::TREE_MIRROR_LEAVES,
+        "chain_id" => chain_id.to_string(),
+    )
+    .set(from as f64);
     if from >= db_leaves {
         return Ok(());
     }
@@ -88,20 +119,41 @@ async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> A
         leaf_count = mirror.tree.leaf_count(),
         "tree mirror advanced"
     );
+
+    // Timed only on a path that did work: recording the no-op return above
+    // would bury the multi-second cold builds under a flood of zeros. The
+    // gauge, unlike the histogram, is re-set here to the post-append count.
+    let chain = chain_id.to_string();
+    metrics::histogram!(
+        shared::metrics::name::TREE_MIRROR_SYNC_DURATION,
+        "chain_id" => chain.clone(),
+    )
+    .record(started.elapsed().as_secs_f64());
+    metrics::gauge!(
+        shared::metrics::name::TREE_MIRROR_LEAVES,
+        "chain_id" => chain,
+    )
+    .set(mirror.tree.leaf_count() as f64);
     Ok(())
 }
 
 /// The chain's mirror, created empty on first use. Callers lock it and call
 /// [`sync_mirror`] before reading.
 async fn mirror(st: &AppState, chain_id: i64) -> AppResult<Arc<Mutex<TreeMirror>>> {
-    st.cache
+    let probe = shared::metrics::CacheProbe::new("tree");
+    let miss = probe.marker();
+    let out = st
+        .cache
         .tree
         .try_get_with(chain_id, async move {
+            miss.mark();
             let tree = MerkleTree::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
             Ok::<_, AppError>(Arc::new(Mutex::new(TreeMirror { tree })))
         })
         .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
+    probe.record();
+    out
 }
 
 #[tracing::instrument(skip(st))]

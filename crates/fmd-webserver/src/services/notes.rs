@@ -14,9 +14,13 @@ pub async fn list(
 ) -> AppResult<Arc<Vec<NoteOut>>> {
     let key = (chain_id, after, limit);
     let pool = st.pool.clone();
-    st.cache
+    let probe = shared::metrics::CacheProbe::new("notes_pages");
+    let miss = probe.marker();
+    let out = st
+        .cache
         .notes_pages
         .try_get_with(key, async move {
+            miss.mark();
             let rows = notes::list(&pool, chain_id, after, limit).await?;
             let out: Vec<NoteOut> = rows
                 .into_iter()
@@ -35,5 +39,9 @@ pub async fn list(
             Ok::<_, AppError>(Arc::new(out))
         })
         .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
+    // After the await, and on the error path too: a load that failed still
+    // missed, and counting it as a hit would flatter the cache.
+    probe.record();
+    out
 }

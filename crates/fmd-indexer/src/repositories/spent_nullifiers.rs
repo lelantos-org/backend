@@ -130,6 +130,17 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
             .execute(&mut conn)
             .await
             .inspect_err(|e| log_unique_violation("spent_nullifiers", e))?;
+
+        // Emitted here rather than from the consume tick: `seq` is assigned in
+        // this function and is not visible to the caller. `values` is the
+        // numbered set, so its last element carries the new high-water mark.
+        if let Some(last) = values.last() {
+            metrics::gauge!(
+                shared::metrics::name::SPENT_NULLIFIERS_SEQ_MAX,
+                "chain_id" => chain_id.to_string(),
+            )
+            .set(last.seq as f64);
+        }
         Ok(n)
     }
 

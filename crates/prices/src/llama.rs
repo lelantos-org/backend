@@ -37,7 +37,7 @@ fn llama_chain(chain_id: i64) -> Option<&'static str> {
 /// reporting nothing.
 const MIN_CONFIDENCE: f64 = 0.5;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TokenPrice {
     pub price_usd: f64,
     /// `None` when the provider priced the token but did not report decimals.
@@ -219,6 +219,35 @@ mod tests {
             &by_coin(std::slice::from_ref(&k)),
         );
         assert_eq!(got.get(&k).unwrap().price_usd, 1.5);
+    }
+
+    /// Contract check against the live provider. Ignored by default — it needs
+    /// the network — but this is the one thing no fixture can catch: DefiLlama
+    /// renaming a field or dropping `confidence` would leave every test above
+    /// green while every price silently vanished in production.
+    ///
+    /// Run with `cargo test -p prices -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "hits the live DefiLlama API"]
+    async fn the_live_provider_still_speaks_the_shape_we_parse() {
+        let usdc = key(1, "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let client =
+            PriceClient::new("https://coins.llama.fi".into(), Duration::from_secs(15)).unwrap();
+
+        let got = client.fetch(std::slice::from_ref(&usdc)).await.unwrap();
+
+        let p = got.get(&usdc).expect("USDC must be priced");
+        assert_eq!(p.decimals, Some(6), "decimals field moved or vanished");
+        assert!(
+            p.price_usd > 0.5 && p.price_usd < 2.0,
+            "implausible: {}",
+            p.price_usd
+        );
+        assert!(
+            p.quoted_at > 1_700_000_000,
+            "timestamp field moved: {}",
+            p.quoted_at
+        );
     }
 
     #[test]
