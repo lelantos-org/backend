@@ -168,9 +168,12 @@ impl Submitter {
                 return Err(AppError::Rpc(format!("send_transaction: {e}")));
             }
             Err(e) => {
-                return self
-                    .resolve_by_hash(tx_hash, Unresolved::Unanswered(e.to_string()))
-                    .await;
+                let unresolved = if matches!(&e, RpcError::ErrorResp(_)) {
+                    Unresolved::Refused(e.to_string())
+                } else {
+                    Unresolved::Unanswered(e.to_string())
+                };
+                return self.resolve_by_hash(tx_hash, unresolved).await;
             }
         };
         let pending = pending
@@ -298,6 +301,9 @@ enum Unresolved {
     Unanswered(String),
     /// The broadcast was accepted, but no receipt arrived inside the window.
     NoReceipt(String),
+    /// The node answered "no", but with a complaint that a transaction of ours
+    /// already occupying that nonce would produce — see [`broadcast_refused`].
+    Refused(String),
 }
 
 impl Unresolved {
@@ -306,6 +312,7 @@ impl Unresolved {
         match self {
             Self::Unanswered(_) => "broadcast went unanswered",
             Self::NoReceipt(_) => "no receipt inside the first window",
+            Self::Refused(_) => "node refused the broadcast; it may already have mined",
         }
     }
 
@@ -313,16 +320,26 @@ impl Unresolved {
     /// URL, and with it an API key.
     fn detail(&self) -> &str {
         match self {
-            Self::Unanswered(e) | Self::NoReceipt(e) => e,
+            Self::Unanswered(e) | Self::NoReceipt(e) | Self::Refused(e) => e,
         }
     }
 }
 
 /// Whether a failed broadcast proves the transaction never reached the mempool.
 ///
-/// True only when the node answered. A JSON-RPC error object is the node
-/// saying "no" — nonce too low, underpriced, insufficient funds — and nothing
-/// was accepted, so the caller may roll its speculative leaves back.
+/// True when the node answered "no" for a reason that cannot describe a
+/// transaction of ours already on the chain — underpriced, insufficient funds,
+/// an invalid payload. Nothing was accepted, so the caller may roll its
+/// speculative leaves back.
+///
+/// It is *not* true of a nonce complaint, even though that is a JSON-RPC error
+/// object like any other. The transport retries `eth_sendRawTransaction`, and
+/// on a fast chain the first send can already be in a block by the time the
+/// retry goes out: the node then answers "nonce too low" about our own mined
+/// transaction rather than "already known". Taking that as proof rolls the
+/// mirror back under a swap that landed — which is exactly how chain 42161
+/// ended up at `committedCount = 4` with a mirror holding one leaf, reverting
+/// `StaleOldRoot()` on every later submission.
 ///
 /// Everything else is silence: a reset connection, a timeout, a gateway 5xx.
 /// The node may have accepted and broadcast the transaction before the answer
@@ -331,9 +348,31 @@ impl Unresolved {
 /// `_validateBatchHeader`'s `startIndex == committedCount` check — so *every*
 /// later submission reverts `BatchMisaligned`, each rolling back further. The
 /// chain is then dead with symptoms that do not point at the cause, which is
-/// why an unanswered broadcast is resolved against the chain instead.
+/// why both an unanswered broadcast and an inconclusive refusal are resolved
+/// against the chain instead.
 fn broadcast_refused(e: &RpcError<TransportErrorKind>) -> bool {
-    matches!(e, RpcError::ErrorResp(_))
+    match e {
+        RpcError::ErrorResp(payload) => !may_describe_a_landed_tx(&payload.message),
+        _ => false,
+    }
+}
+
+/// Whether a node's rejection could be about a transaction of ours that has
+/// already been accepted or mined, rather than about this send failing.
+///
+/// Message text, because no JSON-RPC code distinguishes these: `-32000` covers
+/// every one of them.
+fn may_describe_a_landed_tx(message: &str) -> bool {
+    const MARKERS: [&str; 6] = [
+        "nonce too low",
+        "nonce has already been used",
+        "already known",
+        "known transaction",
+        "already imported",
+        "replacement transaction underpriced",
+    ];
+    let message = message.to_ascii_lowercase();
+    MARKERS.iter().any(|m| message.contains(m))
 }
 
 /// Decide what a failure *while filling* a transaction actually was.
@@ -416,15 +455,43 @@ mod tests {
         assert_eq!(err.client_message(), "internal error");
     }
 
-    /// The node said no. Nothing was accepted, so the mirror may roll back.
+    fn error_resp(message: &str) -> RpcError<TransportErrorKind> {
+        RpcError::ErrorResp(ErrorPayload {
+            code: -32000,
+            message: message.to_string().into(),
+            data: None,
+        })
+    }
+
+    /// The node said no for a reason that cannot be our own transaction.
+    /// Nothing was accepted, so the mirror may roll back.
     #[test]
     fn a_node_that_answers_no_proves_nothing_was_broadcast() {
-        let refused = RpcError::ErrorResp(ErrorPayload {
-            code: -32000,
-            message: "nonce too low".into(),
-            data: None,
-        });
-        assert!(broadcast_refused(&refused));
+        assert!(broadcast_refused(&error_resp(
+            "insufficient funds for gas * price + value"
+        )));
+        assert!(broadcast_refused(&error_resp("transaction underpriced")));
+    }
+
+    /// The retry layer resends the signed envelope, so on a fast chain the
+    /// node can be complaining about our *first* send having already mined.
+    /// Rolling back there is what truncated the mirror under a landed swap.
+    #[test]
+    fn a_nonce_complaint_never_proves_the_transaction_did_not_land() {
+        let inconclusive = [
+            "nonce too low: address 0x5Fde731cD64f4D22BD0Ab6Fe690C8a19E5fA4BC8, tx: 35 state: 36",
+            "nonce has already been used",
+            "already known",
+            "known transaction: 0xdead",
+            "transaction already imported",
+            "replacement transaction underpriced",
+        ];
+        for message in inconclusive {
+            assert!(
+                !broadcast_refused(&error_resp(message)),
+                "assumed failure for {message}"
+            );
+        }
     }
 
     /// Silence proves nothing. Treating it as "did not land" is what
