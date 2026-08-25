@@ -40,6 +40,10 @@ utoipa-swagger-ui = { version = "8", features = ["axum"] }
 diesel = { version = "2.2", features = ["postgres", "chrono", "numeric", "serde_json", "32-column-tables"] }
 bigdecimal = { version = "0.4", features = ["serde"] }
 diesel-async = { version = "0.5", features = ["postgres", "bb8"] }
+# LISTEN/NOTIFY only. diesel-async already resolves this exact version and
+# connects with `NoTls`; pinning to the same one keeps a single client in the
+# tree and the listener's connection identical to every pooled one.
+tokio-postgres = "0.7"
 diesel_migrations = { version = "2.2", features = ["postgres"] }
 bb8 = "0.8"
 
@@ -94,8 +98,13 @@ ark-ff = "0.4"
 ark-ec = "0.4"
 ark-serialize = "0.4"
 blake2 = "0.10"
+chacha20poly1305 = "0.10"
+zeroize = "1"
 num-bigint = "0.4"
 num-traits = "0.2"
+
+# bech32m shielded payment addresses (relayer only)
+bech32 = "0.11"
 
 # parallelism (fmd-indexer filter)
 rayon = "1.10"

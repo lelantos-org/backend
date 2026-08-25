@@ -176,24 +176,41 @@ async fn retract_derived(
 /// ordered by block once rows have been re-inserted, so no id cleanly means
 /// "just before this block". Replaying from the start is slower but correct,
 /// and every consumer write is idempotent.
+/// Rewind `name`'s cursor to the start and mark `reorg_id` as accounted for.
+///
+/// An upsert, not an update. A consumer that has not committed yet has no row
+/// here, and a bare `UPDATE` matched nothing — so `last_reorg_id` never stuck,
+/// [`apply_pending`] found the same reorg on the next call, and the caller
+/// (which reports "work queued" whenever it retracts, and so does not sleep)
+/// re-ticked at full speed forever. The cycle was self-sustaining: the tick
+/// returned before reaching the commit that would have created the row.
+///
+/// Inserting `(0, 0, reorg_id)` is the correct initial state for that
+/// consumer, and it is what a rewind means anyway: replay from the beginning,
+/// with this reorg already applied.
 async fn rewind_consumer(
     conn: &mut AsyncPgConnection,
     name: &str,
     chain_id: i64,
     reorg_id: i64,
 ) -> Result<(), diesel::result::Error> {
-    diesel::update(
-        consumer_cursors::table
-            .filter(consumer_cursors::name.eq(name))
-            .filter(consumer_cursors::chain_id.eq(chain_id)),
-    )
-    .set((
-        consumer_cursors::last_event_id.eq(0i64),
-        consumer_cursors::last_block_number.eq(0i64),
-        consumer_cursors::last_reorg_id.eq(reorg_id),
-    ))
-    .execute(conn)
-    .await?;
+    diesel::insert_into(consumer_cursors::table)
+        .values((
+            consumer_cursors::name.eq(name),
+            consumer_cursors::chain_id.eq(chain_id),
+            consumer_cursors::last_event_id.eq(0i64),
+            consumer_cursors::last_block_number.eq(0i64),
+            consumer_cursors::last_reorg_id.eq(reorg_id),
+        ))
+        .on_conflict((consumer_cursors::name, consumer_cursors::chain_id))
+        .do_update()
+        .set((
+            consumer_cursors::last_event_id.eq(0i64),
+            consumer_cursors::last_block_number.eq(0i64),
+            consumer_cursors::last_reorg_id.eq(reorg_id),
+        ))
+        .execute(conn)
+        .await?;
     Ok(())
 }
 

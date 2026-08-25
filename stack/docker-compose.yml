@@ -150,6 +150,10 @@ services:
         environment:
             <<: *backend-env
             INGESTER_CONFIG: /etc/ingester.toml
+            # 0.0.0.0 inside the container so the published port can reach it;
+            # loopback on the host side. Same split as fmd-indexer.
+            METRICS_ADDR: "0.0.0.0:3013"
+        ports: ["127.0.0.1:3013:3013"]
         volumes:
             - ./config/${STACK_ENV:-dev}/ingester.toml:/etc/ingester.toml:ro
             - addresses:/addresses:ro

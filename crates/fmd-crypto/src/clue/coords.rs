@@ -11,7 +11,7 @@
 use ark_ec::CurveGroup;
 use ark_ec::scalar_mul::fixed_base::FixedBase;
 use ark_ed_on_bn254::{EdwardsAffine, EdwardsProjective, Fq, Fr};
-use ark_ff::{BigInteger, Field, PrimeField};
+use ark_ff::{BigInteger, Field, PrimeField, Zero};
 use std::str::FromStr;
 use std::sync::OnceLock;
 
@@ -63,6 +63,23 @@ impl CircomPoint {
             x: p.x * s_factor_inv(),
             y: p.y,
         }
+    }
+
+    /// The twisted-Edwards identity `(0, 1)`.
+    pub fn is_identity(&self) -> bool {
+        self.x.is_zero() && self.y == Fq::ONE
+    }
+
+    /// Full order-`n` subgroup test, delegated to ark.
+    ///
+    /// Baby-Jubjub's group is `Z_8 x Z_n`, so being on the curve does not put a
+    /// point in the prime-order subgroup. Callers that then multiply by a secret
+    /// need this: an 8-torsion component turns the product into one of eight
+    /// values, which is a channel out of the secret. Note the weaker `[8]P == O`
+    /// test does NOT do this job — it accepts `T + [t]B`, which is exactly the
+    /// shape of that attack.
+    pub fn is_in_prime_subgroup(&self) -> bool {
+        self.to_ark().is_in_correct_subgroup_assuming_on_curve()
     }
 }
 
@@ -143,6 +160,21 @@ pub fn unpack(bytes: &[u8]) -> Result<CircomPoint, ClueError> {
     let x_final = if x_is_negative(&x) == sign_bit { x } else { -x };
     let p = CircomPoint::new(x_final, y);
     if !p.is_on_curve() {
+        return Err(ClueError::NotOnCurve);
+    }
+    Ok(p)
+}
+
+/// [`unpack`], plus the two checks a point that will be multiplied by a secret
+/// needs: prime-order subgroup membership, and non-identity.
+///
+/// The identity is rejected because it absorbs any scalar — a shared secret
+/// derived from it is the same for every key, so it carries no secrecy at all.
+/// `unpack` alone accepts it (it satisfies the curve equation), which is why
+/// this is a separate entry point rather than a tightening of that one.
+pub fn unpack_subgroup(bytes: &[u8]) -> Result<CircomPoint, ClueError> {
+    let p = unpack(bytes)?;
+    if p.is_identity() || !p.is_in_prime_subgroup() {
         return Err(ClueError::NotOnCurve);
     }
     Ok(p)

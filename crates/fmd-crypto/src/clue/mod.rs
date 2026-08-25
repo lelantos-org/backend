@@ -10,7 +10,7 @@ use thiserror::Error;
 
 pub use coords::{
     COEFF_A_CIRCOM, COEFF_D_CIRCOM, CircomPoint, FixedBaseTable, base8_circom, pack, scalar_mul,
-    unpack,
+    unpack, unpack_subgroup,
 };
 pub use detect::{TAG_FMD_BIT, test_clue, test_clue_batch};
 

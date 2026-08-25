@@ -23,6 +23,7 @@ use crate::services::log_range::fetch_adaptive;
 use crate::services::reorg::ReorgService;
 use alloy::primitives::Address;
 use async_trait::async_trait;
+use shared::metrics::{record_event_age, stage};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -119,6 +120,14 @@ impl LiveServiceImpl {
         let block_meta = self.rpc.fetch_block_meta(&distinct_blocks(&logs)).await?;
         let rows = logs_to_rows(chain_id, logs, &block_meta)?;
         let inserted = self.ingest.commit_batch(chain_id, &rows, to).await?;
+
+        // Live path only. `commit_batch` also serves the backfill, where the
+        // age is the age of history rather than of the head, and mixing the two
+        // would make the histogram unreadable in exactly the situation it is
+        // meant to explain.
+        if let Some(newest) = rows.iter().map(|r| r.block_ts).max() {
+            record_event_age(stage::INGEST, chain_id, newest);
+        }
 
         debug!(chain_id, from, to, inserted, "live commit");
         if inserted > 0 {

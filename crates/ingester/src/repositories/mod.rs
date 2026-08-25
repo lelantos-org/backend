@@ -4,7 +4,7 @@ pub mod raw_events;
 
 pub use atomic::{AtomicWriteRepo, PostgresAtomicWriteRepo};
 pub use chain_state::{ChainStateRepo, PostgresChainStateRepo};
-pub use raw_events::{CHANNEL_APPENDED, CHANNEL_REORG, PostgresRawEventRepo, RawEventRepo};
+pub use raw_events::{PostgresRawEventRepo, RawEventRepo};
 
 use crate::domain::error::IngesterError;
 use database::DbPool;

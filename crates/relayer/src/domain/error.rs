@@ -39,6 +39,36 @@ pub enum AppError {
     IdempotencyKeyReused(String),
     #[error("oracle: {0}")]
     Oracle(String),
+    /// No output of the submission decrypted to a note this relayer owns.
+    ///
+    /// A payer who attached no fee at all and one who attached it to the wrong
+    /// address are indistinguishable from here, and both need the same thing:
+    /// the address to pay. It is public — `/chains` publishes it — so echoing
+    /// it costs nothing and saves a round trip.
+    #[error("no shielded fee output addressed to {address}")]
+    ShieldedFeeMissing { address: String },
+    /// A fee was found, and it does not cover the relayer's own quote.
+    ///
+    /// Both numbers are echoed. Without them the caller cannot tell a genuine
+    /// shortfall from price drift, and cannot decide whether to re-quote or to
+    /// give up.
+    #[error(
+        "shielded fee in asset {asset_id} pays {paid} but {required} is required \
+         (grace {grace_bps} bps)"
+    )]
+    ShieldedFeeTooLow {
+        asset_id: u64,
+        /// Base-unit U256 as a decimal string.
+        required: String,
+        paid: String,
+        grace_bps: u32,
+    },
+    /// The fee was paid in an asset this relayer will not take.
+    ///
+    /// A wallet builds one spend in one asset, so this also says the spend
+    /// itself cannot be relayed — not merely that the fee needs re-denominating.
+    #[error("asset {asset_id} cannot pay a shielded fee: {reason}")]
+    ShieldedFeeAssetRejected { asset_id: u64, reason: String },
     #[error("stale estimate: {0}")]
     StaleEstimate(String),
     #[error("internal: {0}")]
@@ -126,6 +156,9 @@ impl AppError {
             | AppError::NullifierInFlight(_)
             | AppError::IdempotencyKeyReused(_)
             | AppError::StaleEstimate(_) => StatusCode::CONFLICT,
+            AppError::ShieldedFeeMissing { .. }
+            | AppError::ShieldedFeeTooLow { .. }
+            | AppError::ShieldedFeeAssetRejected { .. } => StatusCode::PAYMENT_REQUIRED,
             AppError::Reverted(_) | AppError::SubmitUnknown(_) => StatusCode::BAD_GATEWAY,
             AppError::MirrorDesynced(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Db(_)
@@ -149,7 +182,12 @@ impl AppError {
             | AppError::NullifierAlreadySpent(_)
             | AppError::NullifierInFlight(_)
             | AppError::IdempotencyKeyReused(_)
-            | AppError::StaleEstimate(_) => self.to_string(),
+            | AppError::StaleEstimate(_)
+            // Every field of these is either the caller's own payload or
+            // already public in `/chains`.
+            | AppError::ShieldedFeeMissing { .. }
+            | AppError::ShieldedFeeTooLow { .. }
+            | AppError::ShieldedFeeAssetRejected { .. } => self.to_string(),
             // Only `reason` — never `detail`, which is the raw node error.
             AppError::ContractRejected { reason, .. } => format!("rejected by contract: {reason}"),
             AppError::Reverted(_) => "submit reverted".into(),

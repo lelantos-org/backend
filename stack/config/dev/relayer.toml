@@ -32,6 +32,32 @@ flush_max_attempts = 5
 # RELAYER_CHAIN_31337_{SWAP_WRAPPER,NATIVE_ADAPTER}_ADDRESS; left unset here so
 # the matching endpoints stay disabled until a deploy has actually run.
 
+# ── shielded fees ───────────────────────────────────────────────────────
+#
+# Off by default, and deliberately so: setting `shielded_fee_address` makes a
+# fee output MANDATORY on every spend and swap, and a wallet that does not
+# build one is refused with 402. Turn it on only against a client that does.
+#
+# To enable, uncomment the three lines below, add at least one entry to
+# `accepted_fee_tokens` (without a price nothing can be quoted and the relayer
+# refuses to boot), and supply the viewing key out of band:
+#
+#   RELAYER_CHAIN_31337_SHIELDED_FEE_IVK=0x…
+#
+# The key is decrypt-only. It recognises payments and reads their value; it
+# cannot spend them. Generate the pair with the SDK's `buildSpendingKey` +
+# `encodeAddress`, and keep `nsk` off this host.
+#
+# shielded_fee_address = "lelantos1…"
+# shielded_fee_grace_bps = 300
+# shielded_fee_assets = [1]
+#
+# [[chains.accepted_fee_tokens]]
+# symbol = "USDC"
+# address = "0x…"
+# decimals = 6
+# quote_symbol = "USDC"
+
 # Served verbatim by `/chains` for wallets to boot from; the relayer reads
 # none of it. `rpc_url` here is the browser-reachable endpoint, deliberately
 # not the `rpc_url` above (`http://anvil:8545` only resolves inside compose).

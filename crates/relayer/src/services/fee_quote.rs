@@ -82,6 +82,12 @@ impl FeeQuoter {
             token_address: format!("{:#x}", token.address),
             decimals: token.decimals,
             amount: amount.to_string(),
+            // Filled in by the pipeline, which owns the asset registry this
+            // service deliberately does not depend on. See
+            // `pipeline::common::decorate_estimate`.
+            asset_id: None,
+            scale: None,
+            circuit_amount: None,
         })
     }
 
@@ -132,7 +138,42 @@ impl FeeQuoter {
             markup_bps: self.markup_bps,
             quoted_at,
             fees,
+            shielded_fee_address: None,
         })
+    }
+}
+
+impl FeeQuoter {
+    /// The accepted fee token deployed at `address`, if any.
+    ///
+    /// The asset registry keys on a MASP asset id and this table keys on an
+    /// ERC-20 address, so the token address is the join between them.
+    pub fn token_at(&self, address: &Address) -> Option<&FeeToken> {
+        self.accepted_fee_tokens
+            .iter()
+            .find(|t| &t.address == address)
+    }
+
+    /// Base-unit amount of `token` that covers `gas_used` right now.
+    ///
+    /// This is the number a fee is judged against, and it is derived here
+    /// rather than taken from the caller: an estimate the relayer handed out
+    /// earlier is neither signed nor stored, so honouring one would mean
+    /// honouring anything shaped like one.
+    pub async fn required_amount(&self, token: &FeeToken, gas_used: u64) -> AppResult<U256> {
+        let fee_data = self.gas_estimator.fee_data().await?;
+        let total_native_wei =
+            apply_markup(gas_used, fee_data.effective_gas_price_wei, self.markup_bps);
+        let price = self
+            .oracle
+            .price(&self.native_symbol, &token.quote_symbol)
+            .await?;
+        Ok(compute_token_amount(
+            total_native_wei,
+            self.native_decimals,
+            token.decimals,
+            price,
+        ))
     }
 }
 

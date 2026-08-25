@@ -48,6 +48,45 @@ pub struct ChainHealth {
     /// Empty when the indexer has not caught up, which a client must read as
     /// "not known yet" rather than "this chain supports nothing".
     pub tokens: Vec<TokenOut>,
+    /// Shielded fee terms, when this relayer charges one.
+    ///
+    /// **Presence means required.** A client that sees this key must attach a
+    /// fee output to every spend and swap; one that does not must not. There is
+    /// deliberately no `required` flag to disagree with the key's own presence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shielded_fee: Option<ShieldedFeeOut>,
+}
+
+/// What a client needs in order to pay this relayer privately.
+///
+/// Terms only — no amount. An amount is a function of the gas price and an
+/// oracle rate, both of which move within the minute, and `/chains` is a boot
+/// registry a wallet reads once and holds behind a 60s edge cache. The live
+/// number belongs to `/v1/spend/estimate`, for the same reason `/v1/prices` is
+/// its own route rather than a field on [`TokenOut`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShieldedFeeOut {
+    /// bech32m address to address the fee note to.
+    pub address: String,
+    /// How far below the relayer's own submit-time quote a payment may fall
+    /// and still be accepted. A quote is not signed and is re-derived when the
+    /// spend arrives, so this is the drift a client is allowed between the two.
+    pub grace_bps: u32,
+    /// Markup over raw gas cost, already included in every quoted amount.
+    /// Published so a client can show what it is being charged, not so it can
+    /// recompute the amount itself.
+    pub markup_bps: u32,
+    /// Assets this relayer accepts as a fee.
+    ///
+    /// A wallet builds one spend in one asset, so this doubles as the list of
+    /// assets it will relay at all: an asset absent from here cannot pay for
+    /// its own transfer.
+    ///
+    /// Repeated in full rather than named by id, so a client reading
+    /// `shieldedFee` has the `scale` it needs to size the note without joining
+    /// back to [`ChainHealth::tokens`].
+    pub tokens: Vec<TokenOut>,
 }
 
 /// One asset a wallet may hold on a chain.
@@ -111,14 +150,14 @@ pub struct PriceOut {
     pub price_at: i64,
 }
 
-impl From<crate::repositories::assets::AssetRow> for TokenOut {
-    fn from(a: crate::repositories::assets::AssetRow) -> Self {
+impl From<&crate::repositories::assets::AssetRow> for TokenOut {
+    fn from(a: &crate::repositories::assets::AssetRow) -> Self {
         Self {
             asset_id: a.asset_id_u64,
             token: format!("0x{}", hex::encode(&a.token)),
             scale: a.scale.to_string(),
             decimals: a.decimals,
-            symbol: a.symbol,
+            symbol: a.symbol.clone(),
         }
     }
 }
@@ -160,6 +199,26 @@ pub struct FeeQuote {
     pub decimals: u8,
     /// Base-unit U256 as decimal string.
     pub amount: String,
+    /// MASP asset id, present once the indexer has registered this token.
+    ///
+    /// `null` means the relayer cannot yet map this fee token to an asset, and
+    /// so a client cannot build a fee note for it — not that the token is
+    /// unpriced. [`Self::amount`] is still meaningful for display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<i64>,
+    /// `baseUnits = circuitUnits * scale`, decimal string. Absent alongside
+    /// [`Self::asset_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<String>,
+    /// [`Self::amount`] rounded **up** to a whole circuit unit — the exact
+    /// `value` to put in the fee note.
+    ///
+    /// Rounded here rather than by the client because rounding down would
+    /// underpay by up to one whole unit and be refused, and because two
+    /// implementations of the same rounding drift. Absent alongside
+    /// [`Self::asset_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circuit_amount: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,11 +232,17 @@ pub struct EstimateResponse {
     /// Unix seconds (server time) when this quote was produced.
     pub quoted_at: u64,
     pub fees: Vec<FeeQuote>,
+    /// Where to send the fee note, when this chain collects a shielded fee.
+    ///
+    /// Absent means the relayer is not charging on this chain, and a spend
+    /// carrying no fee output will still be relayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shielded_fee_address: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainConfigOut, ChainHealth, TokenOut};
+    use super::{ChainConfigOut, ChainHealth, ShieldedFeeOut, TokenOut};
 
     fn health(config: ChainConfigOut) -> ChainHealth {
         health_with(config, vec![])
@@ -193,7 +258,42 @@ mod tests {
             relayer_address: "0xRELAYER".to_string(),
             config,
             tokens,
+            shielded_fee: None,
         }
+    }
+
+    /// Presence of the key is the whole contract — it is what tells a client a
+    /// fee is required — so a relayer that charges nothing must not emit it at
+    /// all. A `null` here would read as "required, terms unknown".
+    #[test]
+    fn a_chain_that_charges_no_shielded_fee_omits_the_key_entirely() {
+        let json = serde_json::to_value(health(ChainConfigOut::default())).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(!obj.contains_key("shieldedFee"), "got {json}");
+    }
+
+    #[test]
+    fn shielded_fee_terms_serialize_under_one_camel_case_key() {
+        let mut h = health(ChainConfigOut::default());
+        h.shielded_fee = Some(ShieldedFeeOut {
+            address: "lelantos1abc".to_string(),
+            grace_bps: 300,
+            markup_bps: 1000,
+            tokens: vec![TokenOut {
+                asset_id: 1,
+                token: "0xdead".to_string(),
+                scale: "1000000000000".to_string(),
+                decimals: Some(6),
+                symbol: Some("USDC".to_string()),
+            }],
+        });
+        let json = serde_json::to_value(&h).expect("serialize");
+        let fee = &json["shieldedFee"];
+        assert_eq!(fee["address"], "lelantos1abc");
+        assert_eq!(fee["graceBps"], 300);
+        assert_eq!(fee["markupBps"], 1000);
+        assert_eq!(fee["tokens"][0]["assetId"], 1);
+        assert_eq!(fee["tokens"][0]["scale"], "1000000000000");
     }
 
     /// The config half is `#[serde(flatten)]`ed, so a client sees one flat

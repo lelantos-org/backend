@@ -1154,3 +1154,61 @@ async fn advance_backfill_never_rewinds() {
     subs.advance_backfill(sub_id, 900).await.unwrap();
     assert_eq!(pointer().await, Some(900), "advances");
 }
+
+/// A reorg recorded before a consumer's first commit must still be marked
+/// applied.
+///
+/// The livelock this pins: `rewind_consumer` was an `UPDATE`, and a consumer
+/// that has never committed has no `consumer_cursors` row for it to match. The
+/// update touched zero rows, so `last_reorg_id` never advanced, so
+/// `apply_pending` returned the same reorg on the next tick — and `tick_chain`
+/// reports `Saturated` whenever it retracts, which is the one path that
+/// deliberately never sleeps. The loop re-ticked at full speed forever, and
+/// because it returned before ever reaching `commit`, the cursor row that
+/// would have broken the cycle was never created. Observed in the dev stack as
+/// fmd-indexer pinned at 60% CPU with `raw_events` populated and `notes` empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reorg_before_the_first_commit_is_not_replayed_forever() {
+    use shared::tick::TickProgress;
+
+    let (pool, _serial) = fresh_pool().await;
+    let chain_id = CHAIN_A;
+
+    // A recorded rewind, and deliberately no cursor row for "fmd".
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO chain_reorgs (chain_id, rewind_to) VALUES ($1, $2)")
+        .bind::<diesel::sql_types::BigInt, _>(chain_id)
+        .bind::<diesel::sql_types::BigInt, _>(4i64)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let consume = build_consume(&pool);
+
+    // First tick applies the reorg and reports work queued.
+    let first = consume.tick_chain(chain_id, 100).await.unwrap();
+    assert_eq!(
+        first,
+        TickProgress::Saturated,
+        "applying a reorg should report queued work"
+    );
+
+    // Second tick must NOT find the same reorg again. Before the fix this was
+    // `Saturated` forever, and the driver never slept between ticks.
+    let second = consume.tick_chain(chain_id, 100).await.unwrap();
+    assert_ne!(
+        second,
+        TickProgress::Saturated,
+        "the same reorg was applied twice: the consumer's last_reorg_id did not stick"
+    );
+
+    // And the marker is durable, not merely absent from the next read.
+    let applied = database::reorg::consumer_position(&pool, "fmd", chain_id)
+        .await
+        .unwrap();
+    assert!(
+        applied > 0,
+        "last_reorg_id was never persisted for a consumer with no prior cursor row"
+    );
+}

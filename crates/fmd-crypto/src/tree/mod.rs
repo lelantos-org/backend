@@ -17,6 +17,9 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 pub use hash::TAG_MERKLE;
+/// Big-endian is how field elements cross this crate's boundary; these are the
+/// single conversion pair, shared with `note` so the two cannot disagree.
+pub(crate) use hash::{be_to_fq, fq_to_be};
 
 #[derive(Debug, Error)]
 pub enum TreeError {

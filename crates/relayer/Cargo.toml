@@ -33,6 +33,7 @@ async-trait = { workspace = true }
 alloy = { workspace = true }
 url = { workspace = true }
 bigdecimal = { workspace = true }
+bech32 = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { workspace = true }
 moka = { workspace = true }

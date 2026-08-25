@@ -13,12 +13,18 @@ use crate::adapters::parse::{FieldRef, parse_address, parse_field};
 use crate::domain::dto::{OutputAuxDto, PointDto, ProofDto, PubInputsDto, TRANSACT_OUT};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
+use crate::domain::responses::EstimateResponse;
+use crate::domain::units::Scale;
+use crate::services::asset_registry::AssetRegistry;
+use crate::services::fee_quote::FeeQuoter;
 use crate::services::prover::{Priority, TreeUpdateBatchProof, TreeUpdateBatchProver};
+use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use crate::services::witness;
 use alloy::primitives::{Address, FixedBytes, U256};
 use std::sync::Arc;
+use tracing::info;
 
 /// A spend inserts one leaf per transact output.
 pub const SPEND_LEAVES: usize = TRANSACT_OUT;
@@ -221,4 +227,85 @@ pub fn build_tu_pi_for_spend(
         &advanced.new_root,
         &inputs.padded(),
     )
+}
+
+/// Everything both pipelines need in order to quote and to charge.
+///
+/// Spend and swap differ in which contract they target and how they encode
+/// calldata; they do not differ in how a fee is priced or collected. Passing
+/// this one struct is what keeps that true — a new field is added in one place
+/// and reaches both paths, rather than being wired into whichever one the
+/// author had open.
+#[derive(Clone, Copy)]
+pub struct FeeContext<'a> {
+    pub chain_id: i64,
+    pub fee_quoter: &'a FeeQuoter,
+    pub assets: &'a AssetRegistry,
+    /// `None` on a chain that collects no fee, which leaves the relayer paying
+    /// gas out of its own signer.
+    pub shielded_fee: Option<&'a ShieldedFeeChecker>,
+}
+
+impl FeeContext<'_> {
+    /// Quote `gas_used`, then join the result to the asset registry so a client
+    /// gets everything it needs to build a fee note in one call.
+    ///
+    /// `FeeQuoter` prices tokens by ERC-20 address and knows nothing about MASP
+    /// asset ids or scales; the registry knows both and nothing about prices.
+    /// The pipeline layer is where the two meet.
+    pub async fn quote(&self, gas_used: u64) -> AppResult<EstimateResponse> {
+        let mut estimate = self.fee_quoter.quote_for_gas(gas_used).await?;
+        estimate.shielded_fee_address = self.shielded_fee.map(|c| c.address().to_string());
+
+        let registered = self.assets.for_chain(self.chain_id).await?;
+        for quote in &mut estimate.fees {
+            // A fee token with no registered asset is left undecorated rather
+            // than dropped: the amount is still worth showing on a chain where
+            // the indexer has not caught up and no note can yet be built.
+            let Some(row) = parse_address(&quote.token_address)
+                .ok()
+                .and_then(|t| registered.iter().find(|a| a.token_address() == Some(t)))
+            else {
+                continue;
+            };
+            let (Some(scale), Ok(amount)) = (
+                Scale::from_decimal(&row.scale),
+                U256::from_str_radix(&quote.amount, 10),
+            ) else {
+                continue;
+            };
+            quote.asset_id = Some(row.asset_id_u64);
+            quote.scale = Some(row.scale.to_string());
+            quote.circuit_amount = Some(scale.to_circuit_ceil(amount).to_string());
+        }
+        Ok(estimate)
+    }
+
+    /// Enforce the shielded fee, where this chain collects one.
+    ///
+    /// Belongs after the proof check, so the public inputs a fee is bound to
+    /// are known good, and before the tree-mirror lock, so a caller who
+    /// underpays does not park every other submission on the chain behind their
+    /// mistake.
+    pub async fn charge(
+        &self,
+        pi: &PubInputsDto,
+        aux: &[OutputAuxDto; TRANSACT_OUT],
+        gas_used: u64,
+    ) -> AppResult<()> {
+        let Some(checker) = self.shielded_fee else {
+            return Ok(());
+        };
+        let paid = checker.require(pi, aux, gas_used).await?;
+        // The asset and the amount, and nothing tying them to this payer: the
+        // output index would say which slot of which submission the note sits
+        // in, and that link is what the shielded fee exists to avoid.
+        info!(
+            chain_id = self.chain_id,
+            asset_id = paid.asset_id,
+            base_amount = %paid.base_amount,
+            "shielded fee accepted"
+        );
+        Ok(())
+    }
 }

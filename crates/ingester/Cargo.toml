@@ -9,7 +9,7 @@ name = "ingester"
 path = "src/main.rs"
 
 [dependencies]
-shared = { path = "../shared" }
+shared = { path = "../shared", features = ["metrics-exporter"] }
 database = { path = "../database" }
 chain-types = { path = "../chain-types" }
 tokio = { workspace = true }
@@ -31,6 +31,7 @@ url = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 rand = { workspace = true }
+metrics = { workspace = true }
 
 [dev-dependencies]
 testcontainers = { workspace = true }

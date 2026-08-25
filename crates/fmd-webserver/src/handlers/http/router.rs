@@ -17,9 +17,13 @@ pub fn build(state: AppState) -> Router {
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/health", get(handlers::health).layer(cc("no-store")))
+        // The gate in front of every expensive sync read. `no-store` because a
+        // cached watermark is a stale one, and staleness here is precisely the
+        // latency this endpoint exists to remove.
+        .route("/v1/head", get(handlers::get_head).layer(cc("no-store")))
         .route(
             "/v1/notes",
-            get(handlers::list_notes).layer(cc("public, max-age=3")),
+            get(handlers::list_notes).layer(cc("public, max-age=1")),
         )
         // Per-caller data keyed on a capability token: never cacheable by a
         // shared proxy, and not worth caching in the browser either.

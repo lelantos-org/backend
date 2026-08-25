@@ -82,6 +82,42 @@ pub struct ChainCfg {
     /// Accepted fee tokens for `/v1/spend/estimate` and `/v1/swap/estimate`.
     #[serde(default)]
     pub accepted_fee_tokens: Vec<FeeTokenCfg>,
+    /// bech32m shielded payment address the relayer is paid at. Setting it
+    /// turns on shielded fee collection for this chain: `/chains` publishes the
+    /// terms, and every spend and swap must then carry an output note to this
+    /// address covering the quote. Absent means the relayer keeps subsidising
+    /// gas, which is the behaviour that predates this.
+    #[serde(default)]
+    pub shielded_fee_address: Option<String>,
+    /// Incoming viewing key for [`Self::shielded_fee_address`], 0x-hex or
+    /// decimal, big-endian.
+    ///
+    /// Decrypt-only: it recognises payments and reads their value, and confers
+    /// no authority to spend them. The spending key can therefore stay off
+    /// this host entirely — which is the point, since this one has to be
+    /// readable by a process exposed to the internet. Normally supplied as
+    /// `RELAYER_CHAIN_<id>_SHIELDED_FEE_IVK` rather than written into the TOML.
+    #[serde(default)]
+    pub shielded_fee_ivk: Option<String>,
+    /// How far below the relayer's own submit-time quote a fee may fall before
+    /// it is refused. bps: 300 = 3%.
+    ///
+    /// A quote is not signed and not stored, so the relayer re-derives the
+    /// requirement when the spend arrives. Between the client's estimate and
+    /// that moment the gas price and the oracle rate both move, and a payer who
+    /// quoted honestly should not lose a proof to a tick of drift. Too wide a
+    /// band is a discount anyone can take by waiting, so this is a tolerance,
+    /// not a margin.
+    #[serde(default = "default_shielded_fee_grace_bps")]
+    pub shielded_fee_grace_bps: u32,
+    /// MASP asset ids accepted as shielded fees. Empty means every asset in
+    /// `accepted_fee_tokens` is accepted.
+    ///
+    /// The wallet builds one spend in one asset, so a payer can only ever pay
+    /// the fee in the asset they are already moving; an asset left out of this
+    /// list is one the relayer will not move at all.
+    #[serde(default)]
+    pub shielded_fee_assets: Vec<u64>,
     /// Wallet-facing description, served verbatim by `/chains`.
     #[serde(default)]
     pub public: ChainPublicCfg,
@@ -117,6 +153,40 @@ pub struct ChainPublicCfg {
     /// Block-explorer base, for transaction links.
     #[serde(default)]
     pub explorer_url: Option<String>,
+}
+
+/// The `shielded_fee_*` keys, grouped once they are known to be coherent.
+///
+/// They live flat on [`ChainCfg`] so the `RELAYER_CHAIN_<id>_<FIELD>` overlay
+/// can reach the viewing key — a nested table would force the one secret among
+/// them into the committed TOML. Callers get them as one thing anyway, because
+/// four loose fields that are only meaningful together are four chances to use
+/// one without the others.
+#[derive(Debug, Clone, Copy)]
+pub struct ShieldedFeeSettings<'a> {
+    pub address: &'a str,
+    pub ivk: &'a str,
+    pub grace_bps: u32,
+    /// Empty means every token in `accepted_fee_tokens`.
+    pub assets: &'a [u64],
+}
+
+impl ChainCfg {
+    /// This chain's shielded fee settings, or `None` where it charges nothing.
+    ///
+    /// `Some` implies both an address and a key: [`RelayerConfig::validate`]
+    /// refuses one without the other, so the half-configured case cannot reach
+    /// here.
+    pub fn shielded_fee(&self) -> Option<ShieldedFeeSettings<'_>> {
+        let address = self.shielded_fee_address.as_deref()?;
+        let ivk = self.shielded_fee_ivk.as_deref()?;
+        Some(ShieldedFeeSettings {
+            address,
+            ivk,
+            grace_bps: self.shielded_fee_grace_bps,
+            assets: &self.shielded_fee_assets,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -275,10 +345,16 @@ fn default_token_price_timeout_ms() -> u64 {
     5_000
 }
 
+fn default_shielded_fee_grace_bps() -> u32 {
+    300
+}
+
 /// `10u128.pow(n)` is the widest exponent that fits.
 const MAX_DECIMALS: u8 = 38;
 /// 100x. Anything above this is a typo, and `10_000 + bps` must not overflow.
 const MAX_MARKUP_BPS: u32 = 1_000_000;
+/// One whole in basis points.
+pub const BPS_DENOMINATOR: u32 = 10_000;
 
 /// Everything wrong with a config, rendered as one message.
 #[derive(Debug)]
@@ -332,6 +408,26 @@ impl ChainCfg {
             self.flush_interval_s > 0,
             "flush_interval_s must be > 0".to_string(),
         );
+        check(
+            self.shielded_fee_grace_bps < BPS_DENOMINATOR,
+            format!(
+                "shielded_fee_grace_bps {} must be below {BPS_DENOMINATOR}; at or above it every \
+                 fee, including none at all, clears the check",
+                self.shielded_fee_grace_bps
+            ),
+        );
+        // An address without the key is a relayer that would reject every
+        // spend, and a key without an address is one that would collect
+        // nothing. Both are silent at runtime, so they are fatal here.
+        check(
+            self.shielded_fee_address.is_some() == self.shielded_fee_ivk.is_some(),
+            "shielded_fee_address and shielded_fee_ivk must be set together".to_string(),
+        );
+        check(
+            self.shielded_fee_address.is_some() || self.shielded_fee_assets.is_empty(),
+            "shielded_fee_assets is set but shielded_fee_address is not, so no fee is collected"
+                .to_string(),
+        );
         out
     }
 }
@@ -341,6 +437,7 @@ impl RelayerConfig {
     ///   RELAYER_CHAIN_<id>_POOL_ADDRESS=0x…
     ///   RELAYER_CHAIN_<id>_RPC_URL=http://…
     ///   RELAYER_CHAIN_<id>_SIGNER_KEY=0x…
+    ///   RELAYER_CHAIN_<id>_SHIELDED_FEE_IVK=0x…
     /// Boot-time sanity checks on values the code later assumes are sane.
     ///
     /// Each of these is otherwise a runtime failure far from its cause: a
@@ -402,6 +499,17 @@ impl RelayerConfig {
             {
                 c.fee_markup_bps = n;
             }
+            if let Some(v) =
+                shared::config_env::lookup("RELAYER", c.chain_id, "SHIELDED_FEE_ADDRESS")
+            {
+                c.shielded_fee_address = Some(v);
+            }
+            // The one secret among these. Kept flat on `ChainCfg` precisely so
+            // this overlay reaches it: a nested table would force the key into
+            // the TOML, which is the file that gets committed.
+            if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "SHIELDED_FEE_IVK") {
+                c.shielded_fee_ivk = Some(v);
+            }
         }
     }
 }
@@ -428,8 +536,53 @@ mod tests {
             fee_markup_bps: default_fee_markup_bps(),
             swap_default_deadline_s: default_swap_deadline_s(),
             accepted_fee_tokens: vec![],
+            shielded_fee_address: None,
+            shielded_fee_ivk: None,
+            shielded_fee_grace_bps: default_shielded_fee_grace_bps(),
+            shielded_fee_assets: vec![],
             public: ChainPublicCfg::default(),
         }
+    }
+
+    #[test]
+    fn a_shielded_fee_address_without_its_viewing_key_is_refused() {
+        let mut c = chain(1);
+        c.shielded_fee_address = Some("lelantos1abc".into());
+        let err = cfg(vec![c]).validate().expect_err("half a config");
+        assert!(err.to_string().contains("must be set together"), "{err}");
+    }
+
+    #[test]
+    fn a_viewing_key_without_an_address_is_refused() {
+        let mut c = chain(1);
+        c.shielded_fee_ivk = Some("0x01".into());
+        assert!(cfg(vec![c]).validate().is_err());
+    }
+
+    /// A 100% grace band clears any fee at all, including none, which is the
+    /// one setting that looks like enforcement and is not.
+    #[test]
+    fn a_grace_band_of_a_whole_is_refused() {
+        let mut c = chain(1);
+        c.shielded_fee_grace_bps = BPS_DENOMINATOR;
+        let err = cfg(vec![c]).validate().expect_err("grace of 100%");
+        assert!(err.to_string().contains("shielded_fee_grace_bps"), "{err}");
+    }
+
+    #[test]
+    fn accepted_assets_without_an_address_collect_nothing_and_are_refused() {
+        let mut c = chain(1);
+        c.shielded_fee_assets = vec![1];
+        assert!(cfg(vec![c]).validate().is_err());
+    }
+
+    #[test]
+    fn a_complete_shielded_fee_block_validates() {
+        let mut c = chain(1);
+        c.shielded_fee_address = Some("lelantos1abc".into());
+        c.shielded_fee_ivk = Some("0x01".into());
+        c.shielded_fee_assets = vec![1, 3];
+        assert!(cfg(vec![c]).validate().is_ok());
     }
 
     fn cfg(chains: Vec<ChainCfg>) -> RelayerConfig {

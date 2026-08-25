@@ -24,3 +24,18 @@ pub async fn list_chunk(
         .await
         .map_err(|e| AppError::Db(e.to_string()))
 }
+
+/// Highest `spent_nullifiers.seq` for `chain_id`, or 0 when the chain has none.
+///
+/// `seq` is dense and only ever grows at the tail, so this doubles as the
+/// chunk feed's high-water mark.
+pub async fn max_seq(pool: &DbPool, chain_id: i64) -> AppResult<i64> {
+    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let max: Option<i64> = spent_nullifiers::table
+        .filter(spent_nullifiers::chain_id.eq(chain_id))
+        .select(diesel::dsl::max(spent_nullifiers::seq))
+        .first(&mut conn)
+        .await
+        .map_err(|e| AppError::Db(e.to_string()))?;
+    Ok(max.unwrap_or(0))
+}

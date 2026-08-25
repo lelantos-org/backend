@@ -42,6 +42,24 @@ pub mod name {
     pub const NOTES_LEAF_INDEX_MAX: &str = "notes_leaf_index_max";
     pub const SPENT_NULLIFIERS_SEQ_MAX: &str = "spent_nullifiers_seq_max";
     pub const CHAIN_LEADER: &str = "chain_leader";
+    pub const NOTES_MAX_ID: &str = "notes_max_id";
+    pub const CONSUMER_CURSOR_NOTE_ID: &str = "consumer_cursor_note_id";
+
+    // Cross-service. Emitted by every stage that commits derived state, so the
+    // `stage` label is what makes one pipeline's latency readable end to end.
+    pub const EVENT_AGE: &str = "event_age_seconds";
+}
+
+/// Pipeline stages that report [`name::EVENT_AGE`].
+///
+/// Named rather than written inline at each call site: the `stage` label set
+/// has to stay closed, and a typo in a bare literal mints a second time series
+/// that no dashboard is watching instead of failing.
+pub mod stage {
+    /// Chain -> `raw_events`, recorded by the ingester's live tail.
+    pub const INGEST: &str = "ingest";
+    /// `raw_events` -> `notes`, recorded by fmd-indexer's consume loop.
+    pub const CONSUME: &str = "consume";
 }
 
 /// Label value for a request that matched no route.
@@ -193,6 +211,43 @@ fn describe() {
         Unit::Count,
         "1 when this replica holds the chain's advisory lock, else 0"
     );
+    describe_gauge!(
+        name::NOTES_MAX_ID,
+        Unit::Count,
+        "highest notes id written; minus the cursor, this is the filter's lag"
+    );
+    describe_gauge!(
+        name::CONSUMER_CURSOR_NOTE_ID,
+        Unit::Count,
+        "last notes id the filter scanned through"
+    );
+
+    describe_histogram!(
+        name::EVENT_AGE,
+        Unit::Seconds,
+        "wall-clock age of the freshest event a stage just committed, from its \
+         block timestamp; the end-to-end latency signal"
+    );
+}
+
+/// Record how old the freshest event in a just-committed batch is.
+///
+/// Called once per commit rather than once per row: the newest event is what
+/// bounds how stale a reader can be, and a per-row sample would let one wide
+/// backfill batch dominate the histogram.
+///
+/// `block_ts` is the chain's own second-resolution timestamp, so a host clock
+/// running behind the node yields a negative age. Clamped at zero rather than
+/// skipped — a skewed host should read as "instant", not disappear from the
+/// histogram that exists to make it visible.
+pub fn record_event_age(stage: &'static str, chain_id: i64, block_ts: i64) {
+    let age = chrono::Utc::now().timestamp() - block_ts;
+    ::metrics::histogram!(
+        name::EVENT_AGE,
+        "stage" => stage,
+        "chain_id" => chain_id.to_string(),
+    )
+    .record(age.max(0) as f64);
 }
 
 /// HTTP middleware recording [`name::HTTP_REQUESTS`] and [`name::HTTP_DURATION`].

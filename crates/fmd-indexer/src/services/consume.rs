@@ -16,6 +16,7 @@ use alloy::sol_types::SolEvent;
 use async_trait::async_trait;
 use chain_types::abi::DepositEscrowed;
 use shared::entities::EventKind;
+use shared::metrics::{record_event_age, stage};
 use shared::tick::TickProgress;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,6 +61,10 @@ enum Planned {
         /// The window came back full, so more rows are queued behind this
         /// commit. Drives [`TickProgress::Saturated`].
         window_full: bool,
+        /// `block_ts` of the newest row this plan commits, for the event-age
+        /// histogram. Carried here rather than added to [`CommitPlan`] so the
+        /// pure planning domain stays about commits, not instrumentation.
+        last_block_ts: Option<i64>,
     },
 }
 
@@ -115,9 +120,11 @@ impl ConsumeServiceImpl {
             let escrowed = self.resolve_escrowed(chain_id, &rows).await?;
             let saturated = rows.len() as i64 == limit;
             if let Some(plan) = plan_commit(&rows, chain_id, after, &escrowed)? {
+                let last_block_ts = Self::committed_block_ts(&rows, &plan);
                 return Ok(Planned::Ready {
                     plan,
                     window_full: saturated,
+                    last_block_ts,
                 });
             }
 
@@ -130,6 +137,21 @@ impl ConsumeServiceImpl {
                 limit, "window saturated by an incomplete tx; widening and retrying"
             );
         }
+    }
+
+    /// `block_ts` of the newest row `plan` actually commits.
+    ///
+    /// The plan stops at a tx boundary inside the window, so this is the row it
+    /// ends on rather than the newest row read.
+    ///
+    /// `None` means `plan.last_event_id` was absent from the window it was
+    /// built from, which would be a bug. Reported by omitting the sample: a
+    /// `0` here is a 1970 timestamp, which the histogram would record as a
+    /// ~56-year event age and quietly ruin every percentile drawn from it.
+    fn committed_block_ts(rows: &[RawEventRow], plan: &CommitPlan) -> Option<i64> {
+        rows.iter()
+            .find(|r| r.id == plan.last_event_id)
+            .map(|r| r.block_ts)
     }
 
     /// Look up the `DepositEscrowed` payloads the window's `DepositFlushed`
@@ -195,6 +217,12 @@ impl ConsumeServiceImpl {
                 "chain_id" => chain_id.to_string(),
             )
             .set(max_leaf as f64);
+        }
+
+        // The rows are committed at this point, so a failed wake must not fail
+        // the batch: the filter's own cursor finds them on its next poll.
+        if let Err(e) = self.notes.notify_appended(chain_id).await {
+            warn!(chain_id, "notify failed after a successful commit: {}", e);
         }
 
         let (notes, spent_nfs) = (plan.notes.len(), plan.spent_nfs.len());
@@ -301,9 +329,16 @@ impl ConsumeService for ConsumeServiceImpl {
                 self.stalls.record_idle(chain_id, after, rows).await;
                 Ok(TickProgress::Idle)
             }
-            Planned::Ready { plan, window_full } => {
+            Planned::Ready {
+                plan,
+                window_full,
+                last_block_ts,
+            } => {
                 self.commit(chain_id, plan).await?;
                 self.stalls.clear(chain_id).await;
+                if let Some(block_ts) = last_block_ts {
+                    record_event_age(stage::CONSUME, chain_id, block_ts);
+                }
                 Ok(TickProgress::advanced(window_full))
             }
         }

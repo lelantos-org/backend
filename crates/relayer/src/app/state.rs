@@ -1,9 +1,11 @@
 use crate::adapters::calldata::MAX_L_BATCH;
+use crate::adapters::parse::{FieldRef, parse_field};
 use crate::adapters::rpc::RpcEndpoint;
 use crate::app::config::{ChainCfg, ChainPublicCfg, RelayerConfig};
 use crate::domain::error::AppError;
 use crate::domain::error::AppResult;
 use crate::domain::responses::{ChainConfigOut, PriceOut};
+use crate::services::asset_registry::AssetRegistry;
 use crate::services::deposit_mempool::DepositMempool;
 use crate::services::escrow::EscrowReader;
 use crate::services::events::EventBroadcaster;
@@ -16,11 +18,13 @@ use crate::services::oracle::{CoinbaseOracle, PriceOracle};
 use crate::services::pipeline::deposit_failures::DepositFailures;
 use crate::services::pipeline::{FlushPipeline, NativeRoute, SpendPipeline, SwapPipeline};
 use crate::services::prover::TreeUpdateBatchProver;
+use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::submitter::Submitter;
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{self, TreeMirror};
 use alloy::primitives::Address;
 use database::DbPool;
+use fmd_crypto::tree::Field;
 use moka::future::Cache;
 use prices::{PriceCache, PriceClient};
 use std::collections::HashMap;
@@ -65,6 +69,9 @@ pub struct AppState {
     /// `PoolCfg::relayer()` — four connections. Without this, one poll from
     /// every open wallet tab lands on those four.
     pub prices_response: Cache<(), Arc<Vec<PriceOut>>>,
+    /// The `assets` table, cached. Shared by `/chains` and the shielded-fee
+    /// check so the two do not each read it per request.
+    pub assets: Arc<AssetRegistry>,
 }
 
 /// The half of `ChainCfg` that is safe to publish.
@@ -138,6 +145,7 @@ pub async fn build_state(
     prover: Arc<dyn TreeUpdateBatchProver>,
 ) -> AppResult<AppState> {
     let shared = Shared::new(cfg, pool.clone(), prover)?;
+    let assets = shared.assets.clone();
 
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
@@ -175,6 +183,7 @@ pub async fn build_state(
             Duration::from_secs(cfg.token_prices.ttl_s.max(1)),
         ),
         prices_response: shared::cache::build(1, PRICES_RESPONSE_TTL),
+        assets,
     })
 }
 
@@ -193,6 +202,7 @@ const PRICES_RESPONSE_TTL: Duration = Duration::from_secs(30);
 /// code below reads as "what this chain adds", not as a list of clones.
 struct Shared {
     pool: DbPool,
+    assets: Arc<AssetRegistry>,
     prover: Arc<dyn TreeUpdateBatchProver>,
     oracle: Arc<dyn PriceOracle>,
     events: Arc<EventBroadcaster>,
@@ -211,6 +221,7 @@ impl Shared {
                 .map_err(|e| AppError::Internal(format!("price oracle: {e}")))?,
         );
         Ok(Self {
+            assets: Arc::new(AssetRegistry::new(pool.clone())),
             pool,
             prover,
             oracle,
@@ -255,6 +266,7 @@ async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
     let submitter = submitter_for(c, &rpc, &c.pool_address, "submitter")?;
     let fee_quoter = Arc::new(build_fee_quoter(c, shared, &rpc).await?);
     let gas_witness = Arc::new(GasWitness::new());
+    let shielded_fee = build_shielded_fee_checker(c, shared, &fee_quoter)?;
 
     let spend = Arc::new(SpendPipeline {
         chain_id: c.chain_id,
@@ -266,9 +278,19 @@ async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
         gas_witness: gas_witness.clone(),
         native: build_native_route(c, &rpc)?,
         transact_verifier: shared.transact_verifier.clone(),
+        shielded_fee: shielded_fee.clone(),
+        assets: shared.assets.clone(),
     });
 
-    let swap = build_swap_pipeline(c, shared, &rpc, &mirror, &fee_quoter, &gas_witness)?;
+    let swap = build_swap_pipeline(
+        c,
+        shared,
+        &rpc,
+        &mirror,
+        &fee_quoter,
+        &gas_witness,
+        shielded_fee.clone(),
+    )?;
 
     let flush = Arc::new(FlushPipeline {
         chain_id: c.chain_id,
@@ -292,6 +314,7 @@ async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
         flush_max_attempts = c.flush_max_attempts,
         swap = swap.is_some(),
         native = spend.native.is_some(),
+        shielded_fee = shielded_fee.is_some(),
         "relayer pipelines ready"
     );
     Ok(ChainRuntime { spend, swap, flush })
@@ -353,6 +376,7 @@ fn build_swap_pipeline(
     mirror: &Arc<Mutex<TreeMirror>>,
     fee_quoter: &Arc<FeeQuoter>,
     gas_witness: &Arc<GasWitness>,
+    shielded_fee: Option<Arc<ShieldedFeeChecker>>,
 ) -> AppResult<Option<Arc<SwapPipeline>>> {
     let Some(hex) = &c.swap_wrapper_address else {
         return Ok(None);
@@ -368,9 +392,75 @@ fn build_swap_pipeline(
         gas_witness: gas_witness.clone(),
         default_deadline_s: c.swap_default_deadline_s,
         transact_verifier: shared.transact_verifier.clone(),
+        shielded_fee,
+        assets: shared.assets.clone(),
     };
     info!(chain_id = c.chain_id, wrapper = %wrapper_address, "swap pipeline ready");
     Ok(Some(Arc::new(pipeline)))
+}
+
+/// Optional shielded fee collection.
+///
+/// Refuses to boot on any combination that would look configured and behave
+/// otherwise: a key that does not match its address (checked inside
+/// [`ShieldedFeeChecker::new`]), a fee table that can price nothing, or a
+/// missing transact verification key.
+fn build_shielded_fee_checker(
+    c: &ChainCfg,
+    shared: &Shared,
+    fee_quoter: &Arc<FeeQuoter>,
+) -> AppResult<Option<Arc<ShieldedFeeChecker>>> {
+    let Some(settings) = c.shielded_fee() else {
+        return Ok(None);
+    };
+    let fail = |why: &str| boot_err(c.chain_id, "shielded fee", why);
+
+    // Without a transact verification key, `out_cm` and `nullifier[0]` reach
+    // the fee check unverified — and those are exactly what binds a decrypted
+    // value to the proof. The fee would then rest on a caller's say-so. Rather
+    // than enforce something that does not hold, refuse to start.
+    if shared.transact_verifier.is_none() {
+        return Err(fail(
+            "shielded fees require prover.transact_vkey_path: without it a wallet's proof is \
+             not checked before submission, so the public inputs a fee is bound to are \
+             unverified",
+        ));
+    }
+    // An asset with no price cannot be quoted, so a fee in it would be refused
+    // at submit time and read to the payer as the relayer being broken. Whether
+    // each *individual* asset is priced cannot be settled here — the asset id to
+    // token-address mapping lives in a table the indexer may not have filled
+    // yet — but an empty fee table settles all of them at once.
+    if c.accepted_fee_tokens.is_empty() {
+        return Err(fail(
+            "no accepted_fee_tokens are configured, so no fee can be priced and every spend \
+             would be refused",
+        ));
+    }
+
+    let ivk = parse_configured_field(c.chain_id, "shielded_fee_ivk", settings.ivk)?;
+    let checker = ShieldedFeeChecker::new(
+        c.chain_id,
+        settings,
+        ivk,
+        fee_quoter.clone(),
+        shared.assets.clone(),
+    )?;
+
+    info!(
+        chain_id = c.chain_id,
+        grace_bps = settings.grace_bps,
+        assets = settings.assets.len(),
+        "shielded fee collection enabled"
+    );
+    Ok(Some(Arc::new(checker)))
+}
+
+/// A 32-byte field element from config, in this crate's big-endian convention.
+fn parse_configured_field(chain_id: i64, field: &'static str, value: &str) -> AppResult<Field> {
+    parse_field(value, FieldRef::Named(field))
+        .map(|b| b.0)
+        .map_err(|e| boot_err(chain_id, field, e))
 }
 
 async fn build_fee_quoter(

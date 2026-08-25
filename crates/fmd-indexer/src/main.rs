@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use database::listen::{
+    self, CHANNEL_NOTES_APPENDED, CHANNEL_RAW_EVENTS_APPENDED, CHANNEL_RAW_EVENTS_REORG,
+};
 use fmd_indexer::adapters;
 use fmd_indexer::adapters::locks::ChainLocks;
 use fmd_indexer::app::{self, FmdIndexerConfig};
@@ -12,6 +15,13 @@ use fmd_indexer::repositories::subscriptions::PostgresSubscriptionsRepo;
 use fmd_indexer::services::{ConsumeServiceImpl, FilterServiceImpl};
 use std::sync::Arc;
 use tracing::info;
+
+/// What the consume loop waits on: rows appended by the ingester, and the
+/// retractions it cannot discover from its own forward-only cursor.
+const CONSUME_CHANNELS: &[&str] = &[CHANNEL_RAW_EVENTS_APPENDED, CHANNEL_RAW_EVENTS_REORG];
+
+/// What the filter loop waits on: notes the consume loop has just committed.
+const FILTER_CHANNELS: &[&str] = &[CHANNEL_NOTES_APPENDED];
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -68,17 +78,25 @@ async fn main() -> Result<()> {
 
     let (trigger, shutdown) = app::shutdown::channel();
 
+    // Wake sources, not schedules: each loop still polls on its own ceiling, so
+    // a listener that never connects costs only the latency it was meant to
+    // remove. Consume follows the ingester; filter follows consume.
+    let consume_wake = listen::spawn(&cfg.database_url, CONSUME_CHANNELS);
+    let filter_wake = listen::spawn(&cfg.database_url, FILTER_CHANNELS);
+
     let consume_handle = tokio::spawn(worker::consume::run(
         consume,
         cfg.consume_tick_ms(),
         cfg.consume_batch() as i64,
         shutdown.clone(),
+        Some(consume_wake),
     ));
     let filter_handle = tokio::spawn(worker::filter::run(
         filter,
         cfg.filter_tick_ms,
         cfg.filter_batch as i64,
         shutdown.clone(),
+        Some(filter_wake),
     ));
 
     app::shutdown::watch_signals(trigger).await;

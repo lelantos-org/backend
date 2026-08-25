@@ -66,8 +66,12 @@ impl AppCache {
     pub fn new() -> Self {
         Self {
             tree: build(64, Duration::from_secs(24 * 3_600)),
-            notes_pages: build(2_048, Duration::from_secs(3)),
-            matches_pages: build(2_048, Duration::from_secs(3)),
+            // 1s, not 3: `/v1/head` lets clients poll for movement at ~5s, so
+            // a 3s page TTL was a large share of the remaining budget. These
+            // are per-caller keyed pages with modest hit rates, so the shorter
+            // window costs little.
+            notes_pages: build(2_048, Duration::from_secs(1)),
+            matches_pages: build(2_048, Duration::from_secs(1)),
             chunks: build(64, Duration::from_secs(3_600)),
             nullifier_chunks: build(64, Duration::from_secs(3_600)),
             note_count: build(1, Duration::from_secs(30)),

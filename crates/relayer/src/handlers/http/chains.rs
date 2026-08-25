@@ -1,7 +1,6 @@
 use crate::app::AppState;
 use crate::domain::error::AppResult;
 use crate::domain::responses::{ChainConfigOut, ChainHealth, ChainsResponse, TokenOut};
-use crate::repositories::assets;
 use crate::services::tree::field_to_hex;
 use axum::Json;
 use axum::extract::State;
@@ -20,11 +19,10 @@ use axum::extract::State;
 pub async fn chains(State(st): State<AppState>) -> AppResult<Json<ChainsResponse>> {
     let mut chains = Vec::with_capacity(st.spend_pipelines.len());
     for (chain_id, pipeline) in st.spend_pipelines.iter() {
-        let tokens: Vec<TokenOut> = assets::list_for_chain(&st.pool, *chain_id)
-            .await?
-            .into_iter()
-            .map(TokenOut::from)
-            .collect();
+        // Through the shared registry rather than the pool: this route is what
+        // every wallet boots from, and the relayer holds four connections.
+        let assets = st.assets.for_chain(*chain_id).await?;
+        let tokens: Vec<TokenOut> = assets.iter().map(TokenOut::from).collect();
 
         // Read the published snapshot rather than the mirror itself. The
         // mirror mutex is held from reserve through prove and confirmation, so
@@ -44,6 +42,7 @@ pub async fn chains(State(st): State<AppState>) -> AppResult<Json<ChainsResponse
                 .map(ChainConfigOut::from)
                 .unwrap_or_default(),
             tokens,
+            shielded_fee: pipeline.shielded_fee.as_ref().map(|f| f.terms(&assets)),
         });
     }
     chains.sort_by_key(|c| c.chain_id);

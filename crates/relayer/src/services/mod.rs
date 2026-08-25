@@ -1,3 +1,4 @@
+pub mod asset_registry;
 pub mod deposit_mempool;
 pub mod escrow;
 pub mod events;
@@ -9,6 +10,7 @@ pub mod nullifier_guard;
 pub mod oracle;
 pub mod pipeline;
 pub mod prover;
+pub mod shielded_fee;
 pub mod submitter;
 pub mod transact_verifier;
 pub mod tree;

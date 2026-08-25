@@ -35,6 +35,22 @@ pub async fn count_all(pool: &DbPool) -> AppResult<i64> {
         .map_err(|e| AppError::Db(e.to_string()))
 }
 
+/// Highest `notes.id` for `chain_id`, or 0 when the chain has none.
+///
+/// Indexed `MAX()` on the primary key, so this is a cheap index scan rather
+/// than the full scan `count_all` above pays for. That is what makes it safe
+/// to poll far more often than the pages it gates.
+pub async fn max_id(pool: &DbPool, chain_id: i64) -> AppResult<i64> {
+    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let max: Option<i64> = notes::table
+        .filter(notes::chain_id.eq(chain_id))
+        .select(diesel::dsl::max(notes::id))
+        .first(&mut conn)
+        .await
+        .map_err(|e| AppError::Db(e.to_string()))?;
+    Ok(max.unwrap_or(0))
+}
+
 #[derive(Debug, Clone)]
 pub struct LeafInputsRow {
     pub leaf_index: i64,

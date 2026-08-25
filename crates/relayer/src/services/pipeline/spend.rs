@@ -4,13 +4,15 @@ use crate::adapters::parse::parse_address;
 use crate::domain::dto::{SpendKind, SubmitSpendPayload};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::EstimateResponse;
+use crate::services::asset_registry::AssetRegistry;
 use crate::services::fee_quote::FeeQuoter;
 use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend, check_known_root,
-    parse_spend_inputs, prove_spend, verify_transact_proof,
+    FeeContext, SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend,
+    check_known_root, parse_spend_inputs, prove_spend, verify_transact_proof,
 };
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
+use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::submitter::{SubmissionReceipt, Submitter};
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, MirrorSnapshot, ReservedSlot, TreeMirror};
@@ -46,6 +48,13 @@ pub struct SpendPipeline {
     /// lock are spent on it. `None` when the deployment shipped no transact
     /// verification key — see `ProverCfg::transact_vkey_path`.
     pub transact_verifier: Option<Arc<TransactVerifier>>,
+    /// Requires each submission to carry a shielded fee note. `None` on a
+    /// chain the operator has not configured one for, which leaves the relayer
+    /// paying gas out of its own signer.
+    pub shielded_fee: Option<Arc<ShieldedFeeChecker>>,
+    /// Resolves a fee token's ERC-20 address to its MASP asset id and scale,
+    /// so an estimate can tell a client what note value to build.
+    pub assets: Arc<AssetRegistry>,
 }
 
 impl SpendPipeline {
@@ -68,6 +77,14 @@ impl SpendPipeline {
         let inputs = parse_spend_inputs(&payload.pub_inputs)?;
         let entry = EntryPoint::from(payload.kind);
         let submitter = self.submitter_for(payload.kind)?;
+
+        self.fees()
+            .charge(
+                &payload.pub_inputs,
+                &payload.aux,
+                self.gas_witness.gas_for(entry),
+            )
+            .await?;
 
         // Hold the mirror lock through reserve→prove→submit so concurrent
         // pipelines on this chain serialise cleanly.
@@ -111,9 +128,18 @@ impl SpendPipeline {
     /// `eth_estimateGas` path, an estimate does not tell a wallet whether its
     /// spend would revert on chain.
     pub async fn estimate(&self, kind: SpendKind) -> AppResult<EstimateResponse> {
-        self.fee_quoter
-            .quote_for_gas(self.gas_witness.gas_for(EntryPoint::from(kind)))
+        self.fees()
+            .quote(self.gas_witness.gas_for(EntryPoint::from(kind)))
             .await
+    }
+
+    fn fees(&self) -> FeeContext<'_> {
+        FeeContext {
+            chain_id: self.chain_id,
+            fee_quoter: &self.fee_quoter,
+            assets: &self.assets,
+            shielded_fee: self.shielded_fee.as_deref(),
+        }
     }
 
     fn validate(&self, payload: &SubmitSpendPayload) -> AppResult<()> {

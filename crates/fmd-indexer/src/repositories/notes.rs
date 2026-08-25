@@ -2,6 +2,7 @@ use crate::domain::error::{Result, log_unique_violation};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use database::DbPool;
+use database::listen::{self, CHANNEL_NOTES_APPENDED};
 use database::schema::notes;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -56,6 +57,13 @@ pub trait NotesRepo: Send + Sync {
 
     /// Highest ingested `notes.id` across all chains, or 0 when empty.
     async fn max_id(&self) -> Result<i64>;
+
+    /// Wake the filter loop after a commit.
+    ///
+    /// Best-effort by contract: the filter's cursor finds these rows on its
+    /// next poll regardless, so a failed notify is a latency cost and never a
+    /// correctness one.
+    async fn notify_appended(&self, chain_id: i64) -> Result<()>;
 }
 
 /// Rows per INSERT. Postgres caps a statement at 65535 bind parameters and
@@ -137,5 +145,11 @@ impl NotesRepo for PostgresNotesRepo {
             .first(&mut conn)
             .await?;
         Ok(max.unwrap_or(0))
+    }
+
+    async fn notify_appended(&self, chain_id: i64) -> Result<()> {
+        let mut conn = super::conn(&self.pool).await?;
+        listen::notify(&mut conn, CHANNEL_NOTES_APPENDED, &chain_id.to_string()).await?;
+        Ok(())
     }
 }

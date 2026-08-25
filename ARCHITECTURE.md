@@ -8,7 +8,8 @@ Libraries
                     tracing init; plus `AppError` + cache builder behind the
                     `webserver` feature
   chain-types       ABI types + decode (no DB, no IO)
-  fmd-crypto        FMD primitives (poseidon, baby-jubjub, filter, tree)
+  fmd-crypto        FMD primitives (poseidon, baby-jubjub, filter, tree) plus
+                    note recognition (trial decrypt + commitment rebuild)
   database          diesel schema, migrations, bb8 pool, CursorRepo,
                     advisory locks, reorg retraction
 
@@ -19,7 +20,8 @@ Binaries
   fmd-webserver      FMD HTTP API (notes, matches, subscriptions, tree feeds)
   explorer-webserver explorer HTTP API (assets, flows, tree-advances, txs)
   risk-webserver     read-only address screening API
-  relayer            tree-advance prover + submitter (the only on-chain writer)
+  relayer            tree-advance prover + submitter (the only on-chain writer);
+                     optionally collects a shielded fee per submission
   metaquoter         DB-less swap quote aggregator
 
 Tests

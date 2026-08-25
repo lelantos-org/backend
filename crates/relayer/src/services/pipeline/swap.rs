@@ -6,13 +6,15 @@ use crate::adapters::parse::{FieldRef, parse_address, parse_field, parse_hex_byt
 use crate::domain::dto::SubmitSwapPayload;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::EstimateResponse;
+use crate::services::asset_registry::AssetRegistry;
 use crate::services::fee_quote::FeeQuoter;
 use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend, check_known_root,
-    parse_spend_inputs, prove_spend, verify_transact_proof,
+    FeeContext, SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend,
+    check_known_root, parse_spend_inputs, prove_spend, verify_transact_proof,
 };
 use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
+use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::submitter::{SubmissionReceipt, Submitter};
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
@@ -49,6 +51,11 @@ pub struct SwapPipeline {
     /// See `SpendPipeline::transact_verifier`. Leg 1 of a swap is the same
     /// transact proof, so it gets the same pre-check.
     pub transact_verifier: Option<Arc<TransactVerifier>>,
+    /// See `SpendPipeline::shielded_fee`. Leg 1 carries the same three output
+    /// slots, so a swap pays its fee exactly as a spend does.
+    pub shielded_fee: Option<Arc<ShieldedFeeChecker>>,
+    /// See `SpendPipeline::assets`.
+    pub assets: Arc<AssetRegistry>,
 }
 
 impl SwapPipeline {
@@ -71,6 +78,13 @@ impl SwapPipeline {
             &payload.aux,
         )?;
         let inputs = parse_spend_inputs(&payload.pub_inputs)?;
+        self.fees()
+            .charge(
+                &payload.pub_inputs,
+                &payload.aux,
+                self.gas_witness.gas_for(EntryPoint::Swap),
+            )
+            .await?;
 
         let mut mirror = self.mirror.lock().await;
         info!(leaf_count = mirror.committed_count(), "swap pipeline start");
@@ -108,9 +122,18 @@ impl SwapPipeline {
     /// mirror access, no prove, and no payload: every swap prices as
     /// `EntryPoint::Swap`.
     pub async fn estimate(&self) -> AppResult<EstimateResponse> {
-        self.fee_quoter
-            .quote_for_gas(self.gas_witness.gas_for(EntryPoint::Swap))
+        self.fees()
+            .quote(self.gas_witness.gas_for(EntryPoint::Swap))
             .await
+    }
+
+    fn fees(&self) -> FeeContext<'_> {
+        FeeContext {
+            chain_id: self.chain_id,
+            fee_quoter: &self.fee_quoter,
+            assets: &self.assets,
+            shielded_fee: self.shielded_fee.as_deref(),
+        }
     }
 
     /// The `deadline` this swap goes out with.

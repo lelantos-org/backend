@@ -709,3 +709,85 @@ async fn asset_metadata_write_leaves_the_column_it_omits_alone() {
         "a fully described asset must leave the backfill queue"
     );
 }
+
+/// `/v1/head` is the gate the wallet polls in place of a full `syncNotes`, so
+/// the two watermarks have to be exact and per-chain.
+///
+/// Exact, because the client compares them to what it last saw and skips the
+/// expensive reads when they have not moved — a value that lags by even one
+/// row makes an arrival invisible until the next thing happens to move it.
+/// Per-chain, because a shared counter would make chain A's activity look like
+/// chain B's and trigger pointless full syncs on every chain at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn head_reports_per_chain_watermarks() {
+    use bigdecimal::BigDecimal;
+    use fmd_indexer::repositories::notes::{NewNote, NotesRepo, PostgresNotesRepo};
+
+    let _guard = serial_lock().await;
+    let pool = boot_pool().await;
+
+    const OTHER_CHAIN: i64 = CHAIN_ID + 1;
+    let base = spawn_fmd_webserver(&pool).await;
+    let head = |chain: i64| {
+        let base = base.clone();
+        async move {
+            reqwest::Client::new()
+                .get(format!("{base}/v1/head?chainId={chain}"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // An empty chain reports 0 rather than 404 or null: the client treats this
+    // as a cursor, and it must be comparable before anything exists.
+    let empty = head(CHAIN_ID).await;
+    assert_eq!(empty["maxNoteId"], 0);
+    assert_eq!(empty["maxNullifierSeq"], 0);
+
+    // `cm` varies per note: `notes` is UNIQUE (chain_id, cm), so a shared
+    // commitment makes every insert past the first a silent no-op.
+    let note = |chain_id: i64, log_index: i32| NewNote {
+        chain_id,
+        block_number: 1,
+        tx_hash: vec![0xaa; 32],
+        log_index,
+        cm: vec![log_index as u8; 32],
+        clue_rx: BigDecimal::from(0),
+        clue_ry: BigDecimal::from(0),
+        eph_pub_x: BigDecimal::from(7),
+        eph_pub_y: BigDecimal::from(0),
+        ciphertext: vec![0x00, 0x07],
+        leaf_index: log_index as i64,
+        cv_dep_x: BigDecimal::from(1),
+        cv_dep_y: BigDecimal::from(1),
+    };
+
+    let repo = PostgresNotesRepo::new(pool.clone());
+    repo.insert_batch(&[note(CHAIN_ID, 0), note(CHAIN_ID, 1)])
+        .await
+        .unwrap();
+
+    let after = head(CHAIN_ID).await;
+    let moved = after["maxNoteId"].as_i64().unwrap();
+    assert!(moved > 0, "watermark did not move: {after}");
+
+    // The other chain must not have moved with it.
+    let other = head(OTHER_CHAIN).await;
+    assert_eq!(
+        other["maxNoteId"], 0,
+        "another chain's notes leaked into this chain's watermark: {other}"
+    );
+
+    // And the endpoint must never be served from a cache: a stale watermark is
+    // exactly the latency this endpoint exists to remove.
+    repo.insert_batch(&[note(CHAIN_ID, 2)]).await.unwrap();
+    let again = head(CHAIN_ID).await;
+    assert!(
+        again["maxNoteId"].as_i64().unwrap() > moved,
+        "watermark was served stale: {again} after {after}"
+    );
+}

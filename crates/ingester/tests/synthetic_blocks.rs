@@ -737,3 +737,89 @@ async fn a_rewind_records_a_durable_reorg_marker() {
         "cursor rewound so the consumer replays the branch"
     );
 }
+
+// ---------- notify -> listen ----------
+
+/// Wait for `wake` to fire, or give up.
+///
+/// A bare `changed().await` would hang the suite on regression rather than
+/// failing it, and the timeout has to be generous enough to cover container
+/// I/O without being so long that a real hang looks like a slow test.
+async fn woken_within(wake: &mut database::listen::Wake, what: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), wake.changed())
+        .await
+        .unwrap_or_else(|_| panic!("no wake for {what}"))
+        .expect("listener task dropped its sender");
+}
+
+/// The point of the listener: a committed batch must wake a consumer rather
+/// than leaving it to time out its idle backoff.
+///
+/// The ingester has emitted these notifications since it was written and
+/// nothing subscribed, so this is the first end-to-end assertion that the
+/// channel names, the payload, and the connection all line up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_wakes_a_listener() {
+    let (pool, _serial) = fresh_pool().await;
+    let rpc = Arc::new(MockRpc::new());
+    let url = db_url().await;
+
+    let mut wake = database::listen::spawn(
+        url,
+        &[
+            database::listen::CHANNEL_RAW_EVENTS_APPENDED,
+            database::listen::CHANNEL_RAW_EVENTS_REORG,
+        ],
+    );
+    // The subscribe-gap bump. Consuming it here is what makes the assertions
+    // below about real notifications rather than about startup.
+    woken_within(&mut wake, "the initial subscribe").await;
+
+    populate_blocks(&rpc, 700..=705, 0xa0);
+    let ctx = live_ctx(&pool, &rpc, cfg(1, 700)).await;
+    let _ = drain_ticks(&ctx, 8).await;
+
+    woken_within(&mut wake, "an append").await;
+    assert!(count_raw_events(&pool).await > 0, "nothing was committed");
+
+    // A rewind publishes on the second channel, which carries the retraction
+    // consumers cannot discover from their own cursor.
+    rpc.rewind_to(704);
+    populate_blocks(&rpc, 704..=706, 0xff);
+    let outcome = ctx.tick().await.unwrap();
+    assert!(
+        matches!(outcome, TickOutcome::Reorg { rewind_to: 704 }),
+        "got {outcome:?}"
+    );
+    woken_within(&mut wake, "a reorg").await;
+}
+
+/// The listener must survive the database going away, and must bump on the way
+/// back: notifications sent while the socket was down are gone, so a silent
+/// reconnect would leave the consumer waiting out its full idle ceiling for
+/// work that is already queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reconnect_bumps_the_wake() {
+    let (_pool, _serial) = fresh_pool().await;
+    let url = db_url().await;
+
+    let mut wake = database::listen::spawn(url, &[database::listen::CHANNEL_RAW_EVENTS_APPENDED]);
+    woken_within(&mut wake, "the initial subscribe").await;
+
+    // Terminate the listener's backend from another connection. This is what a
+    // database restart or a failover looks like from the listener's side.
+    let pool2 = database::build_pool(url, database::PoolCfg::indexer())
+        .await
+        .expect("pool");
+    let mut conn = pool2.get().await.unwrap();
+    diesel::sql_query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE query LIKE 'LISTEN %' AND pid <> pg_backend_pid()",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("terminate");
+    drop(conn);
+
+    woken_within(&mut wake, "the reconnect").await;
+}

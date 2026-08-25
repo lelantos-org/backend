@@ -11,7 +11,10 @@ rpc_url = "https://arb1.arbitrum.io/rpc"
 pool_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
 start_block = 465459960
 reorg_depth = 32
-block_poll_ms = 1000
+# Arbitrum produces a block roughly every 250ms, so a 1s poll spent most of its
+# time waiting. The extra cost is eth_blockNumber plus one eth_getBlockByNumber
+# per tick — the two cheapest calls a provider bills for.
+block_poll_ms = 250
 backfill_threshold = 50
 backfill_concurrency = 4
 chunk_blocks = 1000

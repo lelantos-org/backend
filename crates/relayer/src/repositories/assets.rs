@@ -1,4 +1,5 @@
 use crate::domain::error::{AppError, AppResult};
+use alloy::primitives::Address;
 use bigdecimal::BigDecimal;
 use database::DbPool;
 use database::schema::assets;
@@ -21,6 +22,25 @@ pub struct AssetRow {
     /// `NULL` until the indexer has read `symbol()`, or when the token does
     /// not implement it.
     pub symbol: Option<String>,
+}
+
+impl AssetRow {
+    /// The MASP asset id. Stored `i64` because Postgres has no unsigned
+    /// integer; it is a `u64` everywhere else, and this is the one place that
+    /// conversion belongs.
+    pub fn asset_id(&self) -> u64 {
+        self.asset_id_u64 as u64
+    }
+
+    /// The ERC-20 address, or `None` if the column does not hold 20 bytes.
+    ///
+    /// Fallible rather than `Address::from_slice`, which panics on any other
+    /// width. The column is written by another service, so a row of the wrong
+    /// shape is a data problem to report — not one that should take down the
+    /// submit path.
+    pub fn token_address(&self) -> Option<Address> {
+        Address::try_from(self.token.as_slice()).ok()
+    }
 }
 
 /// Every registered asset on `chain_id`, lowest id first.

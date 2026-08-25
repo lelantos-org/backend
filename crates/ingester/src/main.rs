@@ -35,6 +35,13 @@ async fn main() -> Result<()> {
     );
 
     let cfg = load_config()?;
+
+    let metrics_addr: std::net::SocketAddr = cfg
+        .metrics_addr
+        .parse()
+        .with_context(|| format!("metrics_addr {}", cfg.metrics_addr))?;
+    shared::metrics::init(metrics_addr).context("install metrics listener")?;
+
     migrate(&cfg.database_url).await?;
 
     let pool_cfg = database::PoolCfg::indexer();

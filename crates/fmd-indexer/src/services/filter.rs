@@ -76,6 +76,7 @@ impl FilterServiceImpl {
     /// subscription, then advance the cursor past them.
     async fn forward_tick(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
         let (after_note_id, _) = self.cursors.fetch(NAME, chain_id).await?;
+        record_cursor(chain_id, after_note_id);
         let new_notes = self
             .notes
             .fetch_after(chain_id, after_note_id, batch)
@@ -124,7 +125,9 @@ impl FilterServiceImpl {
     /// per-chain ticks only makes it converge faster, and re-scanning an
     /// overlapping range is absorbed by `ON CONFLICT DO NOTHING`.
     async fn backfill_tick(&self, batch: i64) -> Result<TickProgress> {
-        let head = self.head.lock().await.observe(self.notes.max_id().await?);
+        let max_id = self.notes.max_id().await?;
+        record_notes_head(max_id);
+        let head = self.head.lock().await.observe(max_id);
         let Some(sub) = self.subscriptions.next_backfilling(head).await? else {
             return Ok(TickProgress::Idle);
         };
@@ -197,6 +200,29 @@ impl FilterServiceImpl {
             .await?;
         Ok(())
     }
+}
+
+/// Cursor half of the notes -> matches lag pair.
+///
+/// `notes` carries no `block_ts`, so this hop cannot report a wall-clock age
+/// the way ingest and consume do. The distance between this and
+/// [`record_notes_head`] is the closest signal available for free.
+fn record_cursor(chain_id: i64, after_note_id: i64) {
+    metrics::gauge!(
+        shared::metrics::name::CONSUMER_CURSOR_NOTE_ID,
+        "service" => NAME,
+        "chain_id" => chain_id.to_string(),
+    )
+    .set(after_note_id as f64);
+}
+
+/// Head half of the pair; see [`record_cursor`].
+///
+/// Unlabelled by chain because `max_id` is global, which makes the difference
+/// an upper bound on any one chain's lag rather than that chain's lag. Emitted
+/// from the backfill pass because that pass already pays for the query.
+fn record_notes_head(max_id: i64) {
+    metrics::gauge!(shared::metrics::name::NOTES_MAX_ID).set(max_id as f64);
 }
 
 #[async_trait]

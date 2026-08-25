@@ -1,8 +1,10 @@
+pub mod head;
 pub mod matches;
 pub mod notes;
 pub mod subscriptions;
 pub mod tree;
 
+pub use head::HeadQuery;
 pub use matches::ListMatchesQuery;
 pub use notes::ListNotesQuery;
 pub use subscriptions::CreateSubscription;

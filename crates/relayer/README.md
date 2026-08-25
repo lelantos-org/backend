@@ -33,9 +33,9 @@ leaving them unable to tell a failed spend from a landed one.
 | Route | Notes |
 |-------|-------|
 | `GET /health` | version + commit |
-| `GET /chains` | Per-chain registry: leaf count, current root, MASP + relayer addresses, `desynced`, the wallet-facing config block, and the registered assets |
-| `POST /v1/spend` | `transfer` / `withdraw` / `withdrawNative`. Honours `Idempotency-Key` |
-| `POST /v1/spend/estimate` | Fee quote for the same payload. Does **not** prove or submit |
+| `GET /chains` | Per-chain registry: leaf count, current root, MASP + relayer addresses, `desynced`, the wallet-facing config block, the registered assets, and the [shielded fee](#shielded-fees) terms where one is charged |
+| `POST /v1/spend` | `transfer` / `withdraw` / `withdrawNative`. Honours `Idempotency-Key`. **402** when a required shielded fee is missing or short |
+| `POST /v1/spend/estimate` | Fee quote for the same payload, including the note value to pay. Does **not** prove or submit |
 | `POST /v1/swap` | Leg-1 SNARK + leg-2 escrow blob via `SwapWrapper` |
 | `POST /v1/swap/estimate` | Fee quote for a swap |
 | `GET /v1/deposits/stream?chain_id=` | SSE of deposit lifecycle events |
@@ -259,6 +259,17 @@ token is priced concurrently; one that cannot be priced drops out of the quote
 rather than failing it. Amount math is scaled integers (1e8), not `f64`, so a
 low-decimal token quoted against 18-decimal native does not lose precision.
 
+Where a chain collects a [shielded fee](#shielded-fees), the quote also carries
+each token's MASP `assetId`, its `scale`, and `circuitAmount` — the base-unit
+amount rounded **up** to a whole circuit unit, which is the exact `value` to put
+in the fee note. Rounding happens here rather than in the client because
+rounding down underpays by up to one whole unit and is refused, and because two
+implementations of the same rounding drift apart.
+
+A quote is advisory. It is neither signed nor stored, and the relayer re-derives
+the requirement when the spend actually arrives — so nothing shaped like a quote
+can be presented back to it as one.
+
 ## Config (`relayer.toml`)
 
 ```toml
@@ -305,10 +316,14 @@ signer_key_hex = "0x…"
 | `fee_markup_bps` | no | 1000 | 10%. Must be ≤ 1_000_000 |
 | `swap_default_deadline_s` | no | 300 | Applied when the wallet pinned no deadline. Without a bound a swap can sit in the mempool and execute at an arbitrarily later price with only `min_out` protecting the user |
 | `accepted_fee_tokens` | no | `[]` | `{symbol, address, decimals, quote_symbol}`; decimals ≤ 38 |
+| `shielded_fee_address` | no | — | bech32m address the relayer is paid at. **Setting it makes a fee mandatory** — see below |
+| `shielded_fee_ivk` | no | — | Incoming viewing key for that address, big-endian. Must be set together with it. Normally from the environment, not the TOML |
+| `shielded_fee_grace_bps` | no | 300 | How far below the submit-time quote a payment may fall. Must be < 10 000 |
+| `shielded_fee_assets` | no | `[]` | Asset ids accepted as fees. Empty means every token in `accepted_fee_tokens` |
 | `public` | no | — | Wallet-facing block, served verbatim by `/chains`: `name`, `rpc_url`, `tree_depth`, `permit2_address`, `explorer_url` |
 
 Per-chain env overlay:
-`RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS}`.
+`RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS,SHIELDED_FEE_ADDRESS,SHIELDED_FEE_IVK}`.
 
 ⚠️ The overlay only rewrites chains **already declared** in the TOML. A variable
 naming a chain with no `[[chains]]` block is silently discarded.
@@ -316,6 +331,61 @@ naming a chain with no `[[chains]]` block is silently discarded.
 `stack/config/prod/relayer.toml` ships a zero `signer_key_hex`, which fails
 secp256k1 validation at startup — the prod profile needs
 `RELAYER_CHAIN_<id>_SIGNER_KEY` set to boot.
+
+## Shielded fees
+
+By default the relayer pays gas out of its own signer and charges nothing;
+`/v1/spend/estimate` quotes a fee that nothing collects. Setting
+`shielded_fee_address` turns collection on for a chain.
+
+The payer funds one of the transact circuit's three output slots with a note
+addressed to that address. It rides in the `aux` the relayer already receives,
+so there is no extra request, no extra calldata, and — the point — no on-chain
+transfer linking the payer to the spend. The relayer trial-decrypts each output
+with its viewing key, rebuilds `cm = Poseidon(asset·2^64 + value, pk, rho, rcm)`
+over its own `pk`, and accepts the value only if that equals the `out_cm` the
+proof committed to. A note encrypted to the relayer but owned by someone else,
+or one whose plaintext inflates the value, fails there.
+
+Consequences worth knowing before enabling it:
+
+- **It is all or nothing.** Presence of the key in `/chains` is the contract:
+  once configured, every `/v1/spend` and `/v1/swap` on that chain must carry a
+  sufficient fee, and one that does not is refused **402**. A wallet that does
+  not yet build fee outputs will be refused every spend.
+- **A fee may be split across slots.** Outputs paying the relayer are summed,
+  so a payer is credited for all of them. They must name one asset: a payment
+  spread over several has no single price to check it against, and is refused.
+- **A fee consumes an output slot.** `TRANSACT_OUT` is 3 and fixed by the
+  circuit, so the fee replaces a change slot: a transfer goes from
+  `[recipient, change, change]` to `[recipient, change, fee]`.
+- **The fee is paid in the asset being spent**, because a spend is built in a
+  single asset. An asset this relayer will not take as a fee therefore cannot be
+  relayed at all, not merely cannot pay for itself.
+- **`accepted_fee_tokens` is the effective list**, whatever
+  `shielded_fee_assets` says. The two are ANDed: the allowlist can only narrow,
+  never widen, because an asset the fee table cannot price has no quote to check
+  a payment against. Leaving `shielded_fee_assets` empty means "no extra
+  restriction" — *not* "every registered asset". `/chains` publishes exactly the
+  intersection, so an asset it advertises is one a submission will accept.
+- **`prover.transact_vkey_path` is required.** Without it a wallet's proof is
+  not checked before submission, so `out_cm` and `nullifier[0]` — the values a
+  fee is bound to — are unverified. The relayer refuses to boot in that
+  combination rather than enforce something that does not hold.
+- **The viewing key cannot spend.** `ivk` recognises payments and reads their
+  values; moving them needs `nsk`, which never has to exist on this host.
+  Generate the pair with the SDK's `buildSpendingKey` + `encodeAddress` and keep
+  `nsk` elsewhere. It is still a secret: `FeeRecipient` and `ShieldedFeeChecker`
+  hand-write `Debug` to redact it, and a test pins that. Do not derive it.
+- **Quotes are not signed or stored.** The requirement is re-derived when the
+  spend arrives; `shielded_fee_grace_bps` is what absorbs the gas-price and
+  oracle drift between the estimate and the submission.
+
+Clients read the terms from `/chains` (`shieldedFee`) and the live amount from
+`/v1/spend/estimate` (`fees[].circuitAmount`, already rounded up to a whole
+circuit unit, plus `shieldedFeeAddress`). On the wallet side the SDK's
+`bundle → feeOutputFromEstimate` turns that response straight into an output
+slot.
 
 ## Replicas
 

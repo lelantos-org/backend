@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod commitments;
+pub mod head;
 pub mod health;
 pub mod matches;
 pub mod notes;
@@ -10,6 +11,7 @@ pub mod subscriptions;
 pub mod tree;
 
 pub use commitments::get_commitment_chunk;
+pub use head::get_head;
 pub use health::health;
 pub use matches::list_matches;
 pub use notes::list_notes;

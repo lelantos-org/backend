@@ -14,6 +14,7 @@ use crate::shutdown::Shutdown;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, info, trace, warn};
 
@@ -21,6 +22,12 @@ use tracing::{debug, info, trace, warn};
 const TICK_MIN: Duration = Duration::from_millis(50);
 /// Growth factor of the idle backoff.
 const TICK_FACTOR: u32 = 2;
+
+/// A wake signal: something a tick service consumes may now be available.
+///
+/// Only the *change* carries meaning; the counter's value is arbitrary. Held
+/// as an `Option` by the driver, where `None` is a service that polls alone.
+pub type Wake = watch::Receiver<u64>;
 
 /// What one tick accomplished.
 ///
@@ -134,6 +141,11 @@ async fn run_round(svc: &dyn TickService, batch: i64) -> TickProgress {
     round
 }
 
+/// Drive a [`TickService`] until shutdown fires, polling only.
+pub async fn run(svc: Arc<dyn TickService>, tick_ms: u64, batch: i64, shutdown: Shutdown) {
+    run_with_wake(svc, tick_ms, batch, shutdown, None).await
+}
+
 /// Drive a [`TickService`] until shutdown fires.
 ///
 /// `tick_ms` is the **ceiling** of the idle backoff, not a fixed period:
@@ -143,7 +155,20 @@ async fn run_round(svc: &dyn TickService, batch: i64) -> TickProgress {
 /// - [`Partial`](TickProgress::Partial) — sleep, but from [`TICK_MIN`], so an
 ///   arrival landing just after a round is picked up in ~50 ms.
 /// - [`Idle`](TickProgress::Idle) — sleep, doubling up to `tick_ms`.
-pub async fn run(svc: Arc<dyn TickService>, tick_ms: u64, batch: i64, mut shutdown: Shutdown) {
+///
+/// `wake` cuts an idle sleep short when the producer says there is something to
+/// look at — see [`crate::backoff`] and the `database::listen` module. It is an
+/// optimisation on top of the poll, never a replacement: every consumer's
+/// cursor is durable, so a wake that never arrives costs latency and nothing
+/// else. The `Saturated` path never consults it, because a driver that already
+/// knows work is queued has nothing to learn from being told again.
+pub async fn run_with_wake(
+    svc: Arc<dyn TickService>,
+    tick_ms: u64,
+    batch: i64,
+    mut shutdown: Shutdown,
+    mut wake: Option<Wake>,
+) {
     let name = svc.name();
     // `max(1)` keeps a misconfigured `tick_ms = 0` from producing a zero
     // backoff, which `Backoff::new` rejects and which would busy-poll anyway.
@@ -178,11 +203,36 @@ pub async fn run(svc: Arc<dyn TickService>, tick_ms: u64, batch: i64, mut shutdo
         );
         tokio::select! {
             _ = sleep(delay) => {}
+            // Snap back to the floor: a wake means the producer is active, so
+            // the next arrival is likely imminent and the escalated delay is
+            // now the wrong guess.
+            _ = woken(&mut wake) => {
+                trace!(name, "woken; skipping the rest of the idle delay");
+                backoff.reset();
+            }
             _ = shutdown.recv() => break,
         }
     }
 
     info!(name, "tick driver stopping");
+}
+
+/// Resolve when `wake` fires; never, when there is none.
+///
+/// `pending()` rather than an `Option` guard on the `select!` arm so the other
+/// arms are written once. A closed channel — the listener task gone — also
+/// parks here forever, which is the right shape: the poll is still running, and
+/// spinning the loop on a dead sender would turn a lost optimisation into a
+/// busy wait.
+async fn woken(wake: &mut Option<Wake>) {
+    match wake {
+        Some(rx) => {
+            if rx.changed().await.is_err() {
+                std::future::pending::<()>().await
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +417,114 @@ mod tests {
             }
         }
         assert_eq!(run_round(&PerChain, 100).await, TickProgress::Saturated);
+    }
+
+    /// The whole point of the wake: an arrival announced mid-sleep must be
+    /// picked up immediately rather than after the escalated idle delay.
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_cuts_an_idle_sleep_short() {
+        let svc = Scripted::new([]); // always Idle, so the driver always sleeps
+        let (waker, wake) = watch::channel(0u64);
+        let (trigger, sd) = shutdown::channel();
+        let mut ticks = svc.ticks.subscribe();
+        let driver = tokio::spawn(run_with_wake(svc.clone(), CEILING_MS, 100, sd, Some(wake)));
+
+        // Let the first tick run and the driver settle into its sleep.
+        ticks.wait_for(|&n| n >= 1).await.expect("first tick");
+        tokio::time::sleep(TICK_MIN / 2).await;
+        waker.send_modify(|n| *n += 1);
+
+        ticks
+            .wait_for(|&n| n >= 2)
+            .await
+            .expect("wake did not tick");
+        trigger.fire();
+        driver.await.expect("driver panicked");
+
+        let gap = svc.gaps()[0];
+        assert_eq!(
+            gap,
+            TICK_MIN / 2,
+            "expected the wake to end the sleep at once, slept {gap:?}"
+        );
+    }
+
+    /// A wake resets the backoff, not just the current sleep. Without that, a
+    /// chain that had escalated to the ceiling pays it again on the very next
+    /// gap despite the producer having just proven it is active.
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_resets_the_backoff() {
+        let svc = Scripted::new([]);
+        let (waker, wake) = watch::channel(0u64);
+        let (trigger, sd) = shutdown::channel();
+        let mut ticks = svc.ticks.subscribe();
+        let driver = tokio::spawn(run_with_wake(svc.clone(), CEILING_MS, 100, sd, Some(wake)));
+
+        // Three idle ticks escalate the delay to TICK_MIN * 4.
+        ticks.wait_for(|&n| n >= 3).await.expect("idle ticks");
+        waker.send_modify(|n| *n += 1);
+        ticks.wait_for(|&n| n >= 5).await.expect("post-wake ticks");
+        trigger.fire();
+        driver.await.expect("driver panicked");
+
+        // gaps: [MIN, MIN*2, <wake>, MIN] — the gap *after* the wake is the
+        // assertion; a driver that only skipped one sleep would show MIN*8.
+        let gaps = svc.gaps();
+        assert_eq!(
+            gaps[3], TICK_MIN,
+            "backoff was not reset by the wake: {gaps:?}"
+        );
+    }
+
+    /// The `Saturated` path skips the `select!` entirely, so a wake arriving
+    /// during catch-up must change nothing — least of all wedge the driver.
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_during_saturated_changes_nothing() {
+        let svc = Scripted::new([
+            Ok(TickProgress::Saturated),
+            Ok(TickProgress::Saturated),
+            Ok(TickProgress::Saturated),
+        ]);
+        let (waker, wake) = watch::channel(0u64);
+        waker.send_modify(|n| *n += 1); // already pending before the run starts
+        let (trigger, sd) = shutdown::channel();
+        let mut ticks = svc.ticks.subscribe();
+        let driver = tokio::spawn(run_with_wake(svc.clone(), CEILING_MS, 100, sd, Some(wake)));
+        ticks.wait_for(|&n| n >= 3).await.expect("saturated ticks");
+        trigger.fire();
+        driver.await.expect("driver panicked");
+
+        assert!(
+            svc.gaps().iter().all(|g| g.is_zero()),
+            "slept between saturated ticks: {:?}",
+            svc.gaps()
+        );
+    }
+
+    /// A dropped sender is a listener task that has gone away. The poll must
+    /// carry on at its normal cadence rather than spinning on a channel that
+    /// will never fire again.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_waker_falls_back_to_the_poll() {
+        let svc = Scripted::new([]);
+        let (waker, wake) = watch::channel(0u64);
+        drop(waker);
+        let (trigger, sd) = shutdown::channel();
+        let mut ticks = svc.ticks.subscribe();
+        let driver = tokio::spawn(run_with_wake(svc.clone(), CEILING_MS, 100, sd, Some(wake)));
+        ticks.wait_for(|&n| n >= 4).await.expect("polled ticks");
+        trigger.fire();
+        driver.await.expect("driver panicked");
+
+        assert_eq!(
+            svc.gaps(),
+            [
+                TICK_MIN,
+                TICK_MIN * TICK_FACTOR,
+                TICK_MIN * TICK_FACTOR * TICK_FACTOR
+            ],
+            "a dead waker must leave the idle schedule untouched"
+        );
     }
 
     #[test]

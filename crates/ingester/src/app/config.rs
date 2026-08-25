@@ -7,6 +7,11 @@ use std::collections::HashSet;
 pub struct IngesterConfig {
     pub database_url: String,
     pub chains: Vec<ChainConfig>,
+    /// Where `/metrics` is served. This is the process's only listener.
+    /// Defaults to loopback; under compose it is set to `0.0.0.0:<port>` and
+    /// the host publish restricts it (see `shared::metrics::init`).
+    #[serde(default = "default_metrics_addr")]
+    pub metrics_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +44,9 @@ pub struct ChainConfig {
     pub rpc_connect_timeout_ms: u64,
 }
 
+fn default_metrics_addr() -> String {
+    "127.0.0.1:3013".into()
+}
 fn default_reorg_depth() -> u64 {
     32
 }
@@ -89,6 +97,10 @@ impl IngesterConfig {
     /// the TOML value: quietly ingesting from the wrong height is worse than
     /// refusing to start.
     pub fn apply_env_overlay(&mut self) -> Result<(), IngesterError> {
+        // Chain-independent, so it does not go through `config_env::lookup`.
+        if let Ok(v) = std::env::var("METRICS_ADDR") {
+            self.metrics_addr = v;
+        }
         for c in &mut self.chains {
             if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "POOL_ADDRESS") {
                 c.pool_address = v;
@@ -208,6 +220,7 @@ mod tests {
         IngesterConfig {
             database_url: "postgres://localhost/db".into(),
             chains,
+            metrics_addr: default_metrics_addr(),
         }
     }
 
