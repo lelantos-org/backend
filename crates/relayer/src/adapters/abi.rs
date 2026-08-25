@@ -17,20 +17,25 @@ sol! {
         }
         /// `PubInputs.Transact` at the deployed 3-in/3-out shape. Changing
         /// the arity requires a new circuit, ceremony and verifier.
+        /// `PubInputs.Transact`. The array arity is the deployed circuit's
+        /// `TRANSACT_IN` / `TRANSACT_OUT` — 4 and 4 — and `sol!` takes
+        /// literals, so it cannot be written in terms of the Rust constants.
+        /// `domain::dto::transact` asserts the pair at compile time; keep the
+        /// two in step by hand.
         struct Transact {
             bytes32 merkleRoot;
-            bytes32[3] nullifier;
-            bytes32[3] outCm;
+            bytes32[4] nullifier;
+            bytes32[4] outCm;
             uint64 publicAssetId;
             uint64 publicIn;
             uint64 publicOut;
-            uint256[2][3] inCv;
-            uint256[2][3] outCv;
+            uint256[2][4] inCv;
+            uint256[2][4] outCv;
             address recipient;
             uint256 chainId;
             address payer;
             address relayer;
-            uint256[2][3] outCvDep;
+            uint256[2][4] outCvDep;
         }
         /// `PubInputs.TreeUpdateBatch`. Every array is indexed by LEAF, not
         /// by pair: `actualCount` is a leaf count in `[1, MAX_L_BATCH]`, so a
@@ -132,7 +137,7 @@ sol! {
             Transact calldata pi,
             Proof calldata tp,
             TreeUpdateBatch calldata tpi,
-            OutputAux[3] calldata aux
+            OutputAux[4] calldata aux
         ) external;
 
         function withdraw(
@@ -140,7 +145,7 @@ sol! {
             Transact calldata pi,
             Proof calldata tp,
             TreeUpdateBatch calldata tpi,
-            OutputAux[3] calldata aux
+            OutputAux[4] calldata aux
         ) external;
 
         event DepositEscrowed(
@@ -181,7 +186,7 @@ sol! {
             IMasp.Transact pi_w;
             IMasp.Proof tp_w;
             IMasp.TreeUpdateBatch tpi_w;
-            IMasp.OutputAux[3] aux_w;
+            IMasp.OutputAux[4] aux_w;
             IMasp.DepositRequest deposit_d;
             /// Two leaves per deposit, hence two aux payloads; leg 1's
             /// withdraw carries one per transact output.
@@ -205,7 +210,7 @@ sol! {
             IMasp.Transact calldata pi,
             IMasp.Proof calldata tp,
             IMasp.TreeUpdateBatch calldata tpi,
-            IMasp.OutputAux[3] calldata aux
+            IMasp.OutputAux[4] calldata aux
         ) external returns (uint256 net);
     }
 }

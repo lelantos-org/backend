@@ -1,10 +1,17 @@
 use serde::Deserialize;
 
-/// Input/output arity of the deployed transact circuit (`transact_3x3`).
+/// Input/output arity of the deployed transact circuit (`transact_4x4`).
 /// Mirrors `PubInputs.TRANSACT_IN` / `TRANSACT_OUT` and
-/// `sdk/src/core/shape.ts :: TRANSACT_3X3`.
-pub const TRANSACT_IN: usize = 3;
-pub const TRANSACT_OUT: usize = 3;
+/// `sdk/src/core/shape.ts :: TRANSACT_4X4`.
+///
+/// These are wire-format array lengths, so a value that disagrees with the
+/// deployed circuit rejects every submission at the JSON boundary — serde
+/// refuses a fixed-size array of the wrong length — before anything the
+/// relayer could log as a shape problem. Moving them means moving the
+/// `sol!` aux arity in `adapters/abi.rs` and the coefficient layout in
+/// `domain/transact_pi.rs` in the same change.
+pub const TRANSACT_IN: usize = 4;
+pub const TRANSACT_OUT: usize = 4;
 
 /// Wallet-to-relayer wire format for the spend path. Mirrors
 /// `sdk/src/protocol/transact.ts :: SubmitTransactPayload`. All

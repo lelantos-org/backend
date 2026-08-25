@@ -31,13 +31,20 @@ use alloy::sol_types::SolValue;
 
 /// ABI calldata words of the `Transact` struct itself — the coefficients that
 /// are copied verbatim before any are derived from `aux`.
-/// `1 + TRANSACT_IN + TRANSACT_OUT + 3 + 2*TRANSACT_IN + 4 + 4*TRANSACT_OUT`.
-const STRUCT_WORDS: usize = 32;
+///
+/// Derived rather than written out: `merkleRoot`, one word per nullifier and
+/// per `outCm`, the three public-value words, `inCv` as a coordinate pair per
+/// input, the four address/chain words, and `outCv` + `outCvDep` as two
+/// coordinate pairs per output. 32 at 3x3, 40 at 4x4 — a literal here is a
+/// number that silently stops matching the circuit when the arity moves.
+const STRUCT_WORDS: usize =
+    1 + TRANSACT_IN + TRANSACT_OUT + 3 + 2 * TRANSACT_IN + 4 + 4 * TRANSACT_OUT;
 /// Word index of the first `(clueRx, clueRy, clueBits)` triple: they start
 /// where the struct's own words end.
 const CLUE_BASE: usize = STRUCT_WORDS;
-/// The struct words, one clue triple per output, then the aux digest:
-/// `9 + 3*TRANSACT_IN + 8*TRANSACT_OUT` at the deployed shape.
+/// The struct words, one clue triple per output, then the aux digest.
+/// 42 at 3x3, 53 at 4x4 — and `contracts/test/fixtures/transact_4x4_vector.json`
+/// publishes `coeffCount` for the deployed shape, which the tests check.
 pub const TRANSACT_COEFFS: usize = STRUCT_WORDS + 3 * TRANSACT_OUT + 1;
 
 /// The `(y, z)` pair the deployed verifier is handed as its two public
@@ -48,7 +55,7 @@ pub struct TransactPublicSignals {
     pub z: U256,
 }
 
-/// Build the 42-coefficient vector, then compress it.
+/// Build the coefficient vector ([`TRANSACT_COEFFS`] of them), then compress it.
 ///
 /// Takes the already-built ABI structs rather than the wire DTOs so there is
 /// exactly one place that decides what a field means — the same builders the
@@ -136,22 +143,33 @@ fn eval_poly(coeffs: &[U256], z: U256) -> U256 {
 }
 
 /// Compile-time reminder that this module is pinned to one circuit shape.
-const _: () = assert!(TRANSACT_IN == 3 && TRANSACT_OUT == 3);
+///
+/// Every length above is derived from the two constants, so this is not what
+/// keeps the layout correct — the published vectors are. It is here so that
+/// changing the arity is a deliberate edit in this file too, where the
+/// coefficient *order* lives and no test can infer it from the constants.
+const _: () = assert!(TRANSACT_IN == 4 && TRANSACT_OUT == 4);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Published `transact_3x3` vectors. They carry the coefficient vector the
+    /// Published `transact_4x4` vectors. They carry the coefficient vector the
     /// reference implementation built, plus the `z` and `y` derived from it —
     /// which is exactly what this module has to reproduce, since a layout that
     /// drifts from the contract's produces a proof the chain rejects and a
     /// local check that rejects proofs the chain would accept.
-    fn vectors() -> Option<serde_json::Value> {
+    ///
+    /// A missing file is a hard failure, not a skip. It used to be a skip, and
+    /// when the fixture was renamed for the 4x4 shape these tests quietly
+    /// stopped running — the arity drift they exist to catch then went
+    /// unnoticed until it broke every spend end to end.
+    fn vectors() -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../contracts/test/fixtures/transact_3x3_vector.json");
-        let raw = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&raw).ok()
+            .join("../../../contracts/test/fixtures/transact_4x4_vector.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("published vectors missing at {}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("published vectors parse")
     }
 
     fn u256(s: &str) -> U256 {
@@ -171,10 +189,7 @@ mod tests {
     /// once.
     #[test]
     fn z_and_y_match_the_published_vectors() {
-        let Some(v) = vectors() else {
-            eprintln!("transact_3x3_vector.json absent; skipping");
-            return;
-        };
+        let v = vectors();
         let cases = v["vectors"].as_array().expect("vectors");
         assert!(!cases.is_empty());
         for case in cases {
@@ -211,9 +226,7 @@ mod tests {
     /// in `aux_digest`.
     #[test]
     fn the_coefficient_layout_matches_the_published_vectors() {
-        let Some(v) = vectors() else {
-            return;
-        };
+        let v = vectors();
         for case in v["vectors"].as_array().expect("vectors") {
             let name = case["name"].as_str().unwrap_or("?");
             let w = &case["witness"];
@@ -312,9 +325,28 @@ mod tests {
         })
     }
 
+    /// Checked against the circuit's own declaration rather than a second
+    /// hand-written number: the fixture publishes `coeffCount` alongside the
+    /// vectors, so this cannot be "fixed" by editing a literal to match a
+    /// layout that has drifted.
     #[test]
     fn the_coefficient_vector_is_the_width_the_circuit_declares() {
-        assert_eq!(TRANSACT_COEFFS, 42);
+        let v = vectors();
+        let declared = v["circuit"]["coeffCount"]
+            .as_u64()
+            .expect("fixture declares coeffCount") as usize;
+        assert_eq!(TRANSACT_COEFFS, declared);
+    }
+
+    /// The fixture also publishes the arity it was generated at. A vector file
+    /// for another shape would otherwise satisfy every test above by being
+    /// internally consistent.
+    #[test]
+    fn the_published_vectors_are_for_the_deployed_arity() {
+        let v = vectors();
+        let shape = &v["circuit"]["shape"];
+        assert_eq!(shape["nIn"].as_u64(), Some(TRANSACT_IN as u64));
+        assert_eq!(shape["nOut"].as_u64(), Some(TRANSACT_OUT as u64));
     }
 
     #[test]

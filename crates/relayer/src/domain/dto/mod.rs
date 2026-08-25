@@ -36,14 +36,14 @@ mod wire_contract {
     fn pub_inputs() -> serde_json::Value {
         serde_json::json!({
             "merkleRoot": "1",
-            "nullifier": ["1", "2", "3"],
-            "outCm": ["4", "5", "6"],
+            "nullifier": ["1", "2", "3", "4"],
+            "outCm": ["5", "6", "7", "8"],
             "publicAssetId": 1,
             "publicIn": 0,
             "publicOut": 500,
-            "inCv": [point(), point(), point()],
-            "outCv": [point(), point(), point()],
-            "outCvDep": [point(), point(), point()],
+            "inCv": [point(), point(), point(), point()],
+            "outCv": [point(), point(), point(), point()],
+            "outCvDep": [point(), point(), point(), point()],
             "recipient": "0x000000000000000000000000000000000000beef",
             "chainId": 31337,
             "payer": "0x0000000000000000000000000000000000000001",
@@ -86,7 +86,7 @@ mod wire_contract {
             "kind": "withdraw",
             "proof": proof(),
             "pubInputs": pub_inputs(),
-            "aux": [aux(), aux(), aux()],
+            "aux": [aux(), aux(), aux(), aux()],
         });
         let p: SubmitSpendPayload = serde_json::from_value(raw).expect("spend payload");
         assert_eq!(p.kind, SpendKind::Withdraw);
@@ -110,13 +110,33 @@ mod wire_contract {
         assert!(serde_json::from_value::<SubmitSpendPayload>(raw).is_err());
     }
 
+    /// The shape this relayer actually drifted to: it stayed at 3x3 while the
+    /// contracts, the circuit and the SDK moved to 4x4, and every spend was
+    /// refused at the JSON boundary with no shape error to point at. Rejection
+    /// is correct — being *pinned* to the deployed arity is the point — so
+    /// this asserts the refusal rather than the drift.
+    #[test]
+    fn a_three_output_spend_payload_is_refused() {
+        let mut pi = pub_inputs();
+        pi["nullifier"] = serde_json::json!(["1", "2", "3"]);
+        pi["outCm"] = serde_json::json!(["4", "5", "6"]);
+        let raw = serde_json::json!({
+            "chainId": 31337,
+            "kind": "withdraw",
+            "proof": proof(),
+            "pubInputs": pi,
+            "aux": [aux(), aux(), aux()],
+        });
+        assert!(serde_json::from_value::<SubmitSpendPayload>(raw).is_err());
+    }
+
     #[test]
     fn swap_payload_matches_the_sdk_encoding() {
         let raw = serde_json::json!({
             "chainId": 31337,
             "proof": proof(),
             "pubInputs": pub_inputs(),
-            "aux": [aux(), aux(), aux()],
+            "aux": [aux(), aux(), aux(), aux()],
             "swap": {
                 "adapter": "0x0000000000000000000000000000000000000001",
                 "route": "0x00",

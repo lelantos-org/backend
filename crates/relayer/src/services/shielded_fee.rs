@@ -600,10 +600,15 @@ mod tests {
                 ciphertext: f.pad.ct.clone(),
             };
             Self {
-                aux: [pad.clone(), pad.clone(), pad],
+                aux: [pad.clone(), pad.clone(), pad.clone(), pad],
                 // Distinct placeholders: a commitment that collided with a
                 // real one would make a test pass for the wrong reason.
-                out_cm: ["11".to_string(), "12".to_string(), "13".to_string()],
+                out_cm: [
+                    "11".to_string(),
+                    "12".to_string(),
+                    "13".to_string(),
+                    "14".to_string(),
+                ],
                 nullifier0: f.nullifier0.clone(),
             }
         }
@@ -641,14 +646,19 @@ mod tests {
             let zero = || point("0", "1");
             PubInputsDto {
                 merkle_root: "0".to_string(),
-                nullifier: [self.nullifier0.clone(), "2".to_string(), "3".to_string()],
+                nullifier: [
+                    self.nullifier0.clone(),
+                    "2".to_string(),
+                    "3".to_string(),
+                    "4".to_string(),
+                ],
                 out_cm: self.out_cm.clone(),
                 public_asset_id: 1,
                 public_in: 0,
                 public_out: 0,
-                in_cv: [zero(), zero(), zero()],
-                out_cv: [zero(), zero(), zero()],
-                out_cv_dep: [zero(), zero(), zero()],
+                in_cv: [zero(), zero(), zero(), zero()],
+                out_cv: [zero(), zero(), zero(), zero()],
+                out_cv_dep: [zero(), zero(), zero(), zero()],
                 recipient: "0x0000000000000000000000000000000000000000".to_string(),
                 chain_id: 31337,
                 payer: "0x0000000000000000000000000000000000000000".to_string(),
