@@ -15,6 +15,27 @@ pub enum DecodeError {
     Alloy(String),
 }
 
+/// The fee leaf of a `DepositEscrowed`: a note addressed to whoever the payer
+/// chose to pay for the flush.
+///
+/// Grouped rather than spread across [`DecodedEvent::DepositEscrowed`]'s
+/// fields because the ten travel together everywhere, and every one of them is
+/// either escrow digest preimage or needed to spend the note — a consumer that
+/// carries nine of ten has produced a deposit that cannot be flushed.
+#[derive(Debug, Clone)]
+pub struct DepositFeeNote {
+    pub fee_in: u64,
+    pub cm: B256,
+    pub cv_dep_x: U256,
+    pub cv_dep_y: U256,
+    pub rcv: U256,
+    pub clue_rx: U256,
+    pub clue_ry: U256,
+    pub eph_pub_x: U256,
+    pub eph_pub_y: U256,
+    pub ciphertext: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum DecodedEvent {
@@ -64,6 +85,11 @@ pub enum DecodedEvent {
         eph_pub_x: U256,
         eph_pub_y: U256,
         ciphertext: Vec<u8>,
+        /// The relayer's fee note — the second leaf every deposit mints.
+        /// Carried alongside the depositor's rather than as a separate event
+        /// so consumers see one row per deposit, and so the pair cannot be
+        /// observed half-applied.
+        fee: DepositFeeNote,
     },
     DepositFlushed {
         id: U256,
@@ -158,6 +184,18 @@ pub fn decode(
                 eph_pub_x: ev.ephPubX,
                 eph_pub_y: ev.ephPubY,
                 ciphertext: ev.ciphertext.to_vec(),
+                fee: DepositFeeNote {
+                    fee_in: ev.feeIn,
+                    cm: ev.feeCm,
+                    cv_dep_x: ev.feeCvDepX,
+                    cv_dep_y: ev.feeCvDepY,
+                    rcv: ev.feeRcv,
+                    clue_rx: ev.feeClueRx,
+                    clue_ry: ev.feeClueRy,
+                    eph_pub_x: ev.feeEphPubX,
+                    eph_pub_y: ev.feeEphPubY,
+                    ciphertext: ev.feeCiphertext.to_vec(),
+                },
             }])
         }
         EventKind::DepositFlushed => {

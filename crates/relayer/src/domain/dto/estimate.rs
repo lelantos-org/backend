@@ -18,6 +18,18 @@ pub struct EstimateSpendRequest {
     pub kind: SpendKind,
 }
 
+/// Wire format for `/v1/deposit/estimate`. See [`EstimateSpendRequest`].
+///
+/// No `kind`: every deposit prices as `EntryPoint::Flush`. Unlike a spend, the
+/// quote is not for a transaction the caller is about to send — a deposit is
+/// escrowed by the wallet and flushed later — so what is being priced is this
+/// deposit's share of a future `flushBatch`.
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimateDepositRequest {
+    pub chain_id: i64,
+}
+
 /// Wire format for `/v1/swap/estimate`. See [`EstimateSpendRequest`].
 ///
 /// No `kind`: every swap prices as `EntryPoint::Swap`. The adapter and route

@@ -68,6 +68,7 @@ pub fn build(state: AppState) -> Router {
             "/v1/prices",
             get(handlers::prices).layer(cc("public, max-age=60")),
         )
+        .route("/v1/deposit/estimate", post(handlers::estimate_deposit))
         .route("/v1/spend", post(handlers::submit_spend))
         .route("/v1/spend/estimate", post(handlers::estimate_spend))
         .route("/v1/swap", post(handlers::submit_swap))

@@ -23,6 +23,15 @@ pub struct NewDepositEscrowed {
     pub cv_dep_y: BigDecimal,
     pub rcv: BigDecimal,
     pub aux: JsonValue,
+    /// The relayer's fee note, the deposit's second leaf. Digest preimage:
+    /// the relayer rebuilds `MASP._depositDigest` from these, so they are
+    /// stored exactly as logged rather than normalised.
+    pub fee_in: BigDecimal,
+    pub fee_cm: Vec<u8>,
+    pub fee_cv_dep_x: BigDecimal,
+    pub fee_cv_dep_y: BigDecimal,
+    pub fee_rcv: BigDecimal,
+    pub fee_aux: JsonValue,
     pub submitted_at_block: i64,
     pub tx_hash: Vec<u8>,
     pub block_ts: i64,

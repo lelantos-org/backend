@@ -59,6 +59,12 @@ sol! {
             bytes32 outCm;
             uint256[2] cvDep;
             uint256 rcv;
+            // The relayer's fee note — the second leaf every deposit mints.
+            // Appended, so the existing prefix keeps its ABI offsets.
+            uint64 feeIn;
+            bytes32 feeCm;
+            uint256[2] feeCvDep;
+            uint256 feeRcv;
         }
         /// Digest fields the contract does not store, replayed at flush time
         /// and verified against `escrowed[id]`. Sourced from the deposit's
@@ -90,12 +96,14 @@ sol! {
         function deposit(
             DepositRequest calldata d,
             Permit2Sig calldata sig,
-            OutputAux calldata aux
+            OutputAux calldata aux,
+            OutputAux calldata feeAux
         ) external returns (uint256 id);
 
         function depositAuthorized(
             DepositRequest calldata d,
-            OutputAux calldata aux
+            OutputAux calldata aux,
+            OutputAux calldata feeAux
         ) external returns (uint256 id);
 
         function flushBatch(
@@ -113,7 +121,10 @@ sol! {
             uint64 publicAssetId,
             uint16 fbps,
             address payer,
-            uint32 submittedAt
+            uint32 submittedAt,
+            uint48 feeIn,
+            bytes32 feeCm,
+            uint256[2] calldata feeCvDep
         ) external;
 
         function transfer(
@@ -172,9 +183,13 @@ sol! {
             IMasp.TreeUpdateBatch tpi_w;
             IMasp.OutputAux[3] aux_w;
             IMasp.DepositRequest deposit_d;
-            /// One leaf per deposit, hence one aux payload; leg 1's withdraw
-            /// carries one per transact output.
+            /// Two leaves per deposit, hence two aux payloads; leg 1's
+            /// withdraw carries one per transact output.
             IMasp.OutputAux aux_d;
+            /// Fee-note payload for the B-note deposit's second leaf. The swap
+            /// pays the relayer on its withdraw leg, so this is a zero-value
+            /// pad — but it is still a leaf, and still digest preimage.
+            IMasp.OutputAux fee_aux_d;
         }
 
         function swap(SwapArgs calldata a) external returns (uint256 actualOut, uint256 depositId);

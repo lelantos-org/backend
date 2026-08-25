@@ -240,6 +240,7 @@ async fn dispatch(
             eph_pub_x,
             eph_pub_y,
             ciphertext,
+            fee,
         } => {
             let aux = events::encode_aux(clue_rx, clue_ry, eph_pub_x, eph_pub_y, &ciphertext);
             events::deposit_escrowed(
@@ -257,6 +258,7 @@ async fn dispatch(
                 cv_dep_y,
                 rcv,
                 aux,
+                fee,
             )
             .await
         }

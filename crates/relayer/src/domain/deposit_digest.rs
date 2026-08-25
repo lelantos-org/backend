@@ -18,13 +18,20 @@ use alloy::sol_types::SolValue;
 pub const MAX_PUBLIC_IN: u64 = (1u64 << 48) - 1;
 
 /// `keccak256(abi.encode(address(this), block.chainid, id, cm, cvDep,
-/// publicAssetId, publicIn, feeBpsAtSubmit, payer, submittedAt))`.
+/// publicAssetId, publicIn, feeBpsAtSubmit, payer, submittedAt, feeIn, feeCm,
+/// feeCvDep))`.
 ///
 /// `abi.encode` is not packed, so every static field occupies a full word and
 /// the declared Solidity widths (`uint64` / `uint48` / `uint16` / `uint32`)
 /// encode identically to `U256` as long as the value fits — which
 /// [`MAX_PUBLIC_IN`] and the `PendingDeposit` field types already guarantee.
-/// `cvDep` is a static `uint256[2]`, so it lands inline as two words.
+/// `cvDep` and `feeCvDep` are static `uint256[2]`, so each lands inline as two
+/// words.
+///
+/// The trailing three fields bind the relayer's fee note. They are preimage for
+/// the same reason the depositor's leaf is: `flushBatch` supplies both leaves
+/// from calldata, so a flusher that could vary them would mint itself an
+/// arbitrary note.
 pub fn deposit_digest(masp: Address, chain_id: u64, d: &PendingDeposit) -> B256 {
     let preimage = (
         masp,
@@ -37,6 +44,9 @@ pub fn deposit_digest(masp: Address, chain_id: u64, d: &PendingDeposit) -> B256 
         U256::from(d.fee_bps_at_submit),
         Address::from(d.payer),
         U256::from(d.submitted_at),
+        U256::from(d.fee_in),
+        B256::from(d.fee_cm),
+        d.fee_cv_dep,
     );
     keccak256(preimage.abi_encode_params())
 }
@@ -44,6 +54,7 @@ pub fn deposit_digest(masp: Address, chain_id: u64, d: &PendingDeposit) -> B256 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value as JsonValue;
 
     /// Every field distinct and non-zero, so a swapped pair or a dropped
     /// field cannot coincidentally hash to the same digest.
@@ -58,6 +69,11 @@ mod tests {
             submitted_at: 5,
             cv_dep: [U256::from(6), U256::from(7)],
             rcv: U256::from(8),
+            fee_in: 9,
+            fee_cm: [0xef; 32],
+            fee_cv_dep: [U256::from(10), U256::from(11)],
+            fee_rcv: U256::from(12),
+            fee_aux: JsonValue::Null,
         }
     }
 
@@ -70,10 +86,12 @@ mod tests {
     ///
     /// ```sh
     /// cast keccak "$(cast abi-encode \
-    ///   'f(address,uint256,uint256,bytes32,uint256[2],uint64,uint48,uint16,address,uint32)' \
+    ///   'f(address,uint256,uint256,bytes32,uint256[2],uint64,uint48,uint16,address,uint32,\
+    ///      uint48,bytes32,uint256[2])' \
     ///   0x1111111111111111111111111111111111111111 31337 42 \
     ///   0x2222222222222222222222222222222222222222222222222222222222222222 \
-    ///   '[3,4]' 7 1000000 25 0x3333333333333333333333333333333333333333 123456)"
+    ///   '[3,4]' 7 1000000 25 0x3333333333333333333333333333333333333333 123456 \
+    ///   9 0x4444444444444444444444444444444444444444444444444444444444444444 '[5,6]')"
     /// ```
     ///
     /// A drift here quarantines every deposit on every chain, so both this and
@@ -91,10 +109,15 @@ mod tests {
             submitted_at: 123_456,
             cv_dep: [U256::from(3), U256::from(4)],
             rcv: U256::ZERO,
+            fee_in: 9,
+            fee_cm: [0x44; 32],
+            fee_cv_dep: [U256::from(5), U256::from(6)],
+            fee_rcv: U256::ZERO,
+            fee_aux: JsonValue::Null,
         };
         assert_eq!(
             deposit_digest(Address::from([0x11; 20]), 31337, &d),
-            b256("0xd690ccb708eda517cb94bf1153d42c0aa19fe48dcaf5129e45adbd6a8459953e")
+            b256("0x2ac6af6b953f74ca86136d4b238f0e897949047cd8a2e63da1b8a8dfb4a74ecf")
         );
     }
 
@@ -116,6 +139,14 @@ mod tests {
             submitted_at: 1,
             cv_dep: [U256::from(0xaa1), U256::from(0xaa2)],
             rcv: U256::from(0xccc),
+            // The harness deposits with a zero-value fee note, which is a
+            // valid shape: a subsidised chain sets `feeIn` to zero and the
+            // leaf is still minted and still spendable.
+            fee_in: 0,
+            fee_cm: U256::from(0xfee).to_be_bytes(),
+            fee_cv_dep: [U256::ZERO, U256::ZERO],
+            fee_rcv: U256::ZERO,
+            fee_aux: JsonValue::Null,
         };
         assert_eq!(
             deposit_digest(
@@ -123,16 +154,18 @@ mod tests {
                 31337,
                 &d
             ),
-            b256("0xe42d20070c82c14b5c4799e3d0047aa7ff1d9b96c8c31d380b9abb5015da756b")
+            b256("0xf5e086b8cb99abac3e7d4f3127326701062baca8f537443fce0231adca4e9884")
         );
     }
 
-    /// `rcv` is the private blinder; it is not part of the escrow preimage.
+    /// `rcv` and `fee_rcv` are private blinders; neither is part of the
+    /// escrow preimage.
     #[test]
-    fn the_private_blinder_does_not_enter_the_digest() {
+    fn the_private_blinders_do_not_enter_the_digest() {
         let mut d = deposit();
         let without = deposit_digest(Address::ZERO, 1, &d);
         d.rcv += U256::from(9999);
+        d.fee_rcv += U256::from(8888);
         assert_eq!(without, deposit_digest(Address::ZERO, 1, &d));
     }
 
@@ -150,6 +183,13 @@ mod tests {
             ("submitted_at", |d| d.submitted_at += 1),
             ("cv_dep.x", |d| d.cv_dep[0] += U256::from(1)),
             ("cv_dep.y", |d| d.cv_dep[1] += U256::from(1)),
+            // The fee leaf is bound for the same reason: `flushBatch` takes
+            // both leaves from calldata, so a flusher that could vary these
+            // would mint itself an arbitrary note.
+            ("fee_in", |d| d.fee_in += 1),
+            ("fee_cm", |d| d.fee_cm[0] ^= 1),
+            ("fee_cv_dep.x", |d| d.fee_cv_dep[0] += U256::from(1)),
+            ("fee_cv_dep.y", |d| d.fee_cv_dep[1] += U256::from(1)),
         ];
 
         let expected = deposit_digest(Address::ZERO, 1, &deposit());

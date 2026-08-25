@@ -123,6 +123,8 @@ fn deposit_escrowed_roundtrip() {
     let recipient = Address::repeat_byte(0x02);
     let cm = B256::repeat_byte(0xef);
     let ct = vec![0x00, 0x09, 0x77, 0x88];
+    let fee_cm_v = B256::repeat_byte(0xab);
+    let fee_ct = vec![0x11, 0x22, 0x33];
 
     let ev = DepositEscrowed {
         id: U256::from(9u64),
@@ -140,6 +142,16 @@ fn deposit_escrowed_roundtrip() {
         ephPubX: U256::from(13u64),
         ephPubY: U256::from(14u64),
         ciphertext: ct.clone().into(),
+        feeIn: 500,
+        feeCm: fee_cm_v,
+        feeCvDepX: U256::from(3001u64),
+        feeCvDepY: U256::from(3002u64),
+        feeRcv: U256::from(3003u64),
+        feeClueRx: U256::from(21u64),
+        feeClueRy: U256::from(22u64),
+        feeEphPubX: U256::from(23u64),
+        feeEphPubY: U256::from(24u64),
+        feeCiphertext: fee_ct.clone().into(),
     };
     let log = ev.encode_log_data();
     let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
@@ -164,6 +176,7 @@ fn deposit_escrowed_roundtrip() {
             eph_pub_x,
             eph_pub_y,
             ciphertext,
+            fee,
         } => {
             assert_eq!(*id, U256::from(9u64));
             assert_eq!(*p, payer);
@@ -180,6 +193,19 @@ fn deposit_escrowed_roundtrip() {
             assert_eq!(*eph_pub_x, U256::from(13u64));
             assert_eq!(*eph_pub_y, U256::from(14u64));
             assert_eq!(*ciphertext, ct);
+            // The fee note must survive the roundtrip intact: it is digest
+            // preimage, so a single dropped field makes the deposit
+            // unflushable rather than merely mispriced.
+            assert_eq!(fee.fee_in, 500);
+            assert_eq!(fee.cm, fee_cm_v);
+            assert_eq!(fee.cv_dep_x, U256::from(3001u64));
+            assert_eq!(fee.cv_dep_y, U256::from(3002u64));
+            assert_eq!(fee.rcv, U256::from(3003u64));
+            assert_eq!(fee.clue_rx, U256::from(21u64));
+            assert_eq!(fee.clue_ry, U256::from(22u64));
+            assert_eq!(fee.eph_pub_x, U256::from(23u64));
+            assert_eq!(fee.eph_pub_y, U256::from(24u64));
+            assert_eq!(fee.ciphertext, fee_ct);
         }
         _ => panic!("wrong variant"),
     }

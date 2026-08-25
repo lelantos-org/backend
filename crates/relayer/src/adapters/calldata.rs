@@ -12,9 +12,19 @@ use alloy::primitives::{FixedBytes, U256};
 use fmd_crypto::tree::Field;
 
 /// Max leaves per `tree_update_batch` proof (mirrors `PubInputs.MAX_L_BATCH`).
-/// Counted in leaves, not pairs: a deposit is one leaf, a spend is
+/// Counted in leaves, not deposits: a deposit is two leaves, a spend is
 /// `TRANSACT_OUT`.
 pub const MAX_L_BATCH: usize = 4;
+
+/// Leaves one deposit mints (mirrors `PubInputs.LEAVES_PER_DEPOSIT`): the
+/// depositor's note, then the note paying whoever flushed it.
+///
+/// Widening `MAX_L_BATCH` needs a new trusted setup — `COUNT_BITS = 2` pins it
+/// — so this halves the deposits per batch rather than adding slots.
+pub const LEAVES_PER_DEPOSIT: usize = 2;
+
+/// Deposits one `flushBatch` can carry.
+pub const MAX_DEPOSITS_PER_BATCH: usize = MAX_L_BATCH / LEAVES_PER_DEPOSIT;
 
 /// The batch circuit's leaf-indexed arrays, at full width.
 ///
@@ -66,8 +76,13 @@ impl PaddedBatch {
         batch
     }
 
-    /// Deposit leaves, one per escrowed deposit, each carrying the binding the
-    /// circuit checks against its value commitment.
+    /// Deposit leaves, **two per escrowed deposit**, each carrying the binding
+    /// the circuit checks against its value commitment.
+    ///
+    /// The caller supplies them already flattened and in tree order — the
+    /// depositor's note at `2i`, the relayer's fee note at `2i + 1` — which is
+    /// the order `_drainDeposit` reads them back in. Both leaves of a deposit
+    /// carry `is_deposit = 1` and share an asset.
     ///
     /// # Panics
     /// As [`Self::from_spend`].
@@ -242,5 +257,43 @@ pub fn build_deposit_request(d: &DepositRequestDto) -> AppResult<IMasp::DepositR
         outCm: parse_b32(&d.out_cm)?,
         cvDep: [parse_u256(&d.cv_dep[0])?, parse_u256(&d.cv_dep[1])?],
         rcv: parse_u256(&d.rcv)?,
+        feeIn: d.fee_in,
+        feeCm: parse_b32(&d.fee_cm)?,
+        feeCvDep: [parse_u256(&d.fee_cv_dep[0])?, parse_u256(&d.fee_cv_dep[1])?],
+        feeRcv: parse_u256(&d.fee_rcv)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors the constructor guard in `MASP.sol`. These three constants
+    /// describe one circuit shape, and `MAX_L_BATCH` cannot move without a new
+    /// trusted setup — so a batch sized against a stale pair would be built,
+    /// proven and only then rejected on chain.
+    #[test]
+    fn test_batch_constants_describe_one_circuit_shape() {
+        assert_eq!(MAX_DEPOSITS_PER_BATCH * LEAVES_PER_DEPOSIT, MAX_L_BATCH);
+    }
+
+    /// Both leaves of a deposit must be marked as deposit leaves: the circuit
+    /// gates its per-leaf value binding on `is_deposit`, so a fee leaf left at
+    /// zero would have its `cv_dep` unconstrained.
+    #[test]
+    fn test_from_deposits_marks_every_supplied_leaf_as_a_deposit() {
+        let leaf = |cm: u8, public_in: u64| DepositLeaf {
+            cm: FixedBytes::<32>::repeat_byte(cm),
+            cv_dep: [U256::from(1), U256::from(2)],
+            leaf_asset: 7,
+            leaf_public_in: public_in,
+        };
+        let batch = PaddedBatch::from_deposits(&[leaf(0xaa, 1_000), leaf(0xbb, 250)]);
+
+        assert_eq!(batch.actual_count, 2);
+        assert_eq!(batch.is_deposit, [1, 1, 0, 0]);
+        // Padding stays zero — the contract and the circuit both enforce it.
+        assert_eq!(batch.cms[2], FixedBytes::<32>::ZERO);
+        assert_eq!(batch.leaf_public_in, [1_000, 250, 0, 0]);
+    }
 }

@@ -2,7 +2,7 @@ pub mod estimate;
 pub mod swap;
 pub mod transact;
 
-pub use estimate::{EstimateSpendRequest, EstimateSwapRequest};
+pub use estimate::{EstimateDepositRequest, EstimateSpendRequest, EstimateSwapRequest};
 pub use swap::{DepositRequestDto, SubmitSwapPayload, SwapBlob};
 pub use transact::{
     OutputAuxDto, PointDto, ProofDto, PubInputsDto, SpendKind, SubmitSpendPayload, TRANSACT_IN,
@@ -69,6 +69,13 @@ mod wire_contract {
             "outCm": "0x05",
             "cvDep": ["23", "24"],
             "rcv": "27",
+            // The deposit's second leaf. `feeIn` is a JSON number here and a
+            // decimal string on `/v1/deposit` — the two DTOs declare it
+            // differently, and `codec.ts` encodes each accordingly.
+            "feeIn": 5,
+            "feeCm": "0x06",
+            "feeCvDep": ["25", "26"],
+            "feeRcv": "28",
         })
     }
 
@@ -115,6 +122,7 @@ mod wire_contract {
                 "route": "0x00",
                 "depositD": deposit_request(),
                 "auxD": aux(),
+                "feeAuxD": aux(),
                 "tokenIn": "0x0000000000000000000000000000000000000111",
                 "tokenOut": "0x0000000000000000000000000000000000000222",
                 "amountIn": "1000",
@@ -125,6 +133,8 @@ mod wire_contract {
         let p: SubmitSwapPayload = serde_json::from_value(raw).expect("swap payload");
         assert_eq!(p.swap.deposit_d.public_in, 990);
         assert_eq!(p.swap.deposit_d.rcv, "27");
+        assert_eq!(p.swap.deposit_d.fee_in, 5);
+        assert_eq!(p.swap.deposit_d.fee_rcv, "28");
         assert_eq!(p.swap.deadline, None);
     }
 }

@@ -1,5 +1,6 @@
 pub mod chains;
 pub mod deposits;
+pub mod estimate_deposit;
 pub mod estimate_spend;
 pub mod estimate_swap;
 pub mod health;
@@ -11,6 +12,7 @@ pub mod transact;
 
 pub use chains::chains;
 pub use deposits::deposits_stream;
+pub use estimate_deposit::estimate_deposit;
 pub use estimate_spend::estimate_spend;
 pub use estimate_swap::estimate_swap;
 pub use health::health;

@@ -35,14 +35,19 @@ pub enum EntryPoint {
     Withdraw = 1,
     WithdrawNative = 2,
     Swap = 3,
+    /// `flushBatch`. Unlike the others this is not one user's transaction:
+    /// the receipt covers the whole batch, so `flush.rs` observes
+    /// `gas_used / deposits` and each deposit is quoted that share.
+    Flush = 4,
 }
 
 impl EntryPoint {
-    pub const ALL: [EntryPoint; 4] = [
+    pub const ALL: [EntryPoint; 5] = [
         EntryPoint::Transfer,
         EntryPoint::Withdraw,
         EntryPoint::WithdrawNative,
         EntryPoint::Swap,
+        EntryPoint::Flush,
     ];
     const COUNT: usize = Self::ALL.len();
 
@@ -59,6 +64,11 @@ impl EntryPoint {
             EntryPoint::Withdraw => 560_000,
             EntryPoint::WithdrawNative => 600_000,
             EntryPoint::Swap => 950_000,
+            // Per deposit, not per batch: one `tree_update_batch` verify plus
+            // two leaf insertions and the escrow drain. Seeded high for the
+            // same reason as the rest — under-quoting is the relayer's loss,
+            // and until a batch has landed there is nothing to average.
+            EntryPoint::Flush => 420_000,
         }
     }
 
@@ -68,6 +78,7 @@ impl EntryPoint {
             EntryPoint::Withdraw => "withdraw",
             EntryPoint::WithdrawNative => "withdrawNative",
             EntryPoint::Swap => "swap",
+            EntryPoint::Flush => "flush",
         }
     }
 }

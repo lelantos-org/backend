@@ -6,7 +6,7 @@
 
 use crate::adapters::locks::ChainLocks;
 use crate::domain::error::Result;
-use crate::domain::pending::{CommitPlan, EscrowedMap, LeafPayload, plan_commit};
+use crate::domain::pending::{CommitPlan, EscrowedLeaves, EscrowedMap, LeafPayload, plan_commit};
 use crate::repositories::cursor::{CursorRepo, UpsertCursor};
 use crate::repositories::notes::NotesRepo;
 use crate::repositories::raw_events::{RawEventRow, RawEventsRepo};
@@ -385,23 +385,38 @@ fn flushed_deposit_ids(rows: &[RawEventRow]) -> Vec<Vec<u8>> {
     ids
 }
 
-fn decode_escrowed(row: &RawEventRow) -> Option<(String, LeafPayload)> {
+fn decode_escrowed(row: &RawEventRow) -> Option<(String, EscrowedLeaves)> {
     let log = LogData::new_unchecked(
         row.topics.iter().map(|t| B256::from_slice(t)).collect(),
         row.data.clone().into(),
     );
     let ev = DepositEscrowed::decode_log_data(&log, true).ok()?;
-    let payload = LeafPayload {
-        cm: ev.cm.0.to_vec(),
-        clue_rx: ev.clueRx,
-        clue_ry: ev.clueRy,
-        eph_pub_x: ev.ephPubX,
-        eph_pub_y: ev.ephPubY,
-        ciphertext: ev.ciphertext.to_vec(),
-        cv_dep_x: ev.cvDepX,
-        cv_dep_y: ev.cvDepY,
+    // The fee note is a real leaf with its own FMD payload, so it is scanned
+    // like any other — the relayer detects its own note by trial decryption,
+    // exactly as a wallet does.
+    let leaves = EscrowedLeaves {
+        principal: LeafPayload {
+            cm: ev.cm.0.to_vec(),
+            clue_rx: ev.clueRx,
+            clue_ry: ev.clueRy,
+            eph_pub_x: ev.ephPubX,
+            eph_pub_y: ev.ephPubY,
+            ciphertext: ev.ciphertext.to_vec(),
+            cv_dep_x: ev.cvDepX,
+            cv_dep_y: ev.cvDepY,
+        },
+        fee: LeafPayload {
+            cm: ev.feeCm.0.to_vec(),
+            clue_rx: ev.feeClueRx,
+            clue_ry: ev.feeClueRy,
+            eph_pub_x: ev.feeEphPubX,
+            eph_pub_y: ev.feeEphPubY,
+            ciphertext: ev.feeCiphertext.to_vec(),
+            cv_dep_x: ev.feeCvDepX,
+            cv_dep_y: ev.feeCvDepY,
+        },
     };
-    Some((U256::from(ev.id).to_string(), payload))
+    Some((U256::from(ev.id).to_string(), leaves))
 }
 
 /// How long each chain has been parked on the same cursor.
@@ -528,6 +543,16 @@ mod tests {
             ephPubX: U256::ZERO,
             ephPubY: U256::ZERO,
             ciphertext: Bytes::from(vec![0x00, 0x07]),
+            feeIn: 0,
+            feeCm: B256::repeat_byte(0xdd),
+            feeCvDepX: U256::ZERO,
+            feeCvDepY: U256::ZERO,
+            feeRcv: U256::ZERO,
+            feeClueRx: U256::from(3u64),
+            feeClueRy: U256::from(4u64),
+            feeEphPubX: U256::ZERO,
+            feeEphPubY: U256::ZERO,
+            feeCiphertext: Bytes::from(vec![0x00, 0x09]),
         };
         let log = ev.encode_log_data();
         let stored = row(
@@ -540,8 +565,13 @@ mod tests {
         let (id, payload) = decode_escrowed(&stored).expect("round-trips");
 
         assert_eq!(id, "42");
-        assert_eq!(payload.cm, vec![0xcc; 32]);
-        assert_eq!(payload.ciphertext, vec![0x00, 0x07]);
+        assert_eq!(payload.principal.cm, vec![0xcc; 32]);
+        assert_eq!(payload.principal.ciphertext, vec![0x00, 0x07]);
+        // The fee leaf is carried in the same event and must land in the
+        // second slot: the tree inserts it after the principal, so a swap
+        // gives both notes the wrong leaf index.
+        assert_eq!(payload.fee.cm, vec![0xdd; 32]);
+        assert_eq!(payload.fee.ciphertext, vec![0x00, 0x09]);
     }
 
     #[test]

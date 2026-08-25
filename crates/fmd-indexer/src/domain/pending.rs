@@ -63,8 +63,20 @@ impl LeafPayload {
     }
 }
 
-/// Map from deposit_id (decimal string) → that deposit's single leaf.
-pub type EscrowedMap = HashMap<String, LeafPayload>;
+/// The two leaves one deposit mints, in the order `flushBatch` inserts them:
+/// the depositor's note, then the note paying whoever flushed it.
+///
+/// The order is not cosmetic — it is the leaf order the tree commits, so
+/// swapping them assigns both notes the wrong `leaf_index` and every Merkle
+/// proof built against them fails.
+#[derive(Clone)]
+pub struct EscrowedLeaves {
+    pub principal: LeafPayload,
+    pub fee: LeafPayload,
+}
+
+/// Map from deposit_id (decimal string) → that deposit's two leaves.
+pub type EscrowedMap = HashMap<String, EscrowedLeaves>;
 
 /// Debug-printable: these are public chain values, and a plan is the first
 /// thing worth dumping when a tick commits something unexpected.
@@ -411,7 +423,13 @@ impl PendingTx {
                     self.deferred = true;
                     return Ok(());
                 };
-                self.push_leaf(cx, payload.clone(), LeafOrder::LeafLeads);
+                // Two leaves, and `DepositFlushed` announces only the first:
+                // the contract emits once per deposit while inserting both, so
+                // the fee leaf has no event of its own and would otherwise
+                // leave the tx's leaf count short of `inserted`.
+                let leaves = payload.clone();
+                self.push_leaf(cx, leaves.principal, LeafOrder::LeafLeads);
+                self.push_leaf(cx, leaves.fee, LeafOrder::LeafLeads);
             }
 
             _ => {}
@@ -544,8 +562,8 @@ mod tests {
     }
 
     fn escrow(deposit_id: u64, ciphertext: Vec<u8>) -> EscrowedMap {
-        let payload = LeafPayload {
-            cm: vec![deposit_id as u8; 32],
+        let leaf = |tag: u8, ciphertext: Vec<u8>| LeafPayload {
+            cm: vec![tag; 32],
             clue_rx: U256::from(1u64),
             clue_ry: U256::from(2u64),
             eph_pub_x: U256::ZERO,
@@ -554,7 +572,13 @@ mod tests {
             cv_dep_x: U256::ZERO,
             cv_dep_y: U256::ZERO,
         };
-        EscrowedMap::from([(deposit_id.to_string(), payload)])
+        let leaves = EscrowedLeaves {
+            principal: leaf(deposit_id as u8, ciphertext.clone()),
+            // Distinct `cm` so a test cannot pass by committing the same leaf
+            // twice.
+            fee: leaf(deposit_id as u8 ^ 0xff, ciphertext),
+        };
+        EscrowedMap::from([(deposit_id.to_string(), leaves)])
     }
 
     fn leaf_indices(plan: &CommitPlan) -> Vec<i64> {
@@ -634,31 +658,35 @@ mod tests {
     fn deposits_emitted_before_their_root_are_rebased_onto_it() {
         // `flushBatch` inverts the usual order: leaves first, root after. Each
         // deposit holds its ordinal until the root supplies the base.
+        //
+        // Two deposits, four leaves: each mints its own note and the note
+        // paying whoever flushed it, so `inserted` is twice the deposit count.
         let mut rows = Rows::default();
         rows.flushed(0x01, 10, 7)
             .flushed(0x01, 10, 8)
-            .root(0x01, 10, 32, 2);
+            .root(0x01, 10, 32, 4);
 
         let mut escrowed = escrow(7, usable_ciphertext());
         escrowed.extend(escrow(8, usable_ciphertext()));
 
         let plan = rows.plan(&escrowed).expect("tx is complete");
 
-        assert_eq!(leaf_indices(&plan), [32, 33]);
+        assert_eq!(leaf_indices(&plan), [32, 33, 34, 35]);
     }
 
     #[test]
     fn a_deposit_whose_escrow_is_not_ingested_defers_its_tx() {
         let mut rows = Rows::default();
-        rows.flushed(0x01, 10, 7).root(0x01, 10, 0, 1);
+        rows.flushed(0x01, 10, 7).root(0x01, 10, 0, 2);
 
         assert!(rows.plan_bare().is_none(), "waits for the escrow event");
 
         // ...and resolves once the escrow lands, without any other change.
+        // One `DepositFlushed`, two leaves: the escrow event carries both.
         let plan = rows
             .plan(&escrow(7, usable_ciphertext()))
             .expect("resolved");
-        assert_eq!(leaf_indices(&plan), [0]);
+        assert_eq!(leaf_indices(&plan), [0, 1]);
     }
 
     #[test]
@@ -667,8 +695,8 @@ mod tests {
         // waiting — tx 1's events would never be read again.
         let mut rows = Rows::default();
         rows.flushed(0x01, 10, 7)
-            .root(0x01, 10, 0, 1)
-            .root(0x02, 11, 1, 1)
+            .root(0x01, 10, 0, 2)
+            .root(0x02, 11, 2, 1)
             .note(0x02, 11, 0xa0, usable_ciphertext());
 
         assert!(rows.plan_bare().is_none());

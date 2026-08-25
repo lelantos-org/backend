@@ -1,4 +1,5 @@
 pub mod asset_registry;
+pub mod deposit_fee;
 pub mod deposit_mempool;
 pub mod escrow;
 pub mod events;

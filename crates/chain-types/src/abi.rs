@@ -91,7 +91,21 @@ sol! {
         uint256 clueRy,
         uint256 ephPubX,
         uint256 ephPubY,
-        bytes ciphertext
+        bytes ciphertext,
+        // The relayer's fee note. Non-indexed: all three topic slots are
+        // already taken, and a relayer finds its note by trial decryption
+        // rather than by filtering, so indexing would buy nothing and would
+        // publish who is being paid.
+        uint64 feeIn,
+        bytes32 feeCm,
+        uint256 feeCvDepX,
+        uint256 feeCvDepY,
+        uint256 feeRcv,
+        uint256 feeClueRx,
+        uint256 feeClueRy,
+        uint256 feeEphPubX,
+        uint256 feeEphPubY,
+        bytes feeCiphertext
     );
 
     /// Emitted per-deposit inside `flushBatch`. (id, cm) — the full per-note

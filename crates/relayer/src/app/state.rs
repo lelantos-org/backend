@@ -1,4 +1,4 @@
-use crate::adapters::calldata::MAX_L_BATCH;
+use crate::adapters::calldata::MAX_DEPOSITS_PER_BATCH;
 use crate::adapters::parse::{FieldRef, parse_field};
 use crate::adapters::rpc::RpcEndpoint;
 use crate::app::config::{ChainCfg, ChainPublicCfg, RelayerConfig};
@@ -41,6 +41,9 @@ pub struct AppState {
     /// Built only for chains where `swap_wrapper_address` is configured.
     /// HTTP `/v1/swap` looks up by `payload.chain_id`.
     pub swap_pipelines: Arc<HashMap<i64, Arc<SwapPipeline>>>,
+    /// One flush pipeline per chain. Held for `/v1/deposit/estimate`; the
+    /// flush worker owns its own clone.
+    pub flush_pipelines: Arc<HashMap<i64, Arc<FlushPipeline>>>,
     /// Process-wide deposit lifecycle pub/sub. SSE handler subscribes;
     /// `FlushPipeline` publishes after each successful `flushBatch`.
     pub events: Arc<EventBroadcaster>,
@@ -134,6 +137,14 @@ impl AppState {
             .ok_or(AppError::UnknownChain(chain_id))
     }
 
+    /// The flush pipeline serving `chain_id`, for `/v1/deposit/estimate`.
+    pub fn flush_pipeline(&self, chain_id: i64) -> AppResult<Arc<FlushPipeline>> {
+        self.flush_pipelines
+            .get(&chain_id)
+            .cloned()
+            .ok_or(AppError::UnknownChain(chain_id))
+    }
+
     pub fn serves_chain(&self, chain_id: i64) -> bool {
         self.spend_pipelines.contains_key(&chain_id)
     }
@@ -149,8 +160,10 @@ pub async fn build_state(
 
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
+    let mut flush_pipelines: HashMap<i64, Arc<FlushPipeline>> = HashMap::new();
     for c in &cfg.chains {
         let chain = build_chain(c, &shared).await?;
+        flush_pipelines.insert(c.chain_id, chain.flush.clone());
         spawn_flush_worker(chain.flush, Duration::from_secs(c.flush_interval_s));
         spend_pipelines.insert(c.chain_id, chain.spend);
         if let Some(swap) = chain.swap {
@@ -161,6 +174,7 @@ pub async fn build_state(
     Ok(AppState {
         spend_pipelines: Arc::new(spend_pipelines),
         swap_pipelines: Arc::new(swap_pipelines),
+        flush_pipelines: Arc::new(flush_pipelines),
         events: shared.events,
         pool,
         nullifiers: Arc::new(NullifierGuards::new(cfg.chains.iter().map(|c| c.chain_id))),
@@ -302,9 +316,13 @@ async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
             EscrowReader::new(rpc.clone(), &c.pool_address)
                 .map_err(|e| boot_err(c.chain_id, "escrow reader", e))?,
         ),
-        max_n: c.flush_max_n.clamp(1, MAX_L_BATCH),
+        max_n: c.flush_max_n.clamp(1, MAX_DEPOSITS_PER_BATCH),
         events: shared.events.clone(),
         failures: DepositFailures::new(c.chain_id, c.flush_max_attempts),
+        shielded_fee: shielded_fee.clone(),
+        gas_witness: gas_witness.clone(),
+        fee_quoter: fee_quoter.clone(),
+        assets: shared.assets.clone(),
     });
 
     info!(

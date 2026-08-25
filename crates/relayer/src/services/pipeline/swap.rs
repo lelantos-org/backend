@@ -184,6 +184,7 @@ fn encode_swap_calldata(
     let aux_w = build_aux(&payload.aux)?;
     let deposit_d = build_deposit_request(&payload.swap.deposit_d)?;
     let aux_d = build_one_aux(&payload.swap.aux_d)?;
+    let fee_aux_d = build_one_aux(&payload.swap.fee_aux_d)?;
     let route_bytes = parse_hex_bytes(&payload.swap.route, "route")?;
     Ok(ISwapWrapper::swapCall {
         a: ISwapWrapper::SwapArgs {
@@ -194,6 +195,7 @@ fn encode_swap_calldata(
             aux_w,
             deposit_d,
             aux_d,
+            fee_aux_d,
             adapter: parse_address(&payload.swap.adapter)?,
             route: route_bytes,
             deadline,
@@ -331,7 +333,13 @@ mod tests {
             recipient: "0x000000000000000000000000000000000000beef".into(),
             out_cm: format!("0x{:0>64}", "5"),
             cv_dep: [zero.clone(), zero.clone()],
-            rcv: zero,
+            rcv: zero.clone(),
+            // The swap pays the relayer on its withdraw leg, so the B-note
+            // deposit's fee leaf is a zero-value pad.
+            fee_in: 0,
+            fee_cm: format!("0x{:0>64}", "6"),
+            fee_cv_dep: [zero.clone(), zero.clone()],
+            fee_rcv: zero,
         }
     }
 
@@ -349,6 +357,7 @@ mod tests {
                         .into(),
                 deposit_d: fake_deposit(wrapper, 990),
                 aux_d: one_aux(),
+                fee_aux_d: one_aux(),
                 token_in: "0x0000000000000000000000000000000000000111".into(),
                 token_out: "0x0000000000000000000000000000000000000222".into(),
                 amount_in: "1000".into(),

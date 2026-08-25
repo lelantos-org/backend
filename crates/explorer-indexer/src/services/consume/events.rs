@@ -8,6 +8,7 @@ use crate::repositories::{
 };
 use crate::util::u256_to_bigdecimal;
 use alloy::primitives::{Address, B256, U256};
+use chain_types::decode::DepositFeeNote;
 use database::DbPool;
 use serde_json::json;
 
@@ -73,6 +74,7 @@ pub async fn deposit_escrowed(
     cv_dep_y: U256,
     rcv: U256,
     aux: serde_json::Value,
+    fee: DepositFeeNote,
 ) -> Result<(), ExplorerIndexerError> {
     deposit_events::insert(
         pool,
@@ -91,6 +93,21 @@ pub async fn deposit_escrowed(
             cv_dep_y: u256_to_bigdecimal(cv_dep_y),
             rcv: u256_to_bigdecimal(rcv),
             aux,
+            fee_in: u256_to_bigdecimal(U256::from(fee.fee_in)),
+            fee_cm: fee.cm.0.to_vec(),
+            fee_cv_dep_x: u256_to_bigdecimal(fee.cv_dep_x),
+            fee_cv_dep_y: u256_to_bigdecimal(fee.cv_dep_y),
+            fee_rcv: u256_to_bigdecimal(fee.rcv),
+            // Built here rather than by the caller: the fee leaf's payload is
+            // stored in the same shape as the depositor's, and doing it in one
+            // place is what keeps the two from drifting.
+            fee_aux: encode_aux(
+                fee.clue_rx,
+                fee.clue_ry,
+                fee.eph_pub_x,
+                fee.eph_pub_y,
+                &fee.ciphertext,
+            ),
             // The digest the contract stored hashes `uint32(block.number)`,
             // which on Arbitrum is the L1 height rather than `row.block_number`.
             // Rows ingested before `evm_block_number` existed fall back — correct

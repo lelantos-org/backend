@@ -34,8 +34,12 @@ pub struct SwapBlob {
     /// Slim deposit request for the B note. `payer` MUST equal the
     /// `swap_wrapper_address`.
     pub deposit_d: DepositRequestDto,
-    /// One leaf per deposit, hence one aux payload.
+    /// The B-note deposit's own leaf.
     pub aux_d: OutputAuxDto,
+    /// The B-note deposit's fee leaf. Two leaves per deposit, so two aux
+    /// payloads. The swap pays the relayer on its withdraw leg, so this
+    /// carries a zero-value note — still a real leaf, still digest preimage.
+    pub fee_aux_d: OutputAuxDto,
     pub token_in: String,
     pub token_out: String,
     /// Decimal U256 string. Must equal `pi_w.publicOut * scale`; the
@@ -67,4 +71,13 @@ pub struct DepositRequestDto {
     /// The leaf's `rcv_dep`. Private witness for the batch circuit's
     /// per-leaf deposit binding; published off-chain via `DepositEscrowed`.
     pub rcv: String,
+    /// The deposit's second leaf: a note paying whoever flushes the batch.
+    ///
+    /// On the swap path this is a zero-value pad — the swap already pays the
+    /// relayer on its withdraw leg — but the leaf is still minted and still
+    /// escrow digest preimage, so the fields must be carried.
+    pub fee_in: u64,
+    pub fee_cm: String,
+    pub fee_cv_dep: [String; 2],
+    pub fee_rcv: String,
 }

@@ -4,6 +4,7 @@
 // Pending = NOT (flushed OR canceled). Order by `submitted_at_block` so
 // older deposits drain first.
 
+use crate::adapters::calldata::LEAVES_PER_DEPOSIT;
 use crate::adapters::numeric::{bigdecimal_to_u64, bigdecimal_to_u256};
 use crate::domain::error::{AppError, AppResult};
 use alloy::primitives::U256;
@@ -13,10 +14,16 @@ use database::DbPool;
 use database::schema::deposit_escrowed_events;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
+use serde_json::Value as JsonValue;
 use tracing::warn;
 
-/// One escrowed deposit awaiting a flush. A deposit occupies exactly one
-/// leaf, so this carries a single `cm` / `cv_dep` / `rcv`.
+/// One escrowed deposit awaiting a flush.
+///
+/// A deposit occupies two leaves — the depositor's note and the note paying
+/// whoever flushes it — so this carries a `cm` / `cv_dep` / `rcv` for each.
+/// The fields are flat because they are a projection of the event row;
+/// [`PendingDeposit::leaves`] is what pairs them up in tree order, and the
+/// flush pipeline goes through it rather than reading the fields directly.
 #[derive(Debug, Clone)]
 pub struct PendingDeposit {
     pub id: u64,
@@ -35,6 +42,65 @@ pub struct PendingDeposit {
     pub submitted_at: u32,
     pub cv_dep: [U256; 2],
     pub rcv: U256,
+    /// The relayer's fee note — the second leaf the deposit mints, and the
+    /// only thing that pays for the `flushBatch` gas.
+    ///
+    /// `fee_in`, `fee_cm` and `fee_cv_dep` are digest preimage, so they must
+    /// read back exactly as escrowed. `fee_rcv` is not: it is the private
+    /// blinder, needed to build that leaf's batch witness. `fee_aux` is the
+    /// encrypted payload the relayer trial-decrypts to learn what it is being
+    /// paid.
+    pub fee_in: u64,
+    pub fee_cm: [u8; 32],
+    pub fee_cv_dep: [U256; 2],
+    pub fee_rcv: U256,
+    pub fee_aux: JsonValue,
+}
+
+/// One of the two leaves a deposit mints.
+///
+/// Both are denominated in the deposit's own asset — `_drainDeposit` requires
+/// it — so `asset_id` is carried per leaf rather than looked up again by every
+/// consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EscrowLeaf {
+    pub cm: [u8; 32],
+    pub cv_dep: [U256; 2],
+    pub asset_id: u64,
+    pub public_in: u64,
+    /// The leaf's `rcv_dep`: private witness for the batch circuit's per-leaf
+    /// deposit binding, never part of the escrow digest.
+    pub rcv: U256,
+}
+
+impl PendingDeposit {
+    /// This deposit's leaves in the order `flushBatch` inserts them: the
+    /// depositor's note, then the note paying whoever flushed it.
+    ///
+    /// Every leaf-indexed array the flush pipeline builds goes through here,
+    /// so the order is decided once. `_drainDeposit` reads the pair back at
+    /// exactly `2i` and `2i + 1` and rejects the batch if either is not a
+    /// deposit leaf, so a transposition costs the whole batch its proof —
+    /// which is why this is one named function rather than a tuple assembled
+    /// at each call site.
+    pub fn leaves(&self) -> [EscrowLeaf; LEAVES_PER_DEPOSIT] {
+        [
+            EscrowLeaf {
+                cm: self.cm,
+                cv_dep: self.cv_dep,
+                asset_id: self.public_asset_id,
+                public_in: self.public_in,
+                rcv: self.rcv,
+            },
+            EscrowLeaf {
+                cm: self.fee_cm,
+                cv_dep: self.fee_cv_dep,
+                asset_id: self.public_asset_id,
+                public_in: self.fee_in,
+                rcv: self.fee_rcv,
+            },
+        ]
+    }
 }
 
 /// The `pop_pending` projection. Narrower than the table: the flush path
@@ -52,6 +118,12 @@ struct DepositRow {
     cv_dep_x: BigDecimal,
     cv_dep_y: BigDecimal,
     rcv: BigDecimal,
+    fee_in: BigDecimal,
+    fee_cm: Vec<u8>,
+    fee_cv_dep_x: BigDecimal,
+    fee_cv_dep_y: BigDecimal,
+    fee_rcv: BigDecimal,
+    fee_aux: JsonValue,
 }
 
 impl TryFrom<DepositRow> for PendingDeposit {
@@ -84,6 +156,16 @@ impl TryFrom<DepositRow> for PendingDeposit {
                 bigdecimal_to_u256(&r.cv_dep_y)?,
             ],
             rcv: bigdecimal_to_u256(&r.rcv)?,
+            // The contract narrows `feeIn` to `uint48` before hashing it, so
+            // a wider value could never have been escrowed in the first place.
+            fee_in: bigdecimal_to_u64(&r.fee_in)?,
+            fee_cm: fixed_bytes(&r.fee_cm, "fee_cm")?,
+            fee_cv_dep: [
+                bigdecimal_to_u256(&r.fee_cv_dep_x)?,
+                bigdecimal_to_u256(&r.fee_cv_dep_y)?,
+            ],
+            fee_rcv: bigdecimal_to_u256(&r.fee_rcv)?,
+            fee_aux: r.fee_aux,
         })
     }
 }
@@ -231,4 +313,53 @@ fn to_id_bds(ids: &[u64]) -> AppResult<Vec<BigDecimal>> {
 fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> AppResult<[u8; N]> {
     v.try_into()
         .map_err(|_| AppError::Internal(format!("expected {N}-byte {field}, got {}", v.len())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deposit() -> PendingDeposit {
+        PendingDeposit {
+            id: 1,
+            cm: [0xaa; 32],
+            public_asset_id: 7,
+            public_in: 1_000,
+            fee_bps_at_submit: 25,
+            payer: [0xcd; 20],
+            submitted_at: 99,
+            cv_dep: [U256::from(1), U256::from(2)],
+            rcv: U256::from(3),
+            fee_in: 250,
+            fee_cm: [0xbb; 32],
+            fee_cv_dep: [U256::from(4), U256::from(5)],
+            fee_rcv: U256::from(6),
+            fee_aux: JsonValue::Null,
+        }
+    }
+
+    /// The order is what `_drainDeposit` reads back at `2i` and `2i + 1`.
+    /// Swapping the pair builds a batch that proves and then reverts, so this
+    /// pins it rather than leaving it to each call site.
+    #[test]
+    fn test_leaves_puts_the_depositors_note_before_the_fee_note() {
+        let d = deposit();
+        let [principal, fee] = d.leaves();
+
+        assert_eq!(principal.cm, d.cm);
+        assert_eq!(principal.public_in, d.public_in);
+        assert_eq!(principal.rcv, d.rcv);
+
+        assert_eq!(fee.cm, d.fee_cm);
+        assert_eq!(fee.public_in, d.fee_in);
+        assert_eq!(fee.rcv, d.fee_rcv);
+    }
+
+    /// `_drainDeposit` requires both leaves to name the deposit's asset, and
+    /// the fee note has no asset field of its own to disagree with.
+    #[test]
+    fn test_both_leaves_carry_the_deposits_asset() {
+        let d = deposit();
+        assert!(d.leaves().iter().all(|l| l.asset_id == d.public_asset_id));
+    }
 }

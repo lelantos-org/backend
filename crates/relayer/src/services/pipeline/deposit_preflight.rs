@@ -17,6 +17,7 @@
 //! table can be tested without either.
 
 use crate::domain::deposit_digest::{MAX_PUBLIC_IN, deposit_digest};
+use crate::services::deposit_fee::FeeNote;
 use crate::services::deposit_mempool::PendingDeposit;
 use alloy::primitives::{Address, B256};
 
@@ -46,8 +47,39 @@ pub enum Verdict {
     DigestMismatch,
 }
 
+/// Whether this relayer charges for the flush, and what it found in the
+/// deposit's fee leaf.
+///
+/// Arrives already computed so [`classify`] stays pure — the trial decryption
+/// and the gas quote are the caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeeGate {
+    /// This relayer takes a fee: the deposit's fee leaf must be a note it owns
+    /// and worth at least `required` circuit units of the deposit's asset.
+    Charged { note: FeeNote, required: u64 },
+    /// No shielded fee is configured for this chain, so flushes are subsidised
+    /// and the fee leaf is not inspected at all. It is still minted and still
+    /// spendable — by whoever the payer addressed it to.
+    ///
+    /// Without this a subsidised chain would stall completely: with no viewing
+    /// key there is nothing to decrypt with, every deposit would read as
+    /// `NotOurs`, and nothing would ever flush.
+    Subsidised,
+    /// The fee could not be priced at all — an asset this relayer will not
+    /// take, or an oracle that is down. Distinct from an unpaid one: the
+    /// deposit may be perfectly funded and the fault entirely this relayer's,
+    /// so it must not be recorded as anything the deposit did wrong.
+    Unpriceable,
+}
+
 /// Judge `d` against `stored`, the digest the chain holds under its id.
-pub fn classify(d: &PendingDeposit, stored: B256, masp: Address, chain_id: u64) -> Verdict {
+pub fn classify(
+    d: &PendingDeposit,
+    stored: B256,
+    masp: Address,
+    chain_id: u64,
+    fee: &FeeGate,
+) -> Verdict {
     // `_drainDeposit` bounds this before narrowing to `uint48`, so an
     // oversized value reverts `PublicInTooLarge` however it is replayed.
     if d.public_in > MAX_PUBLIC_IN {
@@ -68,7 +100,29 @@ pub fn classify(d: &PendingDeposit, stored: B256, masp: Address, chain_id: u64) 
     if d.rcv.bit_len() > RCV_BITS {
         return Verdict::Reject("rcv exceeds the circuit's 252-bit blinder");
     }
-    Verdict::Flushable
+    // The same bound applies to the fee leaf's blinder: it is witnessed by the
+    // same `MulH`, and the contract cannot screen for it either.
+    if d.fee_rcv.bit_len() > RCV_BITS {
+        return Verdict::Reject("fee_rcv exceeds the circuit's 252-bit blinder");
+    }
+
+    // Every fee outcome is a `Skip`, never a `Reject`. A deposit this relayer
+    // will not flush is still perfectly flushable by the relayer it actually
+    // pays, and by the payer themselves — `flushBatch` is permissionless.
+    // Rejecting would be this relayer asserting something about a deposit that
+    // is none of its business, and `Reject` is remembered where `Skip` is not.
+    match fee {
+        FeeGate::Subsidised => Verdict::Flushable,
+        FeeGate::Unpriceable => Verdict::Skip("cannot price the flush for this asset"),
+        FeeGate::Charged { note, required } => match note {
+            FeeNote::NotOurs => Verdict::Skip("fee note is not addressed to this relayer"),
+            FeeNote::Malformed(why) => Verdict::Skip(why),
+            FeeNote::Paid { paid } if paid < required => {
+                Verdict::Skip("fee note does not cover the flush")
+            }
+            FeeNote::Paid { .. } => Verdict::Flushable,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +144,20 @@ mod tests {
             submitted_at: 99,
             cv_dep: [U256::from(3), U256::from(4)],
             rcv: U256::from(5),
+            fee_in: 250,
+            fee_cm: [0xef; 32],
+            fee_cv_dep: [U256::from(6), U256::from(7)],
+            fee_rcv: U256::from(8),
+            fee_aux: serde_json::Value::Null,
+        }
+    }
+
+    /// A fee leaf that is ours and covers the flush — the ordinary case, so
+    /// the tests below vary one thing at a time against it.
+    fn paid() -> FeeGate {
+        FeeGate::Charged {
+            note: FeeNote::Paid { paid: 250 },
+            required: 250,
         }
     }
 
@@ -101,14 +169,17 @@ mod tests {
     #[test]
     fn a_deposit_matching_its_escrow_slot_is_flushable() {
         let d = deposit();
-        assert_eq!(classify(&d, escrowed(&d), MASP, CHAIN), Verdict::Flushable);
+        assert_eq!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &paid()),
+            Verdict::Flushable
+        );
     }
 
     #[test]
     fn an_empty_escrow_slot_is_skipped_not_held_against_the_deposit() {
         let d = deposit();
         assert!(matches!(
-            classify(&d, B256::ZERO, MASP, CHAIN),
+            classify(&d, B256::ZERO, MASP, CHAIN, &paid()),
             Verdict::Skip(_)
         ));
     }
@@ -121,7 +192,7 @@ mod tests {
         // The fee changed after submit; the digest binds the submit-time one.
         stale.fee_bps_at_submit += 1;
         assert_eq!(
-            classify(&stale, stored, MASP, CHAIN),
+            classify(&stale, stored, MASP, CHAIN, &paid()),
             Verdict::DigestMismatch
         );
     }
@@ -131,7 +202,10 @@ mod tests {
     fn a_slot_from_another_pool_is_a_mismatch() {
         let d = deposit();
         let stored = deposit_digest(Address::new([0x99; 20]), CHAIN, &d);
-        assert_eq!(classify(&d, stored, MASP, CHAIN), Verdict::DigestMismatch);
+        assert_eq!(
+            classify(&d, stored, MASP, CHAIN, &paid()),
+            Verdict::DigestMismatch
+        );
     }
 
     /// Checked before the digest: an oversized `public_in` reverts on its own
@@ -142,7 +216,7 @@ mod tests {
         d.public_in = MAX_PUBLIC_IN + 1;
         let stored = escrowed(&d);
         assert!(matches!(
-            classify(&d, stored, MASP, CHAIN),
+            classify(&d, stored, MASP, CHAIN, &paid()),
             Verdict::Reject(_)
         ));
     }
@@ -156,7 +230,7 @@ mod tests {
         d.rcv = U256::from(1u8) << RCV_BITS;
         let stored = escrowed(&d);
         assert!(matches!(
-            classify(&d, stored, MASP, CHAIN),
+            classify(&d, stored, MASP, CHAIN, &paid()),
             Verdict::Reject(_)
         ));
     }
@@ -167,7 +241,10 @@ mod tests {
         let mut d = deposit();
         d.rcv = (U256::from(1u8) << RCV_BITS) - U256::from(1u8);
         let stored = escrowed(&d);
-        assert_eq!(classify(&d, stored, MASP, CHAIN), Verdict::Flushable);
+        assert_eq!(
+            classify(&d, stored, MASP, CHAIN, &paid()),
+            Verdict::Flushable
+        );
     }
 
     /// `rcv` is not in the escrow preimage, so a replay that disagrees with
@@ -179,13 +256,133 @@ mod tests {
         let stored = escrowed(&d);
         d.rcv = U256::from(1u8) << RCV_BITS;
         d.public_asset_id += 1;
-        assert_eq!(classify(&d, stored, MASP, CHAIN), Verdict::DigestMismatch);
+        assert_eq!(
+            classify(&d, stored, MASP, CHAIN, &paid()),
+            Verdict::DigestMismatch
+        );
     }
 
     #[test]
     fn the_largest_representable_public_in_is_still_flushable() {
         let mut d = deposit();
         d.public_in = MAX_PUBLIC_IN;
-        assert_eq!(classify(&d, escrowed(&d), MASP, CHAIN), Verdict::Flushable);
+        assert_eq!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &paid()),
+            Verdict::Flushable
+        );
+    }
+
+    /// The fee leaf's blinder is witnessed by the same `MulH` as the
+    /// depositor's, and the contract screens neither.
+    #[test]
+    fn a_fee_rcv_wider_than_the_circuit_blinder_is_rejected() {
+        let mut d = deposit();
+        d.fee_rcv = U256::from(1u8) << RCV_BITS;
+        let stored = escrowed(&d);
+        assert!(matches!(
+            classify(&d, stored, MASP, CHAIN, &paid()),
+            Verdict::Reject(_)
+        ));
+    }
+
+    /// Not this relayer's note. Someone else can flush it, and the payer can
+    /// cancel it, so this must never be quarantined.
+    #[test]
+    fn a_fee_note_addressed_elsewhere_is_skipped_not_rejected() {
+        let d = deposit();
+        let gate = FeeGate::Charged {
+            note: FeeNote::NotOurs,
+            required: 250,
+        };
+        assert!(matches!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &gate),
+            Verdict::Skip(_)
+        ));
+    }
+
+    /// The approved behaviour for an underpaid deposit: decline to flush and
+    /// leave it, rather than flush at a loss or quarantine it.
+    #[test]
+    fn a_fee_note_that_does_not_cover_the_flush_is_skipped() {
+        let d = deposit();
+        let gate = FeeGate::Charged {
+            note: FeeNote::Paid { paid: 249 },
+            required: 250,
+        };
+        assert!(matches!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &gate),
+            Verdict::Skip(_)
+        ));
+    }
+
+    /// Exactly the required amount is enough — the grace is already applied to
+    /// `required`, so this bound must not be strict on the other side.
+    #[test]
+    fn a_fee_note_worth_exactly_the_required_amount_is_flushable() {
+        let d = deposit();
+        let gate = FeeGate::Charged {
+            note: FeeNote::Paid { paid: 250 },
+            required: 250,
+        };
+        assert_eq!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &gate),
+            Verdict::Flushable
+        );
+    }
+
+    /// A payload that decrypts for us but describes a different leaf. Skipped
+    /// rather than rejected for the same reason as `NotOurs`: the payer can
+    /// still cancel, and nothing about it stops another relayer.
+    #[test]
+    fn a_malformed_fee_note_is_skipped() {
+        let d = deposit();
+        let gate = FeeGate::Charged {
+            note: FeeNote::Malformed("fee note rcv_dep is not the escrowed feeRcv"),
+            required: 250,
+        };
+        assert!(matches!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &gate),
+            Verdict::Skip(_)
+        ));
+    }
+
+    /// A pricing failure is the relayer's problem, not the deposit's, so it
+    /// must never be quarantined over one.
+    #[test]
+    fn a_deposit_whose_flush_cannot_be_priced_is_skipped() {
+        let d = deposit();
+        assert!(matches!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &FeeGate::Unpriceable),
+            Verdict::Skip(_)
+        ));
+    }
+
+    /// A subsidised chain has no viewing key, so every deposit would read as
+    /// `NotOurs` and nothing would ever flush. The gate is skipped entirely.
+    #[test]
+    fn a_subsidised_chain_flushes_without_inspecting_the_fee_leaf() {
+        let d = deposit();
+        assert_eq!(
+            classify(&d, escrowed(&d), MASP, CHAIN, &FeeGate::Subsidised),
+            Verdict::Flushable
+        );
+    }
+
+    /// Fee outcomes are judged only after the digest, so an unpayable fee
+    /// never masks a replay that did not come from this deposit at all.
+    #[test]
+    fn a_digest_mismatch_outranks_an_unpaid_fee() {
+        let d = deposit();
+        let stored = escrowed(&d);
+        let mut stale = d.clone();
+        stale.fee_bps_at_submit += 1;
+        let gate = FeeGate::Charged {
+            note: FeeNote::NotOurs,
+            required: 250,
+        };
+        assert_eq!(
+            classify(&stale, stored, MASP, CHAIN, &gate),
+            Verdict::DigestMismatch
+        );
     }
 }
