@@ -5,9 +5,9 @@
 //! where `legendre(h) = 1` iff `h` is a quadratic residue in 𝔽_r (BN254 scalar).
 //! Receiver accepts iff for all i ∈ [γ], `bit_i ⊕ c_bits[i] == 1`.
 //!
-//! v3 replaces v2's `lsb1` extraction with the Legendre symbol so the
-//! in-circuit `HashToBit` gadget verifies in 4 constraints (vs ~254 for
-//! `Num2Bits`). v2 clues are NOT interoperable with v3.
+//! The Legendre symbol is used instead of `lsb1` extraction so the in-circuit
+//! `HashToBit` gadget verifies in 4 constraints rather than the ~254 that
+//! `Num2Bits` requires.
 
 use crate::poseidon::hash as poseidon_hash;
 use ark_ed_on_bn254::{Fq, Fr};
@@ -15,17 +15,16 @@ use ark_ff::{Field, LegendreSymbol};
 
 use super::coords::{CircomPoint, FixedBaseTable, scalar_mul};
 
-/// Domain-separation tag for FMD bit derivation. Mirrors `TAG_FMD_BIT`
-/// reserved in `circuits/src/lib/tags.circom`. Must NOT collide with other
-/// Poseidon tags in this codebase (1..=7 already taken).
+/// Domain-separation tag for FMD bit derivation, mirroring `TAG_FMD_BIT` in
+/// `circuits/src/lib/tags.circom`. Must not collide with the other Poseidon tags
+/// in this codebase, which occupy 1..=7.
 pub const TAG_FMD_BIT: u64 = 8;
 
 /// Compute the per-component `bit_i` for a given clue R + shared secret S_i.
 ///
-/// Inputs are circomlib Baby-Jubjub coordinates. SNARK-friendly hash: the
-/// in-circuit `ClueCheck` template runs the same Poseidon over the same six
-/// field elements, so witness derivation matches receiver-side detection
-/// byte-for-byte.
+/// Inputs are circomlib Baby-Jubjub coordinates. The in-circuit `ClueCheck`
+/// template runs the same Poseidon over the same six field elements, so witness
+/// derivation matches receiver-side detection byte for byte.
 fn shared_bit(r: &CircomPoint, i: u32, s: &CircomPoint) -> u8 {
     let inputs = [
         Fq::from(TAG_FMD_BIT),
@@ -39,9 +38,8 @@ fn shared_bit(r: &CircomPoint, i: u32, s: &CircomPoint) -> u8 {
     match h.legendre() {
         LegendreSymbol::QuadraticResidue => 1,
         LegendreSymbol::QuadraticNonResidue => 0,
-        // h == 0 has probability 1/r ≈ 2^-254. Treat as bit=0 to keep the
-        // function total; in practice this branch is unreachable on honest
-        // Poseidon outputs and the SNARK gadget rejects hash=0 explicitly.
+        // h == 0 has probability 1/r ≈ 2^-254. Treated as bit 0 to keep the
+        // function total; the SNARK gadget rejects hash = 0 explicitly.
         LegendreSymbol::Zero => 0,
     }
 }
@@ -73,8 +71,8 @@ pub fn test_clue(dk: &[Fr], r: CircomPoint, clue_bits: u16, gamma: usize) -> boo
 ///
 /// Returns a `Vec<bool>` of length `dks.len()`, aligned with the input order.
 /// Equivalent to calling [`test_clue`] for each `dk` with the same `(r,
-/// clue_bits, gamma)`, but amortizes a fixed-base window table over all
-/// keys and culls survivors bit-by-bit so each subsequent batch shrinks.
+/// clue_bits, gamma)`, but amortizes a fixed-base window table over all keys and
+/// culls survivors bit by bit so each subsequent batch shrinks.
 pub fn test_clue_batch(dks: &[&[Fr]], r: CircomPoint, clue_bits: u16, gamma: usize) -> Vec<bool> {
     let n = dks.len();
     if n == 0 {

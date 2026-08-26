@@ -1,9 +1,8 @@
 //! Live-tail worker handler.
 //!
-//! Tick, sleep, and — the part that used to be missing — survive a failure.
-//! A bare `svc.tick().await?` propagated any transient provider error all the
-//! way out of the worker task, and nothing restarted it: one 429 stopped that
-//! chain until the process was restarted.
+//! Ticks, sleeps and survives transient failures. Propagating a provider error
+//! straight out of the worker task would stop that chain until the process
+//! restarted, so ticks are retried under a per-tick policy.
 
 use crate::domain::error::IngesterError;
 use crate::domain::models::TickOutcome;
@@ -26,9 +25,9 @@ pub async fn run(svc: Arc<dyn LiveService>) -> Result<LiveExit, IngesterError> {
     info!(chain_id, poll_ms = svc.poll_ms(), "live mode start");
 
     loop {
-        // Retries are per tick, so a chain that recovers does not carry a
-        // failure budget forward. Exhausting them returns the error, which
-        // releases the advisory lock and lets a standby try the chain.
+        // Retries are per tick, so a chain that recovers does not carry a failure
+        // budget forward. Exhausting them returns the error, releasing the
+        // advisory lock so a standby can take the chain.
         let outcome = retrying(Policy::LIVE_TICK, "live tick", chain_id, || svc.tick()).await?;
 
         if let TickOutcome::Lagging { lag } = outcome {

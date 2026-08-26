@@ -1,25 +1,23 @@
 //! Prometheus metrics: names, descriptions, and the exporter's listener.
 //!
-//! # Why the facade
+//! # Facade
 //!
-//! Instrumentation points are scattered across services that are built by
-//! explicit DI (`ConsumeServiceImpl`, `AppState`, the tree mirror). Threading a
-//! registry through every constructor for a cross-cutting concern is a large
-//! diff for no gain, so this uses the global-recorder `metrics` facade instead.
-//! With no recorder installed every macro is a no-op, which is what lets
-//! `shared::tick::run` be instrumented once for every tick service while only
-//! the binaries that call [`init`] emit anything.
+//! Instrumentation points are spread across services built by explicit DI
+//! (`ConsumeServiceImpl`, `AppState`, the tree mirror), so this uses the
+//! global-recorder `metrics` facade rather than threading a registry through
+//! every constructor. With no recorder installed every macro is a no-op, which
+//! lets `shared::tick::run` be instrumented once for every tick service while
+//! only the binaries that call [`init`] emit anything.
 //!
 //! # Cardinality
 //!
-//! Every label value here is bounded: a handful of chains, a fixed set of
-//! service names, a closed set of outcomes, and — for HTTP — the *matched route
-//! template*, never the request path. `chunk_id` and `leaf_count` must never
-//! become labels: one series per chunk would grow without limit and eventually
-//! take out whatever scrapes this.
+//! Every label value is bounded: a handful of chains, a fixed set of service
+//! names, a closed set of outcomes, and for HTTP the matched route template
+//! rather than the request path. `chunk_id` and `leaf_count` must never become
+//! labels; one series per chunk would grow without limit.
 
-/// Metric names, in one place so the emitting site and any dashboard or test
-/// referring to them cannot drift.
+/// Metric names, kept in one place so emitting sites, dashboards and tests
+/// cannot drift apart.
 pub mod name {
     // fmd-webserver
     pub const HTTP_REQUESTS: &str = "http_requests_total";
@@ -45,16 +43,16 @@ pub mod name {
     pub const NOTES_MAX_ID: &str = "notes_max_id";
     pub const CONSUMER_CURSOR_NOTE_ID: &str = "consumer_cursor_note_id";
 
-    // Cross-service. Emitted by every stage that commits derived state, so the
-    // `stage` label is what makes one pipeline's latency readable end to end.
+    // Cross-service. Emitted by every stage that commits derived state; the
+    // `stage` label makes one pipeline's latency readable end to end.
     pub const EVENT_AGE: &str = "event_age_seconds";
 }
 
 /// Pipeline stages that report [`name::EVENT_AGE`].
 ///
 /// Named rather than written inline at each call site: the `stage` label set
-/// has to stay closed, and a typo in a bare literal mints a second time series
-/// that no dashboard is watching instead of failing.
+/// must stay closed, and a typo in a bare literal would mint an unwatched time
+/// series instead of failing.
 pub mod stage {
     /// Chain -> `raw_events`, recorded by the ingester's live tail.
     pub const INGEST: &str = "ingest";
@@ -64,17 +62,17 @@ pub mod stage {
 
 /// Label value for a request that matched no route.
 ///
-/// Without this, 404s would label by raw path and every scanner probing the
+/// Without it, 404s would label by raw path and every scanner probing the
 /// origin would mint a permanent time series.
 pub const UNMATCHED_ROUTE: &str = "<unmatched>";
 
 /// Bucket boundaries for every duration histogram, in seconds.
 ///
-/// One shared set rather than per-metric tuning: it has to span an HTTP request
-/// that should take a millisecond and a cold tree rebuild that takes seconds,
-/// and a single set keeps the series aggregatable across replicas. Explicit
-/// buckets are the point — the exporter's default is per-process summary
-/// quantiles, which cannot be summed at all.
+/// One shared set rather than per-metric tuning: it must span a millisecond
+/// HTTP request and a multi-second cold tree rebuild, and a single set keeps the
+/// series aggregatable across replicas. Explicit buckets are required because
+/// the exporter defaults to per-process summary quantiles, which cannot be
+/// summed.
 #[cfg(feature = "metrics-exporter")]
 const DURATION_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
@@ -82,22 +80,22 @@ const DURATION_BUCKETS: &[f64] = &[
 
 /// Install the Prometheus recorder and serve `/metrics` on `addr`.
 ///
-/// The exporter owns the listener, which is why a service with no HTTP surface
-/// of its own needs nothing else to be scrapable.
+/// The exporter owns the listener, so a service with no HTTP surface of its own
+/// is scrapable without further wiring.
 ///
-/// # On not enforcing loopback here
+/// # Loopback is not enforced here
 ///
-/// `/metrics` must not be publicly reachable, but that property cannot be
-/// asserted at this bind. Under compose the process binds `0.0.0.0` inside its
-/// own network namespace and the host publishes `127.0.0.1:<port>:<port>`;
-/// binding container-loopback instead makes the published port unreachable,
-/// because Docker forwards to the container's interface address rather than its
-/// loopback. So a hard check here would refuse to start in the one deployment
-/// that matters while proving nothing about host exposure.
+/// `/metrics` must not be publicly reachable, but that cannot be asserted at
+/// this bind. Under compose the process binds `0.0.0.0` inside its own network
+/// namespace while the host publishes `127.0.0.1:<port>:<port>`; binding
+/// container-loopback would make the published port unreachable, since Docker
+/// forwards to the container's interface address. A hard check here would
+/// therefore break the production deployment while proving nothing about host
+/// exposure.
 ///
-/// The real guarantees live where they can be enforced: the loopback publish in
-/// `compose.prod.yml.j2`, and the `deny_metrics` snippet in the Caddyfile. A
-/// non-loopback bind is still worth saying out loud, so it warns.
+/// The guarantees are enforced by the loopback publish in `compose.prod.yml.j2`
+/// and the `deny_metrics` snippet in the Caddyfile. A non-loopback bind still
+/// warns.
 ///
 /// Call once, from `main`, inside the tokio runtime.
 #[cfg(feature = "metrics-exporter")]
@@ -122,8 +120,22 @@ pub fn init(addr: std::net::SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Units and help text. Purely descriptive, but it is what makes a scrape
-/// readable without cross-referencing this file.
+/// [`init`], with the address still in its configured string form.
+///
+/// Every binary that serves `/metrics` reads the address from config, so the
+/// parse and its error context belong here rather than in each `main`.
+#[cfg(feature = "metrics-exporter")]
+pub fn init_addr(addr: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let parsed = addr
+        .parse()
+        .with_context(|| format!("metrics_addr {addr}"))?;
+    init(parsed).context("install metrics listener")
+}
+
+/// Units and help text, so a scrape is readable without cross-referencing this
+/// file.
 #[cfg(feature = "metrics-exporter")]
 fn describe() {
     use ::metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
@@ -232,14 +244,13 @@ fn describe() {
 
 /// Record how old the freshest event in a just-committed batch is.
 ///
-/// Called once per commit rather than once per row: the newest event is what
-/// bounds how stale a reader can be, and a per-row sample would let one wide
-/// backfill batch dominate the histogram.
+/// Called once per commit rather than once per row: the newest event bounds how
+/// stale a reader can be, and per-row samples would let a wide backfill batch
+/// dominate the histogram.
 ///
 /// `block_ts` is the chain's own second-resolution timestamp, so a host clock
-/// running behind the node yields a negative age. Clamped at zero rather than
-/// skipped — a skewed host should read as "instant", not disappear from the
-/// histogram that exists to make it visible.
+/// behind the node yields a negative age. Clamped at zero rather than skipped,
+/// so a skewed host reads as instant instead of vanishing from the histogram.
 pub fn record_event_age(stage: &'static str, chain_id: i64, block_ts: i64) {
     let age = chrono::Utc::now().timestamp() - block_ts;
     ::metrics::histogram!(
@@ -252,10 +263,10 @@ pub fn record_event_age(stage: &'static str, chain_id: i64, block_ts: i64) {
 
 /// HTTP middleware recording [`name::HTTP_REQUESTS`] and [`name::HTTP_DURATION`].
 ///
-/// The `route` label is the **matched route template** from
+/// The `route` label is the matched route template from
 /// [`axum::extract::MatchedPath`], so
-/// `/v1/chains/:chain_id/commitments/chunks/:chunk_id` is one series rather
-/// than one per chunk id. A request that matched nothing is labelled
+/// `/v1/chains/:chain_id/commitments/chunks/:chunk_id` is one series rather than
+/// one per chunk id. A request that matched nothing is labelled
 /// [`UNMATCHED_ROUTE`] for the same reason.
 #[cfg(feature = "webserver")]
 pub async fn track_http(
@@ -265,8 +276,8 @@ pub async fn track_http(
     use axum::extract::MatchedPath;
     use std::time::Instant;
 
-    // Cloned out of the extensions before the request is consumed. Owned
-    // `String`s because the labels outlive the request either way.
+    // Cloned out of the extensions before the request is consumed; the labels
+    // outlive the request, so owned `String`s are required.
     let route = req
         .extensions()
         .get::<MatchedPath>()
@@ -298,12 +309,9 @@ pub async fn track_http(
 /// Record the serialised size of a chunk-feed response body.
 ///
 /// Read from the body's exact size hint rather than re-serialising: `Json`
-/// produces a single in-memory buffer, so the hint *is* the byte count and
-/// costs nothing. `None` would mean a streaming body, which this feed never
-/// produces — skipped rather than guessed, so the counter stays a true total.
-///
-/// This is the number that decides whether a binary wire format is ever worth
-/// revisiting; PLAN.MD argued that case from estimates.
+/// produces a single in-memory buffer, so the hint is the byte count. `None`
+/// would mean a streaming body, which this feed never produces, and is skipped
+/// rather than estimated so the counter stays an exact total.
 #[cfg(feature = "webserver")]
 pub fn record_chunk_feed_bytes(kind: &'static str, resp: &axum::response::Response) {
     use axum::body::HttpBody;
@@ -316,7 +324,7 @@ pub fn record_chunk_feed_bytes(kind: &'static str, resp: &axum::response::Respon
 /// Record a cache lookup outcome.
 ///
 /// `cache` names the field in the app's cache struct; `outcome` is `"hit"` or
-/// `"miss"`. Both label sets are closed, so this cannot grow series.
+/// `"miss"`. Both label sets are closed, so series count is bounded.
 #[cfg(feature = "webserver")]
 pub fn record_cache(cache: &'static str, hit: bool) {
     ::metrics::counter!(
@@ -330,8 +338,8 @@ pub fn record_cache(cache: &'static str, hit: bool) {
 /// Hit/miss for a `moka` `try_get_with`, which reports neither itself.
 ///
 /// `moka` runs the initialiser only on a miss, so a flag set inside it is the
-/// only signal available. The flag lives behind an `Arc` because the
-/// initialiser is an `async move` block and cannot borrow the caller's frame.
+/// only available signal. The flag lives behind an `Arc` because the initialiser
+/// is an `async move` block and cannot borrow the caller's frame.
 ///
 /// ```ignore
 /// let probe = CacheProbe::new("notes_pages");
@@ -371,8 +379,8 @@ impl CacheProbe {
         MissMarker(self.missed.clone())
     }
 
-    /// Emit the outcome. Call once, after `try_get_with` has returned —
-    /// including on the error path, where a failed load is still a miss.
+    /// Emit the outcome. Call once after `try_get_with` returns, including on
+    /// the error path, where a failed load still counts as a miss.
     pub fn record(&self) {
         let missed = self.missed.load(std::sync::atomic::Ordering::Relaxed);
         record_cache(self.cache, !missed);
@@ -394,8 +402,8 @@ mod tests {
 
     /// Records the full key (name + labels) of every counter touched.
     ///
-    /// The assertion this exists for is about *series count*, so the recorder
-    /// has to keep keys rather than values.
+    /// The assertion is about series count, so the recorder keeps keys rather
+    /// than values.
     #[derive(Clone, Default)]
     struct KeyCapture(Arc<Mutex<HashSet<String>>>);
 
@@ -434,15 +442,14 @@ mod tests {
 
     /// The cardinality guard.
     ///
-    /// Labelling by request path instead of matched route would mint one time
-    /// series per chunk id — unbounded, and eventually fatal to whatever
-    /// scrapes this. Distinct chunk ids must collapse onto a single series, and
-    /// a path that matched no route must not create one of its own.
+    /// Labelling by request path instead of matched route would mint one
+    /// unbounded time series per chunk id. Distinct chunk ids must collapse onto
+    /// a single series, and a path that matched no route must not create one.
     #[tokio::test]
     async fn distinct_chunk_ids_share_one_series() {
         let capture = KeyCapture::default();
         // `with_local_recorder` keeps this off the process-global recorder, so
-        // the test cannot be perturbed by another test installing one.
+        // another test installing one cannot perturb this.
         let keys = metrics::with_local_recorder(&capture, || {
             futures::executor::block_on(async {
                 let app = app();

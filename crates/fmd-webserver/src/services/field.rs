@@ -1,9 +1,9 @@
 //! Field-element conversions for the wire format.
 //!
 //! Coordinates are stored as `NUMERIC(78, 0)` and served as `0x`-prefixed hex.
-//! The prefix is load-bearing: the SDK routes these through a decoder that
-//! accepts decimal *or* `0x`-hex, so bare hex whose digits happen to all be
-//! decimal would be silently parsed as the wrong number.
+//! The prefix is required: the SDK routes these through a decoder accepting
+//! decimal or `0x`-hex, so bare hex whose digits are all decimal would parse as
+//! the wrong number.
 
 use crate::domain::error::{AppError, AppResult};
 use fmd_crypto::tree::Field;
@@ -29,9 +29,9 @@ pub fn bigdec_to_field(v: &bigdecimal::BigDecimal) -> AppResult<Field> {
 
 /// Big-endian 32-byte field element from a `BYTEA` column, left-padded.
 ///
-/// Postgres does not pad `BYTEA`, so a commitment with leading zero bytes
-/// comes back short. Widening on the left preserves the value; taking the
-/// bytes as-is would shift it.
+/// Postgres does not pad `BYTEA`, so a commitment with leading zero bytes comes
+/// back short. Widening on the left preserves the value; taking the bytes as-is
+/// would shift it.
 pub fn bytes_to_field(v: &[u8]) -> AppResult<Field> {
     if v.len() > 32 {
         return Err(AppError::Internal(format!(
@@ -56,19 +56,19 @@ pub fn bigdec_to_hex(v: &bigdecimal::BigDecimal) -> AppResult<String> {
 
 /// The Baby-Jubjub base field modulus, `q`, in decimal.
 ///
-/// Only [`Q_HALF_BE`] derives from it, and only in a test — it exists so that
-/// constant is checkable against something rather than trusted as transcribed.
+/// Only [`Q_HALF_BE`] derives from it, and only in a test, so that constant is
+/// checked rather than trusted as transcribed.
 #[cfg(test)]
 const Q_DEC: &str = "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
 /// Half the Baby-Jubjub base field modulus, `(q-1)/2`, big-endian.
 ///
-/// circomlibjs calls `x` negative when `x > (q-1)/2`; that predicate is the
-/// packed point's sign bit. Comparing fixed-width big-endian arrays is the
-/// same as comparing the numbers, so this is a plain `>` below.
+/// circomlibjs treats `x` as negative when `x > (q-1)/2`, and that predicate is
+/// the packed point's sign bit. Comparing fixed-width big-endian arrays is
+/// equivalent to comparing the numbers, so a plain `>` suffices below.
 ///
-/// Pinned by `q_half_matches_the_modulus` — a mis-transcribed digit here
-/// flips the sign bit for a band of `x` values and nothing else would notice.
+/// Pinned by `q_half_matches_the_modulus`: a mis-transcribed digit here would
+/// flip the sign bit for a band of `x` values with no other symptom.
 const Q_HALF_BE: Field = [
     0x18, 0x32, 0x27, 0x39, 0x70, 0x98, 0xd0, 0x14, 0xdc, 0x28, 0x22, 0xdb, 0x40, 0xc0, 0xac, 0x2e,
     0x94, 0x19, 0xf4, 0x24, 0x3c, 0xdc, 0xb8, 0x48, 0xa1, 0xf0, 0xfa, 0xc9, 0xf8, 0x00, 0x00, 0x00,
@@ -78,14 +78,13 @@ const Q_HALF_BE: Field = [
 /// produces: `y` little-endian, with the high bit of the last byte set when
 /// `x > (q-1)/2`.
 ///
-/// `x` is recoverable from `y` and that one bit, so only `y` travels — halving
+/// `x` is recoverable from `y` and that one bit, so only `y` travels, halving
 /// what an ephemeral public key costs on a feed every wallet downloads in full.
 ///
-/// **Little-endian, unlike every other field here.** This is not a number the
-/// client parses, it is the exact byte string `decryptNote` expects as `epk`,
-/// so it mirrors `sdk/wasm/jubjub/src/curve.rs::compress` byte for byte rather
-/// than this module's big-endian convention. Serving it big-endian would
-/// decode to a different, valid-looking point.
+/// Little-endian, unlike every other field here. This is not a number the client
+/// parses but the exact byte string `decryptNote` expects as `epk`, so it mirrors
+/// `sdk/wasm/jubjub/src/curve.rs::compress` byte for byte. Serving it big-endian
+/// would decode to a different, valid-looking point.
 pub fn pack_point(x: &bigdecimal::BigDecimal, y: &bigdecimal::BigDecimal) -> AppResult<[u8; 32]> {
     let x_be = coordinate(x, "x")?;
     // `bigdec_to_field` yields big-endian; the packed form is little-endian.
@@ -99,17 +98,16 @@ pub fn pack_point(x: &bigdecimal::BigDecimal, y: &bigdecimal::BigDecimal) -> App
 
 /// [`bigdec_to_field`] naming the coordinate it rejected.
 ///
-/// Both coordinates fail the same way, so without this a bad row reports only
-/// that *some* field element was malformed — on a feed of a million notes that
-/// is the difference between a one-line fix and a hunt.
+/// Both coordinates fail the same way, so without the name a bad row reports only
+/// that some field element was malformed.
 fn coordinate(v: &bigdecimal::BigDecimal, name: &str) -> AppResult<Field> {
     bigdec_to_field(v).map_err(|e| AppError::Internal(format!("ephemeral pubkey {name}: {e}")))
 }
 
 /// [`pack_point`] straight to the wire form.
 ///
-/// Bare hex, not `0x`-prefixed: the prefix disambiguates *numbers* for the
-/// SDK's decimal-or-hex decoder, and this is a byte string routed through the
+/// Bare hex rather than `0x`-prefixed: the prefix disambiguates numbers for the
+/// SDK's decimal-or-hex decoder, while this is a byte string routed through the
 /// same path as `ciphertextHex`.
 pub fn pack_point_hex(x: &bigdecimal::BigDecimal, y: &bigdecimal::BigDecimal) -> AppResult<String> {
     Ok(hex::encode(pack_point(x, y)?))
@@ -134,7 +132,7 @@ mod tests {
 
     #[test]
     fn packs_a_point_as_little_endian_y() {
-        // Byte-for-byte `babyJub.packPoint(Base8)`. Base8.x < (q-1)/2, so the
+        // Byte-for-byte `babyJub.packPoint(Base8)`. `Base8.x < (q-1)/2`, so the
         // sign bit stays clear and this is plain little-endian `y`.
         let (x, y) = base8();
         assert_eq!(
@@ -145,19 +143,17 @@ mod tests {
 
     #[test]
     fn q_half_matches_the_modulus() {
-        // Derives `(q-1)/2` rather than trusting the transcription. The
-        // hand-copied version of this constant was wrong, and only a
-        // known-answer test caught it — indirectly, and with a confusing
-        // message. This one names the actual fault.
+        // Derives `(q-1)/2` rather than trusting the transcription, so a bad
+        // digit is reported as such instead of surfacing indirectly.
         let want = bigdec_to_field(&((dec(Q_DEC) - dec("1")) / dec("2"))).unwrap();
         assert_eq!(Q_HALF_BE, want);
     }
 
     #[test]
     fn sets_the_sign_bit_for_a_negative_x() {
-        // Negating x flips only the sign bit: 0x25 -> 0xa5. Getting this
-        // inverted yields a valid-looking point on the wrong branch, which no
-        // length or format check would catch.
+        // Negating x flips only the sign bit: 0x25 -> 0xa5. Inverting this yields
+        // a valid-looking point on the wrong branch, which no length or format
+        // check would catch.
         let (x, y) = base8();
         let packed = pack_point_hex(&(dec(Q_DEC) - x), &y).unwrap();
         assert_eq!(
@@ -177,7 +173,7 @@ mod tests {
 
     #[test]
     fn treats_exactly_half_the_modulus_as_non_negative() {
-        // circomlibjs is `x > (q-1)/2`, strictly. An `>=` here would flip the
+        // circomlibjs uses a strict `x > (q-1)/2`. An `>=` here would flip the
         // sign bit for one specific x and corrupt only those notes.
         let q_half =
             dec("10944121435919637611123202872628637544274182200208017171849102093287904247808");
@@ -200,8 +196,8 @@ mod tests {
 
     #[test]
     fn encodes_fixed_width_with_leading_zeros() {
-        // Small values must stay left-padded — a variable-width hex string
-        // would change the byte length the client reads back.
+        // Small values must stay left-padded; a variable-width hex string would
+        // change the byte length the client reads back.
         assert_eq!(
             bigdec_to_hex(&dec("1")).unwrap(),
             "0x0000000000000000000000000000000000000000000000000000000000000001"

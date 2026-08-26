@@ -1,8 +1,8 @@
 //! Postgres `NUMERIC` → integer conversions.
 //!
-//! Kept apart from `adapters::parse`, which decodes *wire* input: these
-//! columns were written by the indexer, so a bad value is a bug on our side
-//! and maps to [`AppError::Internal`], never `BadRequest`.
+//! Kept apart from `adapters::parse`, which decodes wire input. These columns
+//! were written by the indexer, so a bad value is an internal fault and maps to
+//! [`AppError::Internal`] rather than `BadRequest`.
 
 use crate::domain::error::{AppError, AppResult};
 use alloy::primitives::U256;
@@ -12,11 +12,10 @@ use bigdecimal::num_bigint::{Sign, ToBigInt};
 /// Non-negative integer `NUMERIC` → `U256`. Covers the BN254 coordinates,
 /// BJJ scalars, and deposit amounts this crate reads.
 ///
-/// Goes through `BigInt` rather than `to_string`, and tests `is_integer`
-/// rather than `as_bigint_and_exponent().1 == 0`. Both matter because an
-/// integer may arrive with a non-zero scale: `Display` then switches to
-/// scientific notation (`1E+20`), which a radix-10 parse rejects, and the
-/// exponent test would reject the value outright.
+/// Goes through `BigInt` rather than `to_string`, and tests `is_integer` rather
+/// than `as_bigint_and_exponent().1 == 0`. An integer may arrive with a non-zero
+/// scale, where `Display` switches to scientific notation (`1E+20`) that a
+/// radix-10 parse rejects, and the exponent test would reject the value outright.
 pub fn bigdecimal_to_u256(v: &BigDecimal) -> AppResult<U256> {
     if !v.is_integer() {
         return Err(AppError::Internal(format!(
@@ -69,9 +68,9 @@ mod tests {
         );
     }
 
-    /// `BigDecimal::new(_, -20)` is the integer 10^20 held with a negative
-    /// scale, which `Display` renders as `1E+20`. Both the old exponent check
-    /// and the old `to_string` parse rejected this shape.
+    /// `BigDecimal::new(_, -20)` is the integer 10^20 held with a negative scale,
+    /// which `Display` renders as `1E+20`. Neither an exponent check nor a
+    /// `to_string` parse accepts this shape.
     #[test]
     fn integer_with_negative_scale_is_accepted() {
         let v = BigDecimal::new(BigInt::from(1), -20);
@@ -91,8 +90,8 @@ mod tests {
         assert_eq!(bigdecimal_to_u256(&v).unwrap(), u256("1000000000000000000"));
     }
 
-    /// The largest value a BN254 coordinate can be is well under this, but the
-    /// 32-byte ceiling is what `U256` can hold at all.
+    /// A BN254 coordinate is well under this; the 32-byte ceiling is what `U256`
+    /// can hold.
     #[test]
     fn max_u256_is_accepted() {
         let v = BigDecimal::from_str(&U256::MAX.to_string()).unwrap();

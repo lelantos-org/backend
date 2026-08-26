@@ -1,13 +1,12 @@
 //! Reusable tick driver for indexer-style services.
 //!
-//! Every indexer service repeats: enumerate chains, call `tick_chain` on
-//! each, sleep, exit on shutdown. Implementing [`TickService`] lets a service
-//! reuse the loop via [`run`] without rewriting the boilerplate.
+//! Every indexer service repeats the same loop: enumerate chains, call
+//! `tick_chain` on each, sleep, exit on shutdown. Implementing [`TickService`]
+//! lets a service reuse that loop via [`run`].
 //!
-//! The driver is *not* a fixed-cadence timer. A tick reports what it
-//! accomplished via [`TickProgress`], and the driver sleeps only when there is
-//! nothing left to do — otherwise initial sync would be pinned at
-//! `batch / tick_ms` regardless of how fast the database could go.
+//! The driver is not a fixed-cadence timer. A tick reports what it accomplished
+//! via [`TickProgress`] and the driver sleeps only when nothing is left to do,
+//! so initial sync is bounded by the database rather than by `batch / tick_ms`.
 
 use crate::backoff::Backoff;
 use crate::shutdown::Shutdown;
@@ -23,22 +22,21 @@ const TICK_MIN: Duration = Duration::from_millis(50);
 /// Growth factor of the idle backoff.
 const TICK_FACTOR: u32 = 2;
 
-/// A wake signal: something a tick service consumes may now be available.
+/// A wake signal: input a tick service consumes may now be available.
 ///
-/// Only the *change* carries meaning; the counter's value is arbitrary. Held
-/// as an `Option` by the driver, where `None` is a service that polls alone.
+/// Only the change carries meaning; the counter's value is arbitrary. The
+/// driver holds it as an `Option`, where `None` is a poll-only service.
 pub type Wake = watch::Receiver<u64>;
 
 /// What one tick accomplished.
 ///
-/// The ordering is load-bearing: a round covering several chains takes the
-/// maximum, so one chain still holding queued work keeps the whole driver off
-/// the sleep path.
+/// The ordering is significant: a round covering several chains takes the
+/// maximum, so one chain with queued work keeps the driver off the sleep path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[must_use = "the driver sleeps unless a tick reports its progress"]
 pub enum TickProgress {
-    /// The cursor did not move — nothing queued, or blocked on work this
-    /// batch cannot complete. Lets the idle delay grow.
+    /// The cursor did not move: nothing queued, or blocked on work this batch
+    /// cannot complete. Lets the idle delay grow.
     Idle,
     /// The cursor advanced but the batch was not filled: the queue is drained.
     /// Sleeps, but from the floor.
@@ -49,11 +47,10 @@ pub enum TickProgress {
 }
 
 impl TickProgress {
-    /// Progress for a tick that **advanced its cursor**, given whether the
-    /// batch came back full.
+    /// Progress for a tick that advanced its cursor, given whether the batch
+    /// came back full.
     ///
-    /// A tick that moved nothing is [`Idle`](Self::Idle) and should say so
-    /// directly — "full batch" is meaningless there.
+    /// A tick that moved nothing must report [`Idle`](Self::Idle) directly.
     pub fn advanced(batch_was_full: bool) -> Self {
         if batch_was_full {
             Self::Saturated
@@ -64,8 +61,8 @@ impl TickProgress {
 
     /// Stable label value for the `progress` metric dimension.
     ///
-    /// Spelled out rather than derived from `Debug`: a rename of a variant must
-    /// not silently rename a time series that dashboards and alerts key on.
+    /// Spelled out rather than derived from `Debug` so renaming a variant does
+    /// not rename a time series that dashboards and alerts key on.
     pub fn label(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -77,7 +74,7 @@ impl TickProgress {
     /// [`advanced`](Self::advanced), deriving fullness from the row count.
     ///
     /// `>=` rather than `==` so a repository that over-reads its limit cannot
-    /// silently downgrade a saturated batch to `Partial` and stall catch-up.
+    /// downgrade a saturated batch to `Partial` and stall catch-up.
     pub fn from_batch(rows: usize, batch: i64) -> Self {
         Self::advanced(batch > 0 && rows as u64 >= batch as u64)
     }
@@ -89,21 +86,21 @@ pub trait TickService: Send + Sync {
     fn name(&self) -> &'static str;
     /// Chains the service should tick on this round.
     async fn list_chain_ids(&self) -> Vec<i64>;
-    /// Single tick for one chain. Errors are logged + swallowed by the
-    /// driver so one chain failing doesn't stall the others.
+    /// Single tick for one chain. The driver logs and swallows errors so one
+    /// failing chain does not stall the others.
     async fn tick_chain(&self, chain_id: i64, batch: i64) -> anyhow::Result<TickProgress>;
 }
 
 /// Tick every chain once, reporting the busiest outcome.
 ///
-/// A failing chain is logged and contributes nothing: it must not masquerade
-/// as progress and spin the loop, nor mask another chain's catch-up.
+/// A failing chain is logged and contributes nothing, so it neither counts as
+/// progress nor masks another chain's catch-up.
 async fn run_round(svc: &dyn TickService, batch: i64) -> TickProgress {
     let mut round = TickProgress::Idle;
     for chain_id in svc.list_chain_ids().await {
-        // Instrumented here rather than in each service: this is the one place
-        // that sees every tick of every tick service together with its name,
-        // chain and outcome. Binaries that install no recorder emit nothing.
+        // Instrumented here rather than per service: this is the only place
+        // that sees every tick with its name, chain and outcome. Binaries that
+        // install no recorder emit nothing.
         let started = std::time::Instant::now();
         let outcome = svc.tick_chain(chain_id, batch).await;
         let service = svc.name();
@@ -148,20 +145,19 @@ pub async fn run(svc: Arc<dyn TickService>, tick_ms: u64, batch: i64, shutdown: 
 
 /// Drive a [`TickService`] until shutdown fires.
 ///
-/// `tick_ms` is the **ceiling** of the idle backoff, not a fixed period:
+/// `tick_ms` is the ceiling of the idle backoff, not a fixed period:
 ///
-/// - [`Saturated`](TickProgress::Saturated) — no sleep at all, so catch-up is
-///   bounded by the database rather than by the tick.
-/// - [`Partial`](TickProgress::Partial) — sleep, but from [`TICK_MIN`], so an
-///   arrival landing just after a round is picked up in ~50 ms.
-/// - [`Idle`](TickProgress::Idle) — sleep, doubling up to `tick_ms`.
+/// - [`Saturated`](TickProgress::Saturated): no sleep, so catch-up is bounded
+///   by the database rather than by the tick.
+/// - [`Partial`](TickProgress::Partial): sleep from [`TICK_MIN`], so an arrival
+///   landing just after a round is picked up in ~50 ms.
+/// - [`Idle`](TickProgress::Idle): sleep, doubling up to `tick_ms`.
 ///
-/// `wake` cuts an idle sleep short when the producer says there is something to
-/// look at — see [`crate::backoff`] and the `database::listen` module. It is an
-/// optimisation on top of the poll, never a replacement: every consumer's
-/// cursor is durable, so a wake that never arrives costs latency and nothing
-/// else. The `Saturated` path never consults it, because a driver that already
-/// knows work is queued has nothing to learn from being told again.
+/// `wake` cuts an idle sleep short when the producer signals new input; see
+/// [`crate::backoff`] and the `database::listen` module. It supplements the
+/// poll rather than replacing it: every consumer's cursor is durable, so a wake
+/// that never arrives costs latency only. The `Saturated` path does not consult
+/// it, since queued work is already known.
 pub async fn run_with_wake(
     svc: Arc<dyn TickService>,
     tick_ms: u64,
@@ -171,13 +167,13 @@ pub async fn run_with_wake(
 ) {
     let name = svc.name();
     // `max(1)` keeps a misconfigured `tick_ms = 0` from producing a zero
-    // backoff, which `Backoff::new` rejects and which would busy-poll anyway.
+    // backoff, which `Backoff::new` rejects and which would busy-poll.
     let ceiling = Duration::from_millis(tick_ms.max(1));
     let mut backoff = Backoff::new(TICK_MIN.min(ceiling), ceiling, TICK_FACTOR);
     info!(name, tick_ms, batch, "tick driver started");
 
     // Checked before every round because the `Saturated` path below skips the
-    // `select!`; without it the process would be unkillable mid-catch-up.
+    // `select!`, leaving no other way to stop mid-catch-up.
     while !shutdown.is_triggered() {
         let round = run_round(svc.as_ref(), batch).await;
 
@@ -187,9 +183,9 @@ pub async fn run_with_wake(
 
         if round == TickProgress::Saturated {
             trace!(name, "work still queued; skipping the idle delay");
-            // A yield, not a delay. This path never awaits anything else, so a
-            // service whose ticks complete without suspending would never hand
-            // the runtime back — starving the signal handler.
+            // A yield, not a delay: this path awaits nothing else, so a service
+            // whose ticks complete without suspending would never hand the
+            // runtime back and would starve the signal handler.
             tokio::task::yield_now().await;
             continue;
         }
@@ -204,8 +200,7 @@ pub async fn run_with_wake(
         tokio::select! {
             _ = sleep(delay) => {}
             // Snap back to the floor: a wake means the producer is active, so
-            // the next arrival is likely imminent and the escalated delay is
-            // now the wrong guess.
+            // the escalated delay no longer matches the arrival rate.
             _ = woken(&mut wake) => {
                 trace!(name, "woken; skipping the rest of the idle delay");
                 backoff.reset();
@@ -220,10 +215,9 @@ pub async fn run_with_wake(
 /// Resolve when `wake` fires; never, when there is none.
 ///
 /// `pending()` rather than an `Option` guard on the `select!` arm so the other
-/// arms are written once. A closed channel — the listener task gone — also
-/// parks here forever, which is the right shape: the poll is still running, and
-/// spinning the loop on a dead sender would turn a lost optimisation into a
-/// busy wait.
+/// arms are written once. A closed channel, meaning the listener task is gone,
+/// also parks here forever: the poll still runs, and spinning on a dead sender
+/// would become a busy wait.
 async fn woken(wake: &mut Option<Wake>) {
     match wake {
         Some(rx) => {
@@ -253,8 +247,8 @@ mod tests {
         script: Mutex<std::collections::VecDeque<anyhow::Result<TickProgress>>>,
         ticked_at: Mutex<Vec<Instant>>,
         /// Published tick count. A watch channel rather than a polled counter
-        /// because these tests run on a paused clock, which only auto-advances
-        /// while the runtime is idle — a spin loop would pin it awake and the
+        /// because these tests run on a paused clock, which auto-advances only
+        /// while the runtime is idle; a spin loop would keep it awake and the
         /// driver's `sleep` would never resolve.
         ticks: watch::Sender<usize>,
     }
@@ -419,8 +413,8 @@ mod tests {
         assert_eq!(run_round(&PerChain, 100).await, TickProgress::Saturated);
     }
 
-    /// The whole point of the wake: an arrival announced mid-sleep must be
-    /// picked up immediately rather than after the escalated idle delay.
+    /// An arrival announced mid-sleep must be picked up immediately rather than
+    /// after the escalated idle delay.
     #[tokio::test(start_paused = true)]
     async fn a_wake_cuts_an_idle_sleep_short() {
         let svc = Scripted::new([]); // always Idle, so the driver always sleeps
@@ -449,9 +443,9 @@ mod tests {
         );
     }
 
-    /// A wake resets the backoff, not just the current sleep. Without that, a
-    /// chain that had escalated to the ceiling pays it again on the very next
-    /// gap despite the producer having just proven it is active.
+    /// A wake resets the backoff, not just the current sleep. Otherwise a chain
+    /// that escalated to the ceiling pays it again on the next gap even though
+    /// the producer is demonstrably active.
     #[tokio::test(start_paused = true)]
     async fn a_wake_resets_the_backoff() {
         let svc = Scripted::new([]);
@@ -467,7 +461,7 @@ mod tests {
         trigger.fire();
         driver.await.expect("driver panicked");
 
-        // gaps: [MIN, MIN*2, <wake>, MIN] — the gap *after* the wake is the
+        // gaps: [MIN, MIN*2, <wake>, MIN]. The gap after the wake is the
         // assertion; a driver that only skipped one sleep would show MIN*8.
         let gaps = svc.gaps();
         assert_eq!(
@@ -476,8 +470,8 @@ mod tests {
         );
     }
 
-    /// The `Saturated` path skips the `select!` entirely, so a wake arriving
-    /// during catch-up must change nothing — least of all wedge the driver.
+    /// The `Saturated` path skips the `select!`, so a wake arriving during
+    /// catch-up must change nothing and must not wedge the driver.
     #[tokio::test(start_paused = true)]
     async fn a_wake_during_saturated_changes_nothing() {
         let svc = Scripted::new([
@@ -501,9 +495,8 @@ mod tests {
         );
     }
 
-    /// A dropped sender is a listener task that has gone away. The poll must
-    /// carry on at its normal cadence rather than spinning on a channel that
-    /// will never fire again.
+    /// A dropped sender means the listener task is gone. The poll must continue
+    /// at its normal cadence rather than spin on a channel that cannot fire.
     #[tokio::test(start_paused = true)]
     async fn a_dropped_waker_falls_back_to_the_poll() {
         let svc = Scripted::new([]);

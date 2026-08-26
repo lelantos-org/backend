@@ -1,9 +1,9 @@
-//! Reads `MASP.escrowed(id)`, the one piece of deposit state the contract
-//! keeps. Zero means "no pending deposit"; anything else is the submit-time
-//! digest that `flushBatch` will re-derive and compare.
+//! Reads `MASP.escrowed(id)`, the only deposit state the contract keeps. Zero
+//! means no pending deposit; anything else is the submit-time digest that
+//! `flushBatch` re-derives and compares.
 //!
 //! The flush pipeline uses this to drop deposits that cannot land before the
-//! prover runs — see `pipeline::flush::FlushPipeline::preflight`.
+//! prover runs; see `pipeline::flush::FlushPipeline::preflight`.
 
 use crate::adapters::abi::IMasp;
 use crate::adapters::rpc::RpcEndpoint;
@@ -29,16 +29,15 @@ impl EscrowReader {
         self.pool_address
     }
 
-    /// The stored digest for each id. One `eth_call` per id, issued
-    /// concurrently — a flush batch is at most `MAX_L_BATCH` (8) deposits.
+    /// The stored digest for each id, one `eth_call` per id issued concurrently.
+    /// A flush batch holds at most `MAX_DEPOSITS_PER_BATCH` deposits.
     ///
-    /// The result is positional: `[i]` is the slot for `ids[i]`, and it is
-    /// always the same length as `ids`. Callers pair deposits to slots by
-    /// index, so that contract is what keeps a deposit from being judged
-    /// against someone else's escrow.
+    /// The result is positional: `[i]` is the slot for `ids[i]` and the length
+    /// always matches `ids`. Callers pair deposits to slots by index, which keeps
+    /// a deposit from being judged against another's escrow.
     ///
-    /// Any transport failure fails the whole read: a deposit must never be
-    /// judged unflushable because the node was unreachable.
+    /// Any transport failure fails the whole read, so a deposit is never judged
+    /// unflushable because the node was unreachable.
     pub async fn digests(&self, ids: &[u64]) -> AppResult<Vec<B256>> {
         if ids.is_empty() {
             return Ok(Vec::new());

@@ -1,15 +1,13 @@
 //! Circuit units and ERC-20 base units.
 //!
-//! A note's `value` is a *circuit* unit, range-checked to 64 bits; the token
+//! A note's `value` is a circuit unit range-checked to 64 bits, and the token
 //! amount it stands for is `value * scale`, where `scale` is the per-asset
 //! multiplier `AssetRegistry` publishes and `contracts/src/AssetRegistry.sol`
-//! holds. Prices, gas costs and quotes are all in base units.
+//! holds. Prices, gas costs and quotes are in base units.
 //!
-//! The two directions are not symmetric, and the asymmetry is the reason this
-//! is a type rather than two loose helpers: multiplying up is exact, while
-//! dividing down has to round, and rounding it the wrong way silently
-//! underpays. Naming both here means neither can be spelled out by hand
-//! somewhere else and drift.
+//! The two directions are asymmetric, which is why this is a type rather than
+//! two loose helpers: multiplying up is exact, while dividing down must round,
+//! and rounding the wrong way underpays.
 //!
 //! Mirrors `sdk/src/core/units.ts`, which enforces the same relation on the
 //! wallet side.
@@ -25,10 +23,10 @@ pub struct Scale(U256);
 impl Scale {
     /// Read a scale off an `assets` row.
     ///
-    /// `None` for anything that cannot be a multiplier: zero, negative, or
-    /// fractional. `NUMERIC` permits all three and `to_bigint` would truncate
-    /// the last of them into a *different* multiplier, so this rejects rather
-    /// than rounds.
+    /// `None` for anything that cannot be a multiplier: zero, negative or
+    /// fractional. `NUMERIC` permits all three, and `to_bigint` would truncate a
+    /// fractional value into a different multiplier, so this rejects rather than
+    /// rounds.
     pub fn from_decimal(scale: &BigDecimal) -> Option<Self> {
         if !scale.is_integer() {
             return None;
@@ -42,19 +40,18 @@ impl Scale {
 
     /// What `circuit_value` is worth in ERC-20 base units. Exact.
     ///
-    /// Takes a `u128` so a *sum* of note values fits without a widening step at
-    /// the call site; a single note's value is bounded to 64 bits by the
-    /// circuit. Cannot overflow: a scale wide enough to overflow `U256` against
-    /// either could not have been registered on chain.
+    /// Takes a `u128` so a sum of note values fits without a widening step at the
+    /// call site; a single note's value is bounded to 64 bits by the circuit.
+    /// Cannot overflow, since a scale wide enough to overflow `U256` could not
+    /// have been registered on chain.
     pub fn to_base(self, circuit_value: u128) -> U256 {
         U256::from(circuit_value) * self.0
     }
 
     /// The smallest whole note value worth at least `base` base units.
     ///
-    /// Rounds **up**. A note value is a whole circuit unit, so rounding down
-    /// would underpay by as much as `scale - 1` and be refused — which is a
-    /// worse outcome for the payer than being charged one unit more.
+    /// Rounds up. A note value is a whole circuit unit, so rounding down would
+    /// underpay by as much as `scale - 1` and be refused.
     pub fn to_circuit_ceil(self, base: U256) -> U256 {
         (base + self.0 - U256::from(1u8)) / self.0
     }
@@ -78,7 +75,7 @@ mod tests {
         assert_eq!(scale("1").to_base(7), U256::from(7u8));
     }
 
-    /// The direction that has to round, rounding the safe way.
+    /// The direction that must round, rounding up.
     #[test]
     fn divides_down_by_rounding_up() {
         let s = scale("1000");
@@ -109,8 +106,8 @@ mod tests {
         }
     }
 
-    /// `1.0` is fractional in spelling only; `is_integer` accepts it, and it is
-    /// a perfectly good multiplier.
+    /// `1.0` is fractional in spelling only: `is_integer` accepts it and it is a
+    /// valid multiplier.
     #[test]
     fn accepts_an_integer_written_with_a_decimal_point() {
         assert_eq!(scale("1.0").to_base(3), U256::from(3u8));

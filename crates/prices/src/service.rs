@@ -7,19 +7,19 @@ use tracing::warn;
 
 /// Where resolved prices are kept between requests.
 ///
-/// `None` records a token the provider could not price. Caching that answer is
-/// the point: without it every request re-asks upstream about tokens that will
-/// never have a price.
+/// `None` records a token the provider could not price. Caching that answer
+/// stops every request from re-asking upstream about tokens that will never have
+/// a price.
 pub type PriceCache = Cache<TokenKey, Option<TokenPrice>>;
 
 /// Resolve USD prices for `keys`, serving what the cache holds and fetching
 /// the rest in a single upstream request.
 ///
 /// Never fails: prices decorate data that is useful without them, so a dead
-/// provider degrades those fields to absent rather than failing the whole
-/// endpoint. A negative result is cached like any other so an unpriceable token
-/// is asked about once per TTL, not once per request; a *failed* fetch is not
-/// cached, so a transient outage retries.
+/// provider leaves those fields absent rather than failing the endpoint. A
+/// negative result is cached like any other, so an unpriceable token is asked
+/// about once per TTL. A failed fetch is not cached, so a transient outage
+/// retries.
 pub async fn for_tokens(
     client: &PriceClient,
     cache: &PriceCache,
@@ -75,7 +75,7 @@ mod tests {
     }
 
     /// Refuses every connection immediately, so a test that reaches the network
-    /// fails fast and deterministically instead of waiting on DNS.
+    /// fails fast and deterministically rather than waiting on DNS.
     fn unreachable_client() -> PriceClient {
         PriceClient::new("http://127.0.0.1:1".into(), Duration::from_millis(200)).unwrap()
     }
@@ -89,8 +89,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_fully_cached_set_never_calls_upstream() {
-        // The client cannot reach anything; the answer must come from the cache
-        // alone, which is what keeps a poll off the provider.
+        // The client cannot reach anything, so the answer must come from the
+        // cache alone.
         let c = cache();
         let k = key(1, "a0b8");
         c.insert(k.clone(), Some(price(2.0))).await;
@@ -110,8 +110,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_fetch_omits_usd_and_is_not_cached() {
-        // Not caching the failure is what lets a transient outage retry on the
-        // next request rather than serving "unpriced" for a whole TTL.
+        // Not caching the failure lets a transient outage retry on the next
+        // request rather than serving "unpriced" for a whole TTL.
         let c = cache();
         let k = key(1, "a0b8");
 
@@ -129,8 +129,8 @@ mod tests {
     #[tokio::test]
     async fn a_token_on_an_unsupported_chain_is_answered_without_a_request() {
         // `fetch` makes no request when nothing maps to a provider slug, so this
-        // resolves to "unpriced" even though the client is unreachable — the
-        // reason the local anvil stack stays offline.
+        // resolves to "unpriced" even though the client is unreachable. This is
+        // why the local anvil stack stays offline.
         let c = cache();
         let k = key(31337, "a0b8");
 
@@ -139,7 +139,7 @@ mod tests {
                 .await
                 .is_empty()
         );
-        // It *is* cached: an all-unsupported batch is a successful empty fetch.
+        // Cached, because an all-unsupported batch is a successful empty fetch.
         assert_eq!(c.get(&k).await, Some(None));
     }
 }

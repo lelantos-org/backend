@@ -6,12 +6,12 @@ use diesel_async::RunQueryDsl;
 
 /// Every chain the ingester scans, ascending.
 ///
-/// `chain_state` rather than `assets`: a chain is indexed from the moment it is
-/// scanned, whether or not an asset has registered on it yet, and this list is
-/// what separates "indexed and quiet" from "not indexed at all" for a caller
-/// that would otherwise only see the chains that happen to have activity.
+/// Reads `chain_state` rather than `assets`: a chain is indexed from the moment
+/// it is scanned, whether or not an asset has registered on it. This list
+/// separates an indexed but quiet chain from an unindexed one for callers that
+/// would otherwise see only chains with activity.
 pub async fn indexed(pool: &DbPool) -> AppResult<Vec<i64>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     chain_state::table
         .select(chain_state::chain_id)
         .order(chain_state::chain_id.asc())

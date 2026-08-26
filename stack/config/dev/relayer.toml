@@ -25,7 +25,11 @@ pool_address = "0x0000000000000000000000000000000000000000"
 signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 receipt_timeout_s = 60
 flush_interval_s = 5
-flush_max_n = 4
+# A deposit mints two leaves — the depositor's note and the note paying
+# whoever flushes it — so one `flushBatch` carries at most
+# `MAX_L_BATCH / LEAVES_PER_DEPOSIT = 2` deposits. The relayer clamps to that
+# at boot; a larger number here just asserts a throughput it will not get.
+flush_max_n = 2
 flush_max_attempts = 5
 
 # swap_wrapper_address / native_adapter_address are injected by deploy.sh via
@@ -34,29 +38,25 @@ flush_max_attempts = 5
 
 # ── shielded fees ───────────────────────────────────────────────────────
 #
-# Off by default, and deliberately so: setting `shielded_fee_address` makes a
-# fee output MANDATORY on every spend and swap, and a wallet that does not
-# build one is refused with 402. Turn it on only against a client that does.
+# ON for this stack. Setting the address makes a fee output MANDATORY on every
+# spend and swap — a wallet that does not build one is refused with 402 — and
+# it also makes deposits pay: the relayer trial-decrypts each deposit's fee
+# leaf and flushes only what pays it. Point a client at this only if it builds
+# fee notes (SDK >= 0.24).
 #
-# To enable, uncomment the three lines below, add at least one entry to
-# `accepted_fee_tokens` (without a price nothing can be quoted and the relayer
-# refuses to boot), and supply the viewing key out of band:
+# The address and the decrypt-only viewing key are injected by compose as
+# RELAYER_CHAIN_31337_SHIELDED_FEE_{ADDRESS,IVK}; both are dev-only test
+# values. `accepted_fee_tokens` is injected by scripts/deploy-contracts.sh as
+# RELAYER_CHAIN_31337_ACCEPTED_FEE_TOKENS, because it carries ERC-20 addresses
+# that only exist once a deploy has run.
 #
-#   RELAYER_CHAIN_31337_SHIELDED_FEE_IVK=0x…
-#
-# The key is decrypt-only. It recognises payments and reads their value; it
-# cannot spend them. Generate the pair with the SDK's `buildSpendingKey` +
-# `encodeAddress`, and keep `nsk` off this host.
-#
-# shielded_fee_address = "lelantos1…"
-# shielded_fee_grace_bps = 300
-# shielded_fee_assets = [1]
-#
-# [[chains.accepted_fee_tokens]]
-# symbol = "USDC"
-# address = "0x…"
-# decimals = 6
-# quote_symbol = "USDC"
+# To turn fees back OFF, unset the address (`RELAYER_CHAIN_31337_
+# SHIELDED_FEE_ADDRESS=""` does not work — an empty overlay is ignored; comment
+# the compose line instead) and the relayer reverts to subsidising gas.
+shielded_fee_grace_bps = 300
+# Empty means "every asset in accepted_fee_tokens", which is what we want here:
+# a payer can only pay in the asset they are already moving.
+shielded_fee_assets = []
 
 # Served verbatim by `/chains` for wallets to boot from; the relayer reads
 # none of it. `rpc_url` here is the browser-reachable endpoint, deliberately
@@ -98,7 +98,8 @@ pool_address = "0x0165878A594ca255338adfa4d48449f69242Eb8F"
 signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 receipt_timeout_s = 60
 flush_interval_s = 5
-flush_max_n = 4
+# See the note on 31337 above: two leaves per deposit caps a batch at two.
+flush_max_n = 2
 flush_max_attempts = 5
 
 [chains.public]
@@ -107,11 +108,19 @@ rpc_url = "http://localhost:8545"
 tree_depth = 10
 permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 
+[price_oracle]
+# The `oracle` service in docker-compose.yml, not Coinbase. Fee-token pairs are
+# resolved at boot, so the default (api.coinbase.com) would make a dev stack
+# depend on the internet and on the live market. See config/oracle/README.md.
+base_url = "http://oracle"
+cache_ttl_s = 1
+
 [prover]
 # Mounted from backend/stack/circuits/ (populated by `just fetch-circuits`).
 wasm_path = "/circuits/tree_update_batch.wasm"
 r1cs_path = "/circuits/tree_update_batch.r1cs"
 zkey_path = "/circuits/tree_update_batch_final.zkey"
-# Transact circuit verification key. Lets the relayer reject a bad wallet
-# proof before it spends a tree_update_batch Groth16 on it.
-transact_vkey_path = "/circuits/3x3_verification_key.json"
+# Transact circuit verification key — must match the deployed verifier's
+# arity. The relayer's DTOs are 4x4 (`TRANSACT_IN`/`TRANSACT_OUT`), so a 3x3
+# key here rejects every wallet proof in pre-verification.
+transact_vkey_path = "/circuits/4x4_verification_key.json"

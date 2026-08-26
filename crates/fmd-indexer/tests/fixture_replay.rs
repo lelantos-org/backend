@@ -1,5 +1,5 @@
-//! Fixture-replay tests for fmd-indexer against the current ABI:
-//! `RootAdvanced` + `NotesCreated` (no `NullifierUsed`).
+//! Fixture-replay tests for fmd-indexer against the `RootAdvanced` and
+//! `NotePayload` ABI.
 
 use alloy::primitives::{Address, B256, Bytes, LogData, U256};
 use alloy::rpc::types::eth::Log;
@@ -24,9 +24,8 @@ use fmd_indexer::repositories::subscriptions::{PostgresSubscriptionsRepo, Subscr
 use fmd_indexer::services::consume::{ConsumeService, ConsumeServiceImpl};
 use fmd_indexer::services::filter::{FilterService, FilterServiceImpl};
 use shared::entities::EventKind;
-use std::sync::{Arc, OnceLock};
-use testcontainers::{ContainerAsync, runners::AsyncRunner};
-use testcontainers_modules::postgres::Postgres;
+use std::sync::Arc;
+use test_support::db_url;
 
 const POOL_ADDR: &str = "0x0000000000000000000000000000000000000abc";
 const CHAIN_A: i64 = 1;
@@ -42,54 +41,23 @@ const GAMMA3_R_PACKED_HEX: &str =
 const GAMMA3_BITS_LE: u16 = 0x0007;
 const GAMMA3_GAMMA: i32 = 3;
 
-struct ContainerHandle {
-    _container: ContainerAsync<Postgres>,
-    url: String,
-}
-
-async fn shared_container() -> &'static ContainerHandle {
-    static CELL: OnceLock<tokio::sync::OnceCell<ContainerHandle>> = OnceLock::new();
-    let cell = CELL.get_or_init(tokio::sync::OnceCell::new);
-    cell.get_or_init(|| async {
-        let c = Postgres::default().start().await.unwrap();
-        let host = c.get_host().await.unwrap();
-        let port = c.get_host_port_ipv4(5432).await.unwrap();
-        let url = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
-        let migrate_url = url.clone();
-        tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
-            .await
-            .unwrap()
-            .unwrap();
-        ContainerHandle { _container: c, url }
-    })
-    .await
-}
-
-async fn db_url() -> &'static str {
-    &shared_container().await.url
-}
+/// Cleared between tests. Every table this binary writes, directly or through a
+/// foreign key.
+const TABLES: &[&str] = &[
+    "raw_events",
+    "chain_state",
+    "chain_reorgs",
+    "consumer_cursors",
+    "notes",
+    "subscriptions",
+    "matches",
+    "assets",
+    "tree_advances",
+    "spent_nullifiers",
+];
 
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
-    static SERIAL: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
-    let mu = SERIAL
-        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let guard = mu.lock_owned().await;
-    let h = shared_container().await;
-    let pool = database::build_pool(&h.url, database::PoolCfg::indexer())
-        .await
-        .unwrap();
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query(
-        "TRUNCATE raw_events, chain_state, chain_reorgs, consumer_cursors, notes, \
-         subscriptions, matches, assets, tree_advances, spent_nullifiers \
-         RESTART IDENTITY CASCADE",
-    )
-    .execute(&mut conn)
-    .await
-    .unwrap();
-    drop(conn);
-    (pool, guard)
+    test_support::fresh_pool(database::PoolCfg::indexer(), TABLES).await
 }
 
 fn build_consume(pool: &database::DbPool) -> ConsumeServiceImpl {
@@ -206,8 +174,8 @@ fn note_payload_log(
     )
 }
 
-/// `note_payload_log` without the clueBits prefix, for ciphertexts that are
-/// deliberately too short to carry one.
+/// `note_payload_log` without the clueBits prefix, for ciphertexts too short to
+/// carry one.
 #[allow(clippy::too_many_arguments)]
 fn note_payload_log_raw(
     cm_byte: u8,
@@ -304,9 +272,9 @@ fn gamma3_r() -> (U256, U256) {
     (fq_to_u256(p.x), fq_to_u256(p.y))
 }
 
-/// Insert a complete tx (RootAdvanced + one `NotePayload` per output leaf)
-/// for one chain. The pool emits `RootAdvanced` first, then one note log per
-/// inserted leaf, so `inserted` must equal `cms.len()`.
+/// Insert a complete transaction for one chain: a `RootAdvanced` followed by one
+/// `NotePayload` per output leaf, matching the pool's emission order. `inserted`
+/// must equal `cms.len()`.
 #[allow(clippy::too_many_arguments)]
 async fn insert_tx(
     pool: &database::DbPool,
@@ -531,8 +499,8 @@ async fn spent_nullifier_seq_is_dense_across_batches_and_chains() {
     let (pool, _serial) = fresh_pool().await;
     let repo = PostgresSpentNullifiersRepo::new(pool.clone());
 
-    // Out-of-order within the batch: `seq` must follow (block_number,
-    // log_index), not the order the caller happened to build the rows in.
+    // Out of order within the batch: `seq` must follow (block_number, log_index)
+    // rather than the order the caller built the rows in.
     repo.insert_batch(&[new_nf(10, 1, 0xb1), new_nf(10, 0, 0xb0)])
         .await
         .unwrap();
@@ -570,14 +538,14 @@ async fn spent_nullifier_seq_survives_replay_and_reorg() {
     let batch = [new_nf(10, 0, 0xb0), new_nf(11, 0, 0xb1)];
     repo.insert_batch(&batch).await.unwrap();
 
-    // Crash between insert and cursor upsert replays the same batch. Rows
+    // A crash between insert and cursor upsert replays the same batch. Rows
     // already stored must not consume ordinals, or the next insert collides.
     assert_eq!(repo.insert_batch(&batch).await.unwrap(), 0);
     repo.insert_batch(&[new_nf(12, 0, 0xb2)]).await.unwrap();
     assert_eq!(seqs(&pool, CHAIN_A).await, vec![0, 1, 2]);
 
-    // Reorg trims the tail; the sequence stays dense and re-extends from
-    // the surviving max, so completed chunks keep their contents.
+    // A reorg trims the tail; the sequence stays dense and re-extends from the
+    // surviving maximum, so completed chunks keep their contents.
     repo.delete_from_block(CHAIN_A, 11).await.unwrap();
     assert_eq!(seqs(&pool, CHAIN_A).await, vec![0]);
     repo.insert_batch(&[new_nf(11, 0, 0xd1), new_nf(12, 0, 0xd2)])
@@ -636,8 +604,8 @@ async fn chain_locks_are_scoped_by_chain_and_namespace() {
             .is_some(),
         "a lock on one chain must not block another chain"
     );
-    // fmd-indexer and ingester guard different tables; neither may exclude the
-    // other for the same chain.
+    // fmd-indexer and ingester guard different tables, so neither may exclude
+    // the other for the same chain.
     assert!(
         ChainLock::try_acquire(url, database::advisory::chain_key(NS_OTHER, CHAIN_A))
             .await
@@ -650,11 +618,10 @@ async fn chain_locks_are_scoped_by_chain_and_namespace() {
 /// A freshly acquired lock must report itself alive.
 ///
 /// `is_leader` demotes on `!is_alive()`, so a check that cannot succeed makes
-/// every holder release the lock it just took: fmd-indexer flaps between
-/// leader and standby on alternate ticks, and ingester — which stops for good
-/// on lock loss — halts after its first poll. The other lock tests all take a
-/// lock and inspect it from *another* connection, so none of them touch this
-/// path.
+/// every holder release the lock it just took: fmd-indexer would alternate
+/// between leader and standby, and ingester, which stops on lock loss, would halt
+/// after its first poll. The other lock tests inspect a lock from a second
+/// connection, so none of them cover this path.
 #[tokio::test]
 async fn a_held_lock_reports_itself_alive() {
     let (_pool, _serial) = fresh_pool().await;
@@ -669,12 +636,12 @@ async fn a_held_lock_reports_itself_alive() {
         lock.is_alive().await,
         "a live session must not read as dead"
     );
-    // Idempotent: the tick loop calls this on every pass.
+    // Idempotent, since the tick loop calls this on every pass.
     assert!(lock.is_alive().await, "still alive on a second check");
 }
 
-/// The leadership loop over a real connection: acquire, stay leader across
-/// consecutive ticks, and only demote once the lock is genuinely gone.
+/// The leadership loop over a real connection: acquire, remain leader across
+/// consecutive ticks, and demote only once the lock is gone.
 #[tokio::test]
 async fn leadership_survives_consecutive_ticks() {
     let (_pool, _serial) = fresh_pool().await;
@@ -817,16 +784,16 @@ async fn cursor_advance_is_monotonic_but_reset_still_rewinds() {
     );
     assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 100);
 
-    // A slower replica landing late must not drag the watermark backwards —
-    // and must say it did not write, so a caller holding the chain lock can
-    // tell a lost race from a successful advance.
+    // A slower replica landing late must not drag the watermark backwards, and
+    // must report that it did not write, so a caller holding the chain lock can
+    // distinguish a lost race from a successful advance.
     assert!(
         !repo.upsert_monotonic(row(50)).await.unwrap(),
         "a rejected advance must report false"
     );
     assert_eq!(cursor_of(&pool, "fmd", CHAIN_A).await, 100, "no regression");
 
-    // Equal is not greater: re-writing the same watermark is also a no-op.
+    // Equal is not greater, so re-writing the same watermark is a no-op.
     assert!(
         !repo.upsert_monotonic(row(100)).await.unwrap(),
         "an equal watermark must report false"
@@ -845,12 +812,11 @@ async fn cursor_advance_is_monotonic_but_reset_still_rewinds() {
 }
 
 // ---------------------------------------------------------------------------
-// Regressions for the silent-stall and silent-skip paths.
+// Stall and skip paths.
 //
-// Every one of these used to end with the loop returning `Ok(())` forever
-// while the cursor stood still, or with a note quietly never scanned. They all
-// assert on progress, not on an error, because progress is exactly what the
-// old code stopped making without saying so.
+// Each case can fail by having the loop return `Ok(())` forever while the
+// cursor stands still, or by leaving a note unscanned. They assert on progress
+// rather than on an error, because progress is what is lost.
 // ---------------------------------------------------------------------------
 
 fn nullifier_consumed_log(nf_byte: u8, block_n: u64, tx_byte: u8, log_idx: u64) -> Log {
@@ -887,9 +853,8 @@ async fn an_unusable_leaf_leaves_a_hole_instead_of_wedging_the_chain() {
     let (rx, ry) = gamma3_r();
 
     // Two leaves announced; the second carries a ciphertext too short to hold
-    // the clueBits prefix, so it can never become a note. Completion used to
-    // be `notes.len() == inserted`, which this tx could never satisfy — the
-    // cursor parked on it and the chain stopped for good.
+    // the clueBits prefix, so it can never become a note. Completion counts
+    // leaf events rather than notes, so the transaction still clears.
     insert_log(
         &pool,
         CHAIN_A,
@@ -907,7 +872,7 @@ async fn an_unusable_leaf_leaves_a_hole_instead_of_wedging_the_chain() {
     let truncated = note_payload_log_raw(0x61, rx, ry, vec![0x00], 100, 0x51, 2);
     insert_log(&pool, CHAIN_A, &truncated, EventKind::NoteCreated).await;
 
-    // A later, wholly valid tx: it must not be held hostage by the first.
+    // A later, fully valid transaction, which must not be blocked by the first.
     insert_tx(
         &pool,
         CHAIN_A,
@@ -992,10 +957,9 @@ async fn a_second_root_advanced_in_one_tx_is_refused() {
     insert_chain_state(&pool, CHAIN_A).await;
     let (rx, ry) = gamma3_r();
 
-    // Two roots in one tx: the second used to renumber the first root's leaf
-    // onto its own start_index, silently writing indices that belong to
-    // another range (and colliding on `notes_chain_leaf_idx`). Failing the
-    // tick is the only outcome that is neither wrong nor silent.
+    // Two roots in one transaction. Renumbering the first root's leaf onto the
+    // second's start_index would write indices belonging to another range and
+    // collide on `notes_chain_leaf_idx`, so the tick fails instead.
     insert_log(
         &pool,
         CHAIN_A,
@@ -1074,9 +1038,9 @@ async fn spent_nullifier_dedup_survives_the_bounded_range_read() {
     repo.insert_batch(&[new_nf(10, 0, 0xd0)]).await.unwrap();
     repo.insert_batch(&[new_nf(20, 0, 0xd1)]).await.unwrap();
 
-    // The dedup read is now bounded above by the batch's own max block, so it
-    // no longer drags in every later row. The block-10 replay must still see
-    // itself as stored, or it would burn an ordinal and gap the sequence.
+    // The dedup read is bounded above by the batch's own max block. The block-10
+    // replay must still see itself as stored, or it would burn an ordinal and gap
+    // the sequence.
     assert_eq!(repo.insert_batch(&[new_nf(10, 0, 0xd0)]).await.unwrap(), 0);
     repo.insert_batch(&[new_nf(30, 0, 0xd2)]).await.unwrap();
     assert_eq!(seqs(&pool, CHAIN_A).await, vec![0, 1, 2]);
@@ -1105,11 +1069,10 @@ async fn backfill_will_not_page_past_freshly_written_notes() {
     let subs = PostgresSubscriptionsRepo::new(pool.clone());
     let filter = build_filter(&pool);
 
-    // `notes.id` is allocated before commit, so `max(id)` can already have
-    // skipped an in-flight row belonging to another chain's leader. The head
-    // is therefore an id that was visible a lag ago — which, for notes written
-    // this instant, is no id at all. Advancing here would mark the
-    // subscription caught up on rows it never scanned.
+    // `notes.id` is allocated before commit, so `max(id)` can skip an in-flight
+    // row belonging to another chain's leader. The head is therefore an id
+    // visible a lag ago, which for notes written this instant is no id at all.
+    // Advancing here would mark the subscription caught up on unscanned rows.
     for _ in 0..3 {
         let _ = filter.tick_chain(CHAIN_A, 100).await.unwrap();
     }
@@ -1124,8 +1087,8 @@ async fn backfill_will_not_page_past_freshly_written_notes() {
         "backfill must not claim notes newer than the safe watermark"
     );
 
-    // The forward pass is per-chain and gap-safe, so it is unaffected: the
-    // notes are matched there, on this tick, without waiting for the lag.
+    // The forward pass is per-chain and gap-safe, so the notes are matched there
+    // on this tick without waiting out the lag.
     assert_eq!(count_matches(&pool).await, 2);
     let _ = sub_id;
 }
@@ -1146,8 +1109,8 @@ async fn advance_backfill_never_rewinds() {
     subs.advance_backfill(sub_id, 500).await.unwrap();
     assert_eq!(pointer().await, Some(500));
 
-    // Two unlocked replicas race; the slower one's older pointer must not
-    // undo the faster one's progress.
+    // Two unlocked replicas race; the slower one's older pointer must not undo
+    // the faster one's progress.
     subs.advance_backfill(sub_id, 200).await.unwrap();
     assert_eq!(pointer().await, Some(500), "no regression");
 
@@ -1158,15 +1121,12 @@ async fn advance_backfill_never_rewinds() {
 /// A reorg recorded before a consumer's first commit must still be marked
 /// applied.
 ///
-/// The livelock this pins: `rewind_consumer` was an `UPDATE`, and a consumer
-/// that has never committed has no `consumer_cursors` row for it to match. The
-/// update touched zero rows, so `last_reorg_id` never advanced, so
-/// `apply_pending` returned the same reorg on the next tick — and `tick_chain`
-/// reports `Saturated` whenever it retracts, which is the one path that
-/// deliberately never sleeps. The loop re-ticked at full speed forever, and
-/// because it returned before ever reaching `commit`, the cursor row that
-/// would have broken the cycle was never created. Observed in the dev stack as
-/// fmd-indexer pinned at 60% CPU with `raw_events` populated and `notes` empty.
+/// Pins a livelock: a consumer that has never committed has no `consumer_cursors`
+/// row, so an `UPDATE`-based rewind touches zero rows and `last_reorg_id` never
+/// advances. `apply_pending` then returns the same reorg on every tick, and
+/// `tick_chain` reports `Saturated` whenever it retracts, which never sleeps. The
+/// loop re-ticks at full speed and never reaches `commit`, so the cursor row that
+/// would break the cycle is never created.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reorg_before_the_first_commit_is_not_replayed_forever() {
     use shared::tick::TickProgress;

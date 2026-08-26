@@ -1,27 +1,23 @@
 //! Per-entry-point gas, learned from the relayer's own receipts.
 //!
-//! Quoting a fee used to mean building real calldata — which meant a full
-//! `tree_update_batch` Groth16 — purely so `eth_estimateGas` had something the
-//! contract's verifier would accept. That put a multi-second, single-threaded
-//! proof on an unauthenticated request path, ahead of every real submission
-//! waiting on the same prover.
+//! Quoting a fee from `eth_estimateGas` would require building real calldata,
+//! and therefore a full `tree_update_batch` Groth16, putting a multi-second
+//! single-threaded proof on an unauthenticated request path ahead of every real
+//! submission waiting on the same prover.
 //!
-//! Gas for these entry points is dominated by fixed costs (one batched pairing
-//! check covering both proofs, one tree advance, one token transfer), so the
-//! last observed value is a good predictor of the next one, and
-//! `fee_markup_bps` absorbs the jitter. Each successful submission feeds its
-//! `gas_used` back here.
+//! Gas for these entry points is dominated by fixed costs — one batched pairing
+//! check covering both proofs, one tree advance, one token transfer — so recent
+//! observations predict the next call well and `fee_markup_bps` absorbs the
+//! jitter. Each successful submission feeds its `gas_used` back here.
 //!
-//! Note this is a *fee* quote, not a gas limit: submissions still take their
-//! limit from alloy's own per-tx estimate, so a stale value here only shifts a
+//! This is a fee quote rather than a gas limit: submissions take their limit from
+//! alloy's own per-transaction estimate, so a stale value here only shifts a
 //! little cost between relayer and user.
 //!
-//! Swaps break the "last value predicts the next" assumption: gas there scales
-//! with route length and adapter, so a single-hop observation would under-quote
-//! the multi-hop that follows. Every entry point therefore quotes the *high
-//! water mark* of a bounded window of recent observations rather than the last
-//! one, which tracks the expensive shape while still decaying once the window
-//! has rolled past it.
+//! Swap gas scales with route length and adapter, so a single-hop observation
+//! would under-quote the multi-hop that follows. Every entry point therefore
+//! quotes the high-water mark of a bounded window of recent observations, which
+//! tracks the expensive shape and decays once the window rolls past it.
 
 use crate::domain::dto::SpendKind;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -35,8 +31,8 @@ pub enum EntryPoint {
     Withdraw = 1,
     WithdrawNative = 2,
     Swap = 3,
-    /// `flushBatch`. Unlike the others this is not one user's transaction:
-    /// the receipt covers the whole batch, so `flush.rs` observes
+    /// `flushBatch`. Unlike the others this is not one user's transaction: the
+    /// receipt covers the whole batch, so `flush.rs` observes
     /// `gas_used / deposits` and each deposit is quoted that share.
     Flush = 4,
 }
@@ -55,19 +51,19 @@ impl EntryPoint {
         self as usize
     }
 
-    /// Cold-start value, used until this entry point has been submitted once.
-    /// Deliberately on the high side: over-quoting costs the user a little,
-    /// under-quoting costs the relayer.
+    /// Cold-start value, used until this entry point has been submitted once. Set
+    /// high: over-quoting costs the user a little, under-quoting costs the
+    /// relayer.
     fn seed(self) -> u64 {
         match self {
             EntryPoint::Transfer => 500_000,
             EntryPoint::Withdraw => 560_000,
             EntryPoint::WithdrawNative => 600_000,
             EntryPoint::Swap => 950_000,
-            // Per deposit, not per batch: one `tree_update_batch` verify plus
-            // two leaf insertions and the escrow drain. Seeded high for the
-            // same reason as the rest — under-quoting is the relayer's loss,
-            // and until a batch has landed there is nothing to average.
+            // Per deposit rather than per batch: one `tree_update_batch` verify
+            // plus two leaf insertions and the escrow drain. Seeded high for the
+            // same reason as the rest, and until a batch has landed there is
+            // nothing to average.
             EntryPoint::Flush => 420_000,
         }
     }
@@ -93,21 +89,20 @@ impl From<SpendKind> for EntryPoint {
     }
 }
 
-/// How many recent observations an entry point quotes over. Small enough that
-/// a genuinely cheaper deployment is reflected within a handful of
-/// submissions, large enough that one cheap swap does not under-quote the
-/// expensive route that follows it.
+/// How many recent observations an entry point quotes over: small enough that a
+/// cheaper deployment is reflected within a handful of submissions, large enough
+/// that one cheap swap does not under-quote the expensive route that follows.
 const WINDOW: usize = 8;
 
-/// Process-wide, one per chain. Lock-free: quoting must not queue behind
+/// Process-wide, one per chain. Lock-free, so quoting does not queue behind
 /// submissions.
 pub struct GasWitness {
     windows: [Window; EntryPoint::COUNT],
 }
 
-/// A fixed ring of recent observations. `0` means "no observation yet", which
-/// is also the value a fresh slot holds, so an unfilled ring simply
-/// contributes nothing to the maximum.
+/// A fixed ring of recent observations. `0` means no observation yet, which is
+/// also what a fresh slot holds, so an unfilled ring contributes nothing to the
+/// maximum.
 struct Window {
     slots: [AtomicU64; WINDOW],
     next: AtomicUsize,
@@ -146,8 +141,9 @@ impl GasWitness {
     }
 
     /// Best estimate for the next call: the most expensive of the last
-    /// [`WINDOW`] submissions, floored at the seed so one unusually cheap tx
-    /// (warm storage, no token transfer) cannot under-quote the next.
+    /// [`WINDOW`] submissions, floored at the seed so one unusually cheap
+    /// transaction, such as one hitting warm storage with no token transfer,
+    /// cannot under-quote the next.
     pub fn gas_for(&self, entry: EntryPoint) -> u64 {
         self.windows[entry.index()].high_water().max(entry.seed())
     }
@@ -183,8 +179,8 @@ mod tests {
         assert_eq!(w.gas_for(EntryPoint::Swap), EntryPoint::Swap.seed());
     }
 
-    /// The swap case: a cheap single-hop right after an expensive multi-hop
-    /// must not drag the quote down to the cheap one.
+    /// A cheap single-hop swap right after an expensive multi-hop must not drag
+    /// the quote down to the cheap one.
     #[test]
     fn a_cheap_observation_does_not_undo_an_expensive_one() {
         let w = GasWitness::new();
@@ -193,8 +189,8 @@ mod tests {
         assert_eq!(w.gas_for(EntryPoint::Swap), 2_000_000);
     }
 
-    /// But the window is bounded, so a one-off spike does eventually roll off
-    /// rather than over-quoting forever.
+    /// The window is bounded, so a one-off spike rolls off rather than
+    /// over-quoting indefinitely.
     #[test]
     fn an_old_spike_rolls_out_of_the_window() {
         let w = GasWitness::new();
@@ -212,9 +208,8 @@ mod tests {
         assert_eq!(w.gas_for(EntryPoint::Withdraw), EntryPoint::Withdraw.seed());
     }
 
-    /// `index` is a raw discriminant cast, so an out-of-range or duplicated
-    /// value would index the wrong slot — or panic — rather than fail to
-    /// compile.
+    /// `index` is a raw discriminant cast, so an out-of-range or duplicated value
+    /// would index the wrong slot, or panic, rather than fail to compile.
     #[test]
     fn discriminants_are_valid_slot_indices() {
         let indices: Vec<usize> = EntryPoint::ALL.iter().map(|e| e.index()).collect();

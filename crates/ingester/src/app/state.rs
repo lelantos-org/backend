@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 /// Bag of dependencies for one chain worker. Built once in `main`.
 ///
-/// `Clone` so the supervisor can restart a worker without rebuilding the
-/// provider and repositories — everything inside is either `Arc` or cheap.
+/// `Clone` so the supervisor can restart a worker without rebuilding the provider
+/// and repositories; every field is an `Arc` or cheap to copy.
 #[derive(Clone)]
 pub struct WorkerDeps {
     pub cfg: ChainConfig,
@@ -18,8 +18,8 @@ pub struct WorkerDeps {
     pub ingest: Arc<IngestService>,
     pub reorg: Arc<ReorgService>,
     pub backfill: Arc<BackfillService>,
-    /// For the advisory lock's dedicated connection — it must not come from
-    /// the shared pool, or `idle_timeout` would reap it and silently release
-    /// the lock. See `database::advisory`.
+    /// For the advisory lock's dedicated connection, which must not come from the
+    /// shared pool: `idle_timeout` would reap it and release the lock. See
+    /// `database::advisory`.
     pub database_url: String,
 }

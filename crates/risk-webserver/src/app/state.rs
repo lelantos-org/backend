@@ -4,8 +4,8 @@ use crate::services::screening::ScreeningService;
 use database::DbPool;
 use std::sync::Arc;
 
-/// No `pool` field: the pool is owned by the repo and never reached from a
-/// handler.
+/// Carries no `pool` field: the pool is owned by the repo and never reached
+/// from a handler.
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<RiskWebserverConfig>,

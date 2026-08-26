@@ -8,8 +8,8 @@ use utoipa::IntoParams;
 pub struct ListTreeAdvancesQuery {
     /// Required whenever `since_start_index` is set.
     pub chain_id: Option<i64>,
-    /// Start-index strictly greater than this. Page through history by
-    /// chaining the previous response's max start_index back into this field.
+    /// Start index strictly greater than this. Page through history by feeding
+    /// the previous response's maximum start index back into this field.
     pub since_start_index: Option<i64>,
     pub limit: Option<i64>,
 }
@@ -17,11 +17,10 @@ pub struct ListTreeAdvancesQuery {
 impl ListTreeAdvancesQuery {
     /// Resolve `(chain_id, since_start_index, limit)` for the repository.
     ///
-    /// `start_index` is only unique within a chain, and rows come back
-    /// ordered `(chain_id, start_index)` under one global `limit`. An
-    /// unpinned cursor would therefore skip every row of a later chain whose
-    /// `start_index` sits below the cursor — silently, and worse the further
-    /// the caller pages. So the cursor requires `chain_id`.
+    /// `start_index` is unique only within a chain, and rows are ordered
+    /// `(chain_id, start_index)` under one global `limit`. An unpinned cursor
+    /// would skip every row of a later chain whose `start_index` sits below the
+    /// cursor, so the cursor requires `chain_id`.
     pub fn page(&self) -> AppResult<(Option<i64>, Option<i64>, i64)> {
         if self.since_start_index.is_some() && self.chain_id.is_none() {
             return Err(AppError::BadRequest(

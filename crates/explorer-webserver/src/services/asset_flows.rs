@@ -36,7 +36,7 @@ pub async fn flows(
 
 #[derive(Default)]
 struct Bucket {
-    /// Whole tokens. Only meaningful while a single asset is in scope.
+    /// Whole tokens. Meaningful only while a single asset is in scope.
     tokens_in: BigDecimal,
     tokens_out: BigDecimal,
     in_usd: Option<f64>,
@@ -46,17 +46,16 @@ struct Bucket {
 
 /// Collapse per-asset rows into one point per bucket.
 ///
-/// Dollars are the token's own decimals times the provider's *current* spot
-/// price, for every bucket in the range — a 90-day window values three-month-old
-/// volume at today's price. Clients must say so rather than presenting the
-/// figure as value at the time.
+/// Dollars use the token's own decimals and the provider's current spot price
+/// for every bucket in the range, so a 90-day window values three-month-old
+/// volume at today's price. Clients should label the figure accordingly rather
+/// than presenting it as value at the time.
 ///
-/// Token amounts are emitted only when the response covers exactly one asset.
-/// Two assets cannot be added in any token unit — that is the bug this
-/// endpoint carried first in base units and then in circuit units — so with
-/// more than one in scope the token fields go `null` and USD is the only
-/// total. An asset that cannot be priced still counts toward
-/// `unpriced_assets`, so a partial dollar sum never passes for a complete one.
+/// Token amounts are emitted only when the response covers exactly one asset,
+/// since two assets cannot be added in any token unit. With more than one in
+/// scope the token fields are `null` and USD is the only total. An asset that
+/// cannot be priced counts toward `unpriced_assets`, so a partial dollar sum is
+/// distinguishable from a complete one.
 fn fold(rows: Vec<FlowBucketRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec<FlowPoint> {
     let single_asset = rows
         .iter()
@@ -103,8 +102,8 @@ fn fold(rows: Vec<FlowBucketRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec
         .into_iter()
         .map(|(ts, b)| FlowPoint {
             ts,
-            // Already whole tokens; `plain_amount` only fixes the notation, so a
-            // dust bucket cannot arrive as "2E-18".
+            // Already whole tokens; `plain_amount` only normalises the notation,
+            // so a dust bucket cannot render as "2E-18".
             in_amount: emit_tokens.then(|| plain_amount(&b.tokens_in)),
             out_amount: emit_tokens.then(|| plain_amount(&b.tokens_out)),
             in_usd: b.in_usd,
@@ -143,8 +142,8 @@ mod tests {
 
     #[test]
     fn a_single_asset_reports_whole_tokens() {
-        // 14e18 base of an 18-decimal token is 14 WETH — not 1.4e9 circuit
-        // units and not 14e18 base units. This is the reported regression.
+        // 14e18 base units of an 18-decimal token is 14 WETH, not 1.4e9 circuit
+        // units and not 14e18 base units.
         let out = fold(
             vec![row(100, "aa", Some(18), "14000000000000000000")],
             &HashMap::new(),
@@ -198,8 +197,8 @@ mod tests {
 
     #[test]
     fn dollars_use_the_tokens_own_decimals_not_the_providers() {
-        // The feed reports 18 decimals for a 6-decimal token. Taking its word
-        // turns 1 USDC of flow into $1e-12.
+        // The feed reports 18 decimals for a 6-decimal token; trusting it would
+        // turn 1 USDC of flow into $1e-12.
         let prices = HashMap::from([priced("aa", 1.0, 18)]);
         let out = fold(vec![row(100, "aa", Some(6), "1000000")], &prices);
         assert!(
@@ -211,9 +210,9 @@ mod tests {
     }
 
     #[test]
-    fn a_priced_asset_still_counts_in_dollars_before_we_backfill_decimals() {
-        // No token amount is possible without our own decimals, but the price
-        // feed's are enough for the dollar total — withholding it would flag the
+    fn a_priced_asset_still_counts_in_dollars_before_decimals_are_backfilled() {
+        // No token amount is possible without stored decimals, but the price
+        // feed's are enough for the dollar total; withholding it would flag the
         // asset unpriced and could empty the whole range.
         let prices = HashMap::from([priced("aa", 2.0, 6)]);
         let out = fold(vec![row(100, "aa", None, "1000000")], &prices);

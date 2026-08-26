@@ -169,9 +169,34 @@ fund_recipient() {
 # Write the env file that every backend's entrypoint sources. Each service
 # overlays these onto its TOML per-chain block (see `apply_env_overlay`) —
 # which only works because config/dev/*.toml declare a matching chain id.
+# The relayer's `accepted_fee_tokens`, as the JSON its env overlay parses.
+#
+# Every registered asset is listed: a payer can only pay the fee in the asset
+# they are already moving, so one left out is one nothing can transact in.
+# `decimals` is the ERC-20's, not the MASP scale — the relayer converts a gas
+# quote into token base units and divides by the scale itself.
+#
+# Every asset quotes in USD because the dev oracle stub serves exactly that
+# pair; adding another `quote_symbol` means adding a file under config/oracle.
+fee_tokens_json() {
+    _token() {
+        printf '{"symbol":"%s","address":"%s","decimals":%s,"quote_symbol":"USD"}' \
+            "$1" "$2" "$3"
+    }
+    printf '[%s,%s,%s]' \
+        "$(_token WETH "$TOKEN_1" 18)" \
+        "$(_token mDAI "$TOKEN_2" 18)" \
+        "$(_token mWBTC "$TOKEN_3" 8)"
+}
+
 write_env_file() {
     step "write ${OUT_FILE}"
-    _emit() { printf '%s_CHAIN_%s_%s=%s\n' "$1" "$CHAIN_ID" "$2" "$3"; }
+    # Values are single-quoted because this file is *sourced*
+    # (`set -a; . addresses.env`): unquoted, the shell interprets whatever is
+    # in them, which silently strips the inner quotes of the JSON emitted
+    # below. Addresses and URLs contain no single quote, so nothing here can
+    # terminate the quoting early.
+    _emit() { printf "%s_CHAIN_%s_%s='%s'\n" "$1" "$CHAIN_ID" "$2" "$3"; }
 
     {
         _emit INGESTER POOL_ADDRESS "$MASP"
@@ -183,6 +208,9 @@ write_env_file() {
         # Enables `withdrawNative`; without it the relayer leaves
         # native_adapter_address unset and rejects native withdrawals.
         _emit RELAYER NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
+        # `accepted_fee_tokens` is the one piece of per-chain relayer config
+        # carrying ERC-20 addresses, which only exist once this script has run.
+        _emit RELAYER ACCEPTED_FEE_TOKENS "$(fee_tokens_json)"
 
         _emit METAQUOTER RPC_URL "$RPC_URL"
         _emit METAQUOTER UNIV3_QUOTER "$UNIV3_QUOTER"

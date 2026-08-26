@@ -22,10 +22,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
-/// Native unshields do not go to the pool. `NativeAdapter` calls
-/// `MASP.withdraw` itself, unwraps the proceeds and forwards them to
-/// `pi.payer`, so it is both the SNARK's `recipient` and its `relayer`, and
-/// the tx must be sent to the adapter address.
+/// Native unshields do not go to the pool. `NativeAdapter` calls `MASP.withdraw`
+/// itself, unwraps the proceeds and forwards them to `pi.payer`, so it is both
+/// the SNARK's `recipient` and its `relayer`, and the transaction is sent to the
+/// adapter address.
 pub struct NativeRoute {
     pub address: Address,
     pub submitter: Arc<Submitter>,
@@ -34,23 +34,22 @@ pub struct NativeRoute {
 pub struct SpendPipeline {
     pub chain_id: i64,
     pub mirror: Arc<Mutex<TreeMirror>>,
-    /// Lock-free view of `mirror`, so `/chains` does not queue behind a
-    /// submission holding the mutex through prove and confirmation.
+    /// Lock-free view of `mirror`, so `/chains` does not queue behind a submission
+    /// holding the mutex through prove and confirmation.
     pub snapshot: Arc<MirrorSnapshot>,
     pub submitter: Arc<Submitter>,
     pub prover: Arc<dyn TreeUpdateBatchProver>,
     pub fee_quoter: Arc<FeeQuoter>,
     pub gas_witness: Arc<GasWitness>,
-    /// Built only for chains where `native_adapter_address` is configured.
-    /// Without it, `withdrawNative` payloads are rejected.
+    /// Built only for chains with a configured `native_adapter_address`. Without
+    /// it, `withdrawNative` payloads are rejected.
     pub native: Option<Arc<NativeRoute>>,
-    /// Checks the wallet's transact proof before the prover and the mirror
-    /// lock are spent on it. `None` when the deployment shipped no transact
-    /// verification key — see `ProverCfg::transact_vkey_path`.
+    /// Checks the wallet's transact proof before the prover and the mirror lock
+    /// are spent on it. `None` when the deployment shipped no transact verification
+    /// key; see `ProverCfg::transact_vkey_path`.
     pub transact_verifier: Option<Arc<TransactVerifier>>,
-    /// Requires each submission to carry a shielded fee note. `None` on a
-    /// chain the operator has not configured one for, which leaves the relayer
-    /// paying gas out of its own signer.
+    /// Requires each submission to carry a shielded fee note. `None` on a chain
+    /// with none configured, where the relayer pays gas from its own signer.
     pub shielded_fee: Option<Arc<ShieldedFeeChecker>>,
     /// Resolves a fee token's ERC-20 address to its MASP asset id and scale,
     /// so an estimate can tell a client what note value to build.
@@ -58,13 +57,12 @@ pub struct SpendPipeline {
 }
 
 impl SpendPipeline {
-    /// `start_index` is deliberately absent from this span. It is the tree slot
-    /// this caller's outputs land in, and pairing it with a timestamp maps a
-    /// submission to its leaves. The chain publishes it anyway —
-    /// `CommitmentTree.RootAdvanced(uint64 indexed startIndex, ...)` — so
-    /// dropping it denies an observer nothing they cannot already read. It goes
-    /// because a log line duplicating a public index is not worth the shape it
-    /// gives an internal reader.
+    /// `start_index` is absent from this span. It is the tree slot this caller's
+    /// outputs land in, and pairing it with a timestamp maps a submission to its
+    /// leaves. The chain publishes it through
+    /// `CommitmentTree.RootAdvanced(uint64 indexed startIndex, …)`, so omitting it
+    /// denies an observer nothing they cannot already read, while keeping the
+    /// correlation out of the relayer's own logs.
     #[instrument(skip_all, fields(chain_id = self.chain_id, kind = ?payload.kind))]
     pub async fn process(&self, payload: SubmitSpendPayload) -> AppResult<SubmissionReceipt> {
         self.validate(&payload)?;
@@ -86,8 +84,8 @@ impl SpendPipeline {
             )
             .await?;
 
-        // Hold the mirror lock through reserve→prove→submit so concurrent
-        // pipelines on this chain serialise cleanly.
+        // Hold the mirror lock through reserve, prove and submit so concurrent
+        // pipelines on this chain serialise.
         let mut mirror = self.mirror.lock().await;
         info!(
             leaf_count = mirror.committed_count(),
@@ -116,16 +114,14 @@ impl SpendPipeline {
         }
     }
 
-    /// Fee quote for `/v1/spend/estimate`: prices this entry point's observed
-    /// gas. Touches neither the tree mirror nor the prover, so it cannot stall
-    /// a real submission.
+    /// Fee quote for `/v1/spend/estimate`, pricing this entry point's observed
+    /// gas. Touches neither the tree mirror nor the prover, so it cannot stall a
+    /// real submission.
     ///
-    /// Takes a `SpendKind`, not a payload. The answer depends on the entry
-    /// point alone, so asking for a full `SubmitSpendPayload` bought a shape
-    /// check on a spend the caller may never submit, in exchange for a number
-    /// that check could not change — see `EstimateSpendRequest`. There is
-    /// consequently no pre-flight here at all: unlike the old
-    /// `eth_estimateGas` path, an estimate does not tell a wallet whether its
+    /// Takes a `SpendKind` rather than a payload: the answer depends on the entry
+    /// point alone, so a full `SubmitSpendPayload` would only add a shape check on
+    /// a spend the caller may never submit. See `EstimateSpendRequest`. There is
+    /// therefore no pre-flight, and an estimate does not tell a wallet whether its
     /// spend would revert on chain.
     pub async fn estimate(&self, kind: SpendKind) -> AppResult<EstimateResponse> {
         self.fees()
@@ -146,8 +142,8 @@ impl SpendPipeline {
         validate_spend_shape(payload, self.binding(payload.kind)?, self.native_address())
     }
 
-    /// The address the proof must name as `relayer`: this relayer's signer
-    /// for pool-targeted calls, the adapter for a native unshield.
+    /// The address the proof must name as `relayer`: this relayer's signer for
+    /// pool-targeted calls, and the adapter for a native unshield.
     fn binding(&self, kind: SpendKind) -> AppResult<TransactBinding> {
         let relayer = match kind {
             SpendKind::WithdrawNative => self.native_route()?.address,
@@ -209,8 +205,8 @@ fn encode_spend_calldata(
             aux,
         }
         .abi_encode(),
-        // Same argument tuple, different callee: the adapter forwards it to
-        // `MASP.withdraw` and unwraps what comes back.
+        // The same argument tuple with a different callee: the adapter forwards it
+        // to `MASP.withdraw` and unwraps the proceeds.
         SpendKind::WithdrawNative => INativeAdapter::withdrawNativeCall {
             p,
             pi,
@@ -255,7 +251,7 @@ fn validate_spend_shape(
                     "withdrawNative requires publicOut > 0".into(),
                 ));
             }
-            // The adapter reverts `AdapterNotRecipient` otherwise; the ERC20
+            // Otherwise the adapter reverts `AdapterNotRecipient`: the ERC-20
             // proceeds must land on it so it can unwrap them.
             let adapter = native_adapter.ok_or_else(|| {
                 AppError::BadRequest("withdrawNative is not available on this chain".into())
@@ -392,8 +388,8 @@ mod tests {
         assert!(checked(SpendKind::Transfer, 0, |p| p.pub_inputs.public_in = 1).is_err());
     }
 
-    /// The pipeline is selected by the envelope's chain id, but the SNARK is
-    /// bound to the one inside pub_inputs — a mismatch always reverts.
+    /// The pipeline is selected by the envelope's chain id while the SNARK is bound
+    /// to the one inside `pub_inputs`, so a mismatch always reverts.
     #[test]
     fn rejects_chain_id_mismatch() {
         let err = checked(SpendKind::Transfer, 0, |p| {
@@ -422,8 +418,8 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
-    /// The adapter drives `MASP.withdraw` itself, so the proof must name it
-    /// as relayer — this relayer's own signer would revert `AdapterNotRelayer`.
+    /// The adapter drives `MASP.withdraw` itself, so the proof must name it as
+    /// relayer; this relayer's own signer would revert `AdapterNotRelayer`.
     #[test]
     fn native_withdraw_binds_to_the_adapter_not_the_signer() {
         checked(SpendKind::WithdrawNative, 1_000, |_| {}).unwrap();

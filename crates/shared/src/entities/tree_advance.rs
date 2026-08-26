@@ -2,8 +2,9 @@ use crate::chain::ChainId;
 use serde::{Deserialize, Serialize};
 
 /// One on-chain `RootAdvanced` event from `CommitmentTree._advanceRoot`.
-/// Domain entity for the `tree_advances` table; written by explorer-indexer,
-/// read by fmd-indexer for cm → leaf_index correlation and by the relayer +
+///
+/// Domain entity for the `tree_advances` table. Written by explorer-indexer;
+/// read by fmd-indexer for cm to leaf_index correlation and by the relayer and
 /// fmd-webserver for path verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeAdvance {

@@ -13,10 +13,11 @@ pub struct LockedRow {
     pub chain_id: i64,
     #[diesel(sql_type = BigInt)]
     pub asset_id_u64: i64,
-    /// Lowercase hex, no `0x` — the token identity used for price lookup.
+    /// Lowercase hex without a `0x` prefix: the token identity used for price
+    /// lookup.
     #[diesel(sql_type = Text)]
     pub token_hex: String,
-    /// ERC20 decimals, or `NULL` if the indexer has not resolved it yet.
+    /// ERC20 decimals, or `NULL` while the indexer has not resolved it.
     #[diesel(sql_type = Nullable<SmallInt>)]
     pub decimals: Option<i16>,
     #[diesel(sql_type = Nullable<Text>)]
@@ -24,7 +25,7 @@ pub struct LockedRow {
     /// Deposits, in token base units, over all history.
     #[diesel(sql_type = Numeric)]
     pub in_base: BigDecimal,
-    /// Withdrawals, same unit. Locked is `in_base - out_base`.
+    /// Withdrawals, in the same unit. Locked is `in_base - out_base`.
     #[diesel(sql_type = Numeric)]
     pub out_base: BigDecimal,
     /// Newest flow that contributed, so a caller can age the figure.
@@ -34,16 +35,15 @@ pub struct LockedRow {
 
 /// Every asset that has ever moved, with its running totals.
 ///
-/// Assets with no flows at all are absent: `asset_locked` aggregates
-/// `asset_flows`, so a registered-but-untouched asset has no row. That is the
-/// honest shape — it has never held anything — and the caller reports the chains
-/// rather than padding out a registry.
+/// Assets with no flows are absent: `asset_locked` aggregates `asset_flows`, so
+/// a registered but untouched asset has no row and has never held anything. The
+/// caller reports the chains rather than padding out the registry.
 ///
-/// No cross-asset arithmetic here, for the same reason `flow_buckets` does none:
-/// base units of different tokens are not addable, so the totals stay per asset
-/// and `decimals` rides along for the caller to convert with.
+/// No cross-asset arithmetic happens here, for the same reason as in
+/// `flow_buckets`: base units of different tokens are not addable, so totals stay
+/// per asset and `decimals` is carried along for the caller to convert with.
 pub async fn totals(pool: &DbPool, chain_id: Option<i64>) -> AppResult<Vec<LockedRow>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     sql_query(
         "SELECT l.chain_id AS chain_id, \
                 l.asset_id_u64 AS asset_id_u64, \

@@ -17,9 +17,9 @@ pub struct NewSpentNullifier {
 }
 
 /// `NewSpentNullifier` plus the dense per-chain ordinal the repo assigns.
-/// `seq` is what `/v1/chains/{id}/nullifiers/chunks/*` slices on, mirroring
-/// `notes.leaf_index` — but the chain gives us no index for nullifiers, so
-/// it is derived from (block_number, log_index) order at insert time.
+/// `/v1/chains/{id}/nullifiers/chunks/*` slices on `seq`, mirroring
+/// `notes.leaf_index`. The chain provides no index for nullifiers, so `seq` is
+/// derived from (block_number, log_index) order at insert time.
 #[derive(Debug, Clone, Insertable)]
 #[diesel(table_name = spent_nullifiers)]
 struct SeqSpentNullifier {
@@ -52,27 +52,26 @@ impl PostgresSpentNullifiersRepo {
 impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
     /// Assign each new row a dense `seq` continuing the chain's sequence.
     ///
-    /// Rows already stored must be dropped *before* numbering: a crash
-    /// between insert and cursor upsert replays the batch, and letting a
-    /// duplicate consume an ordinal would collide the rest of the batch on
+    /// Rows already stored are dropped before numbering: a crash between insert
+    /// and cursor upsert replays the batch, and letting a duplicate consume an
+    /// ordinal would collide the rest of the batch on
     /// `spent_nullifiers_chain_seq_idx`.
     ///
-    /// This is a read-then-write with no transaction, so it is only correct
-    /// while one process consumes a given chain. That is enforced by the
-    /// per-chain advisory lock in `adapters::locks::ChainLocks`, checked at the
-    /// top of every consume tick — not by anything in this function. Without
-    /// it, a peer committing between the two reads leaves `stored` stale while
-    /// `max(seq)` is fresh, and surviving rows get numbered past the gap
-    /// (`seq = 0, 1, 4`) with no error raised.
+    /// This is a read-then-write with no transaction, so it is correct only while
+    /// one process consumes a given chain. That is enforced by the per-chain
+    /// advisory lock in `adapters::locks::ChainLocks`, checked at the top of every
+    /// consume tick, not by this function. Without it, a peer committing between
+    /// the two reads leaves `stored` stale while `max(seq)` is fresh, and
+    /// surviving rows are numbered past the gap (`seq = 0, 1, 4`) without error.
     async fn insert_batch(&self, rows: &[NewSpentNullifier]) -> Result<usize> {
         let Some(first) = rows.first() else {
             return Ok(0);
         };
         let chain_id = first.chain_id;
         // Bound the dedup read to the batch's own block range. `>= min_block`
-        // alone is open-ended, so a replay from the start of the chain loads
-        // almost the whole table on every batch — O(n^2) over a full rewind,
-        // for a check that only ever concerns these blocks.
+        // alone is open-ended, so a replay from the start of the chain would load
+        // most of the table on every batch: O(n^2) over a full rewind, for a
+        // check that concerns only these blocks.
         let (min_block, max_block) = rows.iter().fold((i64::MAX, i64::MIN), |(lo, hi), r| {
             (lo.min(r.block_number), hi.max(r.block_number))
         });
@@ -131,9 +130,9 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
             .await
             .inspect_err(|e| log_unique_violation("spent_nullifiers", e))?;
 
-        // Emitted here rather than from the consume tick: `seq` is assigned in
-        // this function and is not visible to the caller. `values` is the
-        // numbered set, so its last element carries the new high-water mark.
+        // Emitted here rather than from the consume tick, since `seq` is assigned
+        // in this function and not visible to the caller. `values` is the numbered
+        // set, so its last element carries the new high-water mark.
         if let Some(last) = values.last() {
             metrics::gauge!(
                 shared::metrics::name::SPENT_NULLIFIERS_SEQ_MAX,

@@ -1,6 +1,7 @@
-//! Cache builder helper. Trims boilerplate around `moka::future::Cache`.
+//! Cache builder helper around `moka::future::Cache`.
 //!
-//! `AppCache` structs stay per-crate (key/value types are domain-specific).
+//! `AppCache` structs stay per-crate because key and value types are
+//! domain-specific.
 
 use moka::future::Cache;
 use std::hash::Hash;

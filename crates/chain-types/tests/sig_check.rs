@@ -8,12 +8,12 @@ use chain_types::abi::{
 /// ABI (`contracts/packages/abi/json/*.json`) rather than from the `sol!`
 /// declarations these assertions check.
 ///
-/// The `sol!` block is a hand-written copy of the contract's events. It
-/// compiles no matter what it says, and a field that drifts from the contract
-/// changes the signature hash — so the indexer simply stops matching the log
-/// and deposits silently vanish from the pipeline, with no error anywhere.
-/// Pinning the hashes against the contract's own ABI turns that into a test
-/// failure. Regenerate by hashing the signature built from the ABI JSON.
+/// The `sol!` block is a hand-written copy of the contract's events and compiles
+/// whatever it says. A field that drifts from the contract changes the signature
+/// hash, so the indexer stops matching the log and deposits vanish from the
+/// pipeline without an error. Pinning the hashes against the contract's own ABI
+/// turns that into a test failure. Regenerate by hashing the signature built from
+/// the ABI JSON.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "DepositEscrowed",

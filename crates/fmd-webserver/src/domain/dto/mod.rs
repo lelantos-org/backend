@@ -15,9 +15,8 @@ const MAX_LIMIT: i64 = 1_000;
 
 /// Resolve `(after, limit)` for the cursor-paginated list endpoints.
 ///
-/// `clamp`, not `min`: a negative limit reaches Diesel as `LIMIT -1`, and
-/// Postgres rejects it with a driver error that used to be echoed straight
-/// back to the caller.
+/// `clamp` rather than `min`: a negative limit reaches Diesel as `LIMIT -1`, and
+/// Postgres rejects it with a driver error.
 pub fn page(after: Option<i64>, limit: Option<i64>) -> (i64, i64) {
     (
         after.unwrap_or(0),
@@ -41,7 +40,7 @@ mod tests {
 
     #[test]
     fn page_rejects_a_non_positive_limit() {
-        // `LIMIT -1` / `LIMIT 0` must never reach Diesel.
+        // `LIMIT -1` and `LIMIT 0` must never reach Diesel.
         assert_eq!(page(None, Some(-1)).1, 1);
         assert_eq!(page(None, Some(0)).1, 1);
     }

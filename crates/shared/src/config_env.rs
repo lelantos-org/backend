@@ -1,14 +1,12 @@
-// Per-chain config env overlay. Lets each binary's TOML supply static
-// defaults while the dynamic bits (deployed addresses, signer keys, RPC
-// URLs) come from the runtime environment — fed by docker-compose, k8s,
-// or shell exports.
-//
-// Convention: `<PREFIX>_CHAIN_<chain_id>_<FIELD>`, e.g.
-//   INGESTER_CHAIN_31337_POOL_ADDRESS=0xabc…
-//   RELAYER_CHAIN_31337_SIGNER_KEY=0x59c6…
-//
-// Returns Some(value) iff the env var is set and non-empty.
+//! Per-chain config env overlay. Each binary's TOML supplies static defaults
+//! while deployed addresses, signer keys and RPC URLs come from the runtime
+//! environment, fed by docker-compose, k8s or shell exports.
+//!
+//! Convention: `<PREFIX>_CHAIN_<chain_id>_<FIELD>`, for example:
+//!   INGESTER_CHAIN_31337_POOL_ADDRESS=0xabc…
+//!   RELAYER_CHAIN_31337_SIGNER_KEY=0x59c6…
 
+/// Returns the value iff the env var is set and non-empty.
 pub fn lookup(prefix: &str, chain_id: i64, field: &str) -> Option<String> {
     let key = format!("{}_CHAIN_{}_{}", prefix, chain_id, field);
     match std::env::var(&key) {
@@ -21,8 +19,8 @@ pub fn lookup(prefix: &str, chain_id: i64, field: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    // SAFETY: tests run sequentially within this module; no other thread
-    // observes the per-test mutations.
+    // SAFETY: these tests run sequentially within this module, so no other
+    // thread observes the per-test mutations.
     #[test]
     fn missing_returns_none() {
         unsafe { std::env::remove_var("UNIT_TEST_CHAIN_42_X") };

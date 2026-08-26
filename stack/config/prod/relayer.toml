@@ -17,7 +17,11 @@ pool_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
 signer_key_hex = "0000000000000000000000000000000000000000000000000000000000000000"
 receipt_timeout_s = 60
 flush_interval_s = 3
-flush_max_n = 4
+# A deposit mints two leaves — the depositor's note and the note paying
+# whoever flushes it — so one `flushBatch` carries at most
+# `MAX_L_BATCH / LEAVES_PER_DEPOSIT = 2` deposits. The relayer clamps to that
+# at boot; a larger number here just asserts a throughput it will not get.
+flush_max_n = 2
 swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
 
 [prover]
@@ -25,6 +29,7 @@ swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
 wasm_path = "/circuits/tree_update_batch.wasm"
 r1cs_path = "/circuits/tree_update_batch.r1cs"
 zkey_path = "/circuits/tree_update_batch_final.zkey"
-# Transact circuit verification key. Lets the relayer reject a bad wallet
-# proof before it spends a tree_update_batch Groth16 on it.
-transact_vkey_path = "/circuits/3x3_verification_key.json"
+# Transact circuit verification key — must match the deployed verifier's
+# arity. The relayer's DTOs are 4x4 (`TRANSACT_IN`/`TRANSACT_OUT`), so a 3x3
+# key here rejects every wallet proof in pre-verification.
+transact_vkey_path = "/circuits/4x4_verification_key.json"

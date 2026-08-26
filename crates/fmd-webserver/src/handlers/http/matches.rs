@@ -19,8 +19,8 @@ use std::sync::Arc;
     ),
     responses((status = 200, body = MatchesPage), (status = 401, description = "missing or malformed Authorization header"))
 )]
-// `q` carries only the paging cursor and is safe to record. The token arrives
-// in `Authorization`, which no span here reads.
+// `q` carries only the paging cursor and is safe to record. The token arrives in
+// `Authorization`, which no span here reads.
 #[tracing::instrument(skip(st, token))]
 pub async fn list_matches(
     State(st): State<AppState>,

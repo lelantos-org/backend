@@ -1,9 +1,9 @@
 //! Cost breakdown of one FMD bit test.
 //!
-//! `test_clue_batch` spends its time in three places per surviving key and
-//! bit: a Baby-Jubjub scalar mul, a Poseidon-6 hash, and the Legendre symbol
-//! that turns the hash into a bit. This bench prices each separately so a
-//! change to the filter loop can be aimed at whichever actually dominates.
+//! `test_clue_batch` spends its time in three places per surviving key and bit:
+//! a Baby-Jubjub scalar multiplication, a Poseidon-6 hash, and the Legendre
+//! symbol that turns the hash into a bit. This bench prices each separately so a
+//! change to the filter loop can target whichever dominates.
 
 use ark_ed_on_bn254::{Fq, Fr};
 use ark_ff::{Field, UniformRand};
@@ -23,8 +23,8 @@ fn bench(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("bit_test");
 
-    // Table construction is per (note, gamma), not per key — it is only worth
-    // optimising if it is large next to the muls it amortises.
+    // Table construction is per (note, gamma) rather than per key, so it matters
+    // only if it is large relative to the multiplications it amortises.
     group.bench_function("fixed_base_table_new", |b| {
         b.iter(|| criterion::black_box(FixedBaseTable::new(r, KEYS)));
     });
@@ -52,13 +52,12 @@ fn bench(c: &mut Criterion) {
 criterion_group!(benches, bench, bench_tree, bench_construction);
 criterion_main!(benches);
 
-/// Tree costs on the two paths that matter: the bulk fill a mirror does at
-/// bootstrap, and the single insert a submission does while holding the
+/// Tree costs on the two significant paths: the bulk fill a mirror performs at
+/// bootstrap, and the single insert a submission performs while holding the
 /// per-chain lock.
 ///
-/// `root()` is not benchmarked because it no longer computes anything — the
-/// tree keeps internal nodes materialised, so the hashing shows up in `insert`
-/// and `extend` instead.
+/// `root()` is not benchmarked: the tree keeps internal nodes materialised, so
+/// the hashing appears in `insert` and `extend`.
 fn bench_tree(c: &mut Criterion) {
     use fmd_crypto::tree::MerkleTree;
 
@@ -83,7 +82,7 @@ fn bench_tree(c: &mut Criterion) {
             });
         });
 
-        // Bootstrap: bulk fill, hashed level-by-level across rayon threads.
+        // Bootstrap: bulk fill, hashed level by level across rayon threads.
         group.bench_function(format!("extend_{leaves}"), |b| {
             b.iter(|| {
                 let mut tree = MerkleTree::new(10).unwrap();
@@ -92,8 +91,9 @@ fn bench_tree(c: &mut Criterion) {
             });
         });
 
-        // Steady state: one leaf appended to a tree of this size. Should be
-        // flat in `leaves` — it re-hashes one root path, not the tree.
+        // Steady state: one leaf appended to a tree of this size. Expected to be
+        // flat in `leaves`, since it re-hashes one root path rather than the
+        // tree.
         let mut tree = MerkleTree::new(10).unwrap();
         tree.extend((0..leaves).map(leaf_at)).unwrap();
         group.bench_function(format!("insert_into_{leaves}"), |b| {
@@ -107,10 +107,9 @@ fn bench_tree(c: &mut Criterion) {
     group.finish();
 }
 
-/// Construction cost, which the optimized schedule makes materially higher:
-/// deriving the sparse matrices runs a Gaussian solve per partial round. It is
-/// paid once per arity per thread, so it only pays off when amortised over
-/// many hashes — this bench is here to keep that tradeoff visible.
+/// Construction cost. Deriving the sparse matrices runs a Gaussian solve per
+/// partial round, paid once per arity per thread, so it pays off only when
+/// amortised over many hashes.
 fn bench_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("construction");
     group.sample_size(20);

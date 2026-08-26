@@ -11,8 +11,8 @@ use tracing::warn;
 ///
 /// Errors rather than substituting defaults when a log's block metadata is
 /// missing: a zero `block_ts` and an L2 height in `evm_block_number` are both
-/// silently wrong, and on Arbitrum the latter is exactly what makes every
-/// later `flushBatch` revert `DigestMismatch`.
+/// wrong, and on Arbitrum the latter makes every later `flushBatch` revert
+/// `DigestMismatch`.
 pub fn logs_to_rows(
     chain_id: i64,
     logs: Vec<Log>,
@@ -20,8 +20,8 @@ pub fn logs_to_rows(
 ) -> Result<Vec<RawEvent>, IngesterError> {
     let mut out = Vec::with_capacity(logs.len());
     for log in logs {
-        // Some providers replay logs from orphaned blocks with this set.
-        // Inserting them would present a dead branch as canonical.
+        // Some providers replay logs from orphaned blocks with this flag set.
+        // Inserting them would present an abandoned branch as canonical.
         if log.removed {
             warn!(chain_id, "skipping log flagged removed");
             continue;
@@ -65,8 +65,7 @@ pub fn logs_to_rows(
 
 /// The distinct blocks a batch of logs touches.
 ///
-/// Both ingest paths need this to resolve block metadata, and both used to
-/// open-code the same `filter_map`/`HashSet`/collect dance.
+/// Both ingest paths need this to resolve block metadata.
 pub fn distinct_blocks(logs: &[Log]) -> Vec<u64> {
     logs.iter()
         .filter_map(|l| l.block_number)
@@ -103,9 +102,9 @@ mod tests {
         }
     }
 
-    /// Arbitrum reports the L1 height from `block.number`, and MASP hashes that
-    /// into the deposit digest. Recording the L2 height instead makes every
-    /// `flushBatch` revert `DigestMismatch`, so the two must stay distinct.
+    /// Arbitrum reports the L1 height from `block.number` and MASP hashes it into
+    /// the deposit digest, so recording the L2 height instead would make every
+    /// `flushBatch` revert `DigestMismatch`.
     #[test]
     fn keeps_the_evm_block_number_separate_from_the_chain_height() {
         let l2 = 495_232_834u64;
@@ -129,7 +128,7 @@ mod tests {
     }
 
     /// Ethereum and OP-stack chains report their own height, so the two values
-    /// coincide and nothing downstream has to special-case them.
+    /// coincide and nothing downstream special-cases them.
     #[test]
     fn evm_block_number_equals_chain_height_when_they_agree() {
         let n = 50_057_907u64;
@@ -147,9 +146,9 @@ mod tests {
         assert_eq!(rows[0].evm_block_number, n as i64);
     }
 
-    /// A missing block would previously commit `block_ts = 0` and the L2
-    /// height as `evm_block_number` — both silently wrong, and the second is
-    /// what makes Arbitrum `flushBatch` calls revert `DigestMismatch`.
+    /// Defaulting a missing block would commit `block_ts = 0` and the L2 height as
+    /// `evm_block_number`, the second of which makes Arbitrum `flushBatch` calls
+    /// revert `DigestMismatch`.
     #[test]
     fn missing_block_metadata_is_an_error_not_a_default() {
         let meta = HashMap::new();
@@ -160,8 +159,8 @@ mod tests {
         );
     }
 
-    /// `removed` marks a log from an orphaned block. Storing it would present
-    /// a dead branch as canonical.
+    /// `removed` marks a log from an orphaned block. Storing it would present an
+    /// abandoned branch as canonical.
     #[test]
     fn skips_logs_flagged_removed() {
         let n = 7u64;

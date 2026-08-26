@@ -26,7 +26,9 @@ DEST="${DEST:-${STACK_DIR}/circuits}"
 REPO="lelantos-org/circuits"
 VERSION_FILE="${DEST}/.version"
 
-ASSETS="tree_update_batch.wasm tree_update_batch.r1cs tree_update_batch_final.zkey 3x3_verification_key.json"
+# The transact verification key must match the deployed verifier's arity;
+# the relayer's DTOs are 4x4, so 3x3 is no longer fetched.
+ASSETS="tree_update_batch.wasm tree_update_batch.r1cs tree_update_batch_final.zkey 4x4_verification_key.json"
 
 # Nothing to do when the cached artifacts already match the requested tag.
 is_cached() {

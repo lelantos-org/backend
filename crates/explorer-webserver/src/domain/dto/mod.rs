@@ -21,7 +21,7 @@ const HOUR_SEC: i64 = 3_600;
 
 /// Resolve the row limit for the cursor-paginated list endpoints.
 ///
-/// `clamp`, not `min`: a negative limit reaches Diesel as `LIMIT -1`, and
+/// `clamp` rather than `min`: a negative limit reaches Diesel as `LIMIT -1`, and
 /// Postgres rejects it with a driver error the caller sees as a 500.
 pub fn page_limit(limit: Option<i64>) -> i64 {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
@@ -30,9 +30,8 @@ pub fn page_limit(limit: Option<i64>) -> i64 {
 /// Resolve the bucket width for the time-series endpoints.
 ///
 /// Both series are built from hourly rollups, so a bucket that is not a whole
-/// number of hours would slice a rollup row in half — the SQL rounds it down
-/// and the caller silently gets a different width than requested. Reject it
-/// instead.
+/// number of hours would split a rollup row: the SQL rounds it down and the
+/// caller receives a different width than requested. Rejected instead.
 pub fn bucket_sec(bucket: Option<i64>) -> AppResult<i64> {
     let bucket = bucket.unwrap_or(HOUR_SEC);
     if bucket <= 0 || bucket % HOUR_SEC != 0 {
@@ -45,15 +44,14 @@ pub fn bucket_sec(bucket: Option<i64>) -> AppResult<i64> {
 
 /// Resolve the kind filter for the classified feed.
 ///
-/// Rejected rather than ignored: a misspelled kind that silently widened the
-/// filter would answer a question the caller did not ask, and the caller has
-/// no way to tell the full feed from a filter that did not apply.
+/// Rejected rather than ignored: a misspelled kind that widened the filter would
+/// answer a different question, and the caller cannot distinguish the full feed
+/// from a filter that did not apply.
 pub fn tx_kind(kind: Option<&str>) -> AppResult<Option<TxKind>> {
     let Some(kind) = kind else { return Ok(None) };
     TxKind::parse(kind).map(Some).ok_or_else(|| {
-        // The rejected value is quoted back: the usual cause is a caller
-        // sending a plural or a capital, which "must be one of …" alone leaves
-        // them to spot in their own query string.
+        // The rejected value is quoted back. The usual cause is a plural or a
+        // capital, which the list of valid kinds alone does not point out.
         let known = TxKind::ALL.map(TxKind::as_str).join(", ");
         AppError::BadRequest(format!("unknown kind '{kind}'; must be one of {known}"))
     })
@@ -118,7 +116,7 @@ mod tests {
 
     #[test]
     fn tx_kind_rejects_an_unknown_kind() {
-        // Not silently widened to the whole feed: see `tx_kind`.
+        // Must not widen to the whole feed; see `tx_kind`.
         for bad in ["", "Deposit", "deposits", "sideways"] {
             let err = tx_kind(Some(bad)).unwrap_err();
             assert!(matches!(err, AppError::BadRequest(_)), "{bad} -> {err:?}");
@@ -127,7 +125,7 @@ mod tests {
 
     #[test]
     fn tx_kind_names_the_value_it_rejected() {
-        // The caller has to be able to see which of their params was wrong.
+        // The caller must be able to see which parameter was wrong.
         let AppError::BadRequest(msg) = tx_kind(Some("deposits")).unwrap_err() else {
             panic!("expected a bad request");
         };

@@ -1,9 +1,9 @@
 //! Shared building blocks for single-transact pipelines (spend + swap).
 //!
-//! Both pipelines insert `TRANSACT_OUT` leaves, run the same
-//! `tree_update_batch` SNARK over them, and differ only in: (a) which
-//! contract they target, (b) how they encode the calldata, and (c) which
-//! payload-shape checks they apply. This module owns everything they share.
+//! Both pipelines insert `TRANSACT_OUT` leaves and run the same
+//! `tree_update_batch` SNARK over them, differing only in which contract they
+//! target, how they encode the calldata, and which payload-shape checks they
+//! apply. This module owns what they share.
 
 use crate::adapters::abi::IMasp;
 use crate::adapters::calldata::{
@@ -29,23 +29,21 @@ use tracing::info;
 /// A spend inserts one leaf per transact output.
 pub const SPEND_LEAVES: usize = TRANSACT_OUT;
 
-/// What a payload's transact proof must be bound to for this relayer to be
-/// able to land it. Named fields rather than positional arguments: both are
-/// checked against wallet-supplied values, and `chain_id`/`relayer` are easy
-/// to transpose silently.
+/// What a payload's transact proof must be bound to for this relayer to land it.
+/// Named fields rather than positional arguments, since both are checked against
+/// wallet-supplied values and `chain_id` and `relayer` are easy to transpose.
 #[derive(Debug, Clone, Copy)]
 pub struct TransactBinding {
     pub chain_id: i64,
-    /// Address the proof must name as `relayer`. Usually this relayer's
-    /// signer; for a native unshield it is the `NativeAdapter`, which drives
-    /// `MASP.withdraw` itself and so is the pool's caller.
+    /// Address the proof must name as `relayer`: usually this relayer's signer,
+    /// and for a native unshield the `NativeAdapter`, which drives `MASP.withdraw`
+    /// itself and is therefore the pool's caller.
     pub relayer: Address,
 }
 
 impl TransactBinding {
-    /// Reject payloads that cannot possibly land, before the prover runs.
-    /// Each of these is an on-chain revert that would otherwise cost a
-    /// multi-second Groth16 first.
+    /// Reject payloads that cannot land, before the prover runs. Each case is an
+    /// on-chain revert that would otherwise cost a multi-second Groth16 first.
     pub fn check(&self, pi: &PubInputsDto) -> AppResult<()> {
         if pi.chain_id != self.chain_id as u64 {
             return Err(AppError::BadRequest(format!(
@@ -60,8 +58,8 @@ impl TransactBinding {
                 self.relayer
             )));
         }
-        // Pairwise over the whole input shape: the circuit constrains every
-        // pair, so any repeat is a double-spend the pool would reject.
+        // Pairwise over the whole input shape: the circuit constrains every pair,
+        // so any repeat is a double-spend the pool would reject.
         for i in 0..pi.nullifier.len() {
             for j in (i + 1)..pi.nullifier.len() {
                 if pi.nullifier[i] == pi.nullifier[j] {
@@ -79,12 +77,12 @@ impl TransactBinding {
 /// Reject any wallet-supplied value that is not a canonical BN254 field
 /// element.
 ///
-/// This has to run before the mirror is touched. `out_cm` and `out_cv_dep`
-/// feed `TreeMirror::reserve_and_advance_batch`, which hashes them with
-/// Poseidon; a non-canonical one fails there, and if an earlier leaf in the
-/// same batch already went in, the mirror is left ahead of the chain. The rest
-/// are checked in the same pass because the contract's coefficient range check
-/// would reject them anyway — better a 400 than a burnt Groth16.
+/// Runs before the mirror is touched. `out_cm` and `out_cv_dep` feed
+/// `TreeMirror::reserve_and_advance_batch`, which hashes them with Poseidon; a
+/// non-canonical value fails there, and an earlier leaf in the same batch would
+/// already have gone in, leaving the mirror ahead of the chain. The rest are
+/// checked in the same pass because the contract's coefficient range check would
+/// reject them anyway, and a 400 is cheaper than a wasted Groth16.
 pub fn check_field_elements(pi: &PubInputsDto) -> AppResult<()> {
     parse_field(&pi.merkle_root, FieldRef::Named("pubInputs.merkleRoot"))?;
     for (array, values) in [
@@ -113,8 +111,8 @@ fn check_point(p: &PointDto, array: &str, i: usize) -> AppResult<()> {
     Ok(())
 }
 
-/// Parsed leg-1 output commitments + value commitments, ready to feed the
-/// tree mirror, the Fiat-Shamir transcript, and the SNARK witness builder.
+/// Parsed leg-1 output commitments and value commitments, ready to feed the tree
+/// mirror, the Fiat-Shamir transcript and the SNARK witness builder.
 #[derive(Clone, Copy)]
 pub struct SpendInputs {
     pub cms: [FixedBytes<32>; SPEND_LEAVES],
@@ -162,11 +160,10 @@ fn field_u256(s: &str, at: FieldRef<'_>) -> AppResult<U256> {
 
 /// Verify the wallet's transact proof locally, before anything expensive.
 ///
-/// Shape checks alone cannot tell a real proof from a fabricated one, so
-/// without this a caller could spend the relayer's single-permit prover and the
-/// chain's tree mutex on payloads that were always going to be rejected
-/// on-chain. `None` means the deployment shipped no verification key, in which
-/// case there is nothing to check against — see `ProverCfg::transact_vkey_path`.
+/// Shape checks alone cannot distinguish a real proof from a fabricated one, so
+/// without this a caller could consume the relayer's single-permit prover and the
+/// chain's tree mutex on payloads bound to be rejected on chain. `None` means the
+/// deployment shipped no verification key; see `ProverCfg::transact_vkey_path`.
 pub fn verify_transact_proof(
     verifier: Option<&TransactVerifier>,
     proof: &ProofDto,
@@ -182,8 +179,8 @@ pub fn verify_transact_proof(
 /// Reject a payload proved against a root this relayer has never held.
 ///
 /// The pool would revert `StaleOldRoot`, which reaches the caller as an opaque
-/// 502 after a full Groth16. Checked under the mirror lock, since that is what
-/// makes the answer stable.
+/// 502 after a full Groth16. Checked under the mirror lock, which makes the
+/// answer stable.
 pub fn check_known_root(mirror: &TreeMirror, pi: &PubInputsDto) -> AppResult<()> {
     let root = parse_field(&pi.merkle_root, FieldRef::Named("pubInputs.merkleRoot"))?;
     if !mirror.knows_root(&root.0) {
@@ -232,17 +229,15 @@ pub fn build_tu_pi_for_spend(
 /// Everything both pipelines need in order to quote and to charge.
 ///
 /// Spend and swap differ in which contract they target and how they encode
-/// calldata; they do not differ in how a fee is priced or collected. Passing
-/// this one struct is what keeps that true — a new field is added in one place
-/// and reaches both paths, rather than being wired into whichever one the
-/// author had open.
+/// calldata, not in how a fee is priced or collected. Passing one struct keeps
+/// that true: a new field is added once and reaches both paths.
 #[derive(Clone, Copy)]
 pub struct FeeContext<'a> {
     pub chain_id: i64,
     pub fee_quoter: &'a FeeQuoter,
     pub assets: &'a AssetRegistry,
-    /// `None` on a chain that collects no fee, which leaves the relayer paying
-    /// gas out of its own signer.
+    /// `None` on a chain that collects no fee, where the relayer pays gas from its
+    /// own signer.
     pub shielded_fee: Option<&'a ShieldedFeeChecker>,
 }
 
@@ -251,17 +246,17 @@ impl FeeContext<'_> {
     /// gets everything it needs to build a fee note in one call.
     ///
     /// `FeeQuoter` prices tokens by ERC-20 address and knows nothing about MASP
-    /// asset ids or scales; the registry knows both and nothing about prices.
-    /// The pipeline layer is where the two meet.
+    /// asset ids or scales, while the registry knows both and nothing about
+    /// prices. The pipeline layer joins the two.
     pub async fn quote(&self, gas_used: u64) -> AppResult<EstimateResponse> {
         let mut estimate = self.fee_quoter.quote_for_gas(gas_used).await?;
         estimate.shielded_fee_address = self.shielded_fee.map(|c| c.address().to_string());
 
         let registered = self.assets.for_chain(self.chain_id).await?;
         for quote in &mut estimate.fees {
-            // A fee token with no registered asset is left undecorated rather
-            // than dropped: the amount is still worth showing on a chain where
-            // the indexer has not caught up and no note can yet be built.
+            // A fee token with no registered asset is left undecorated rather than
+            // dropped: the amount is still useful on a chain where the indexer has
+            // not caught up and no note can be built.
             let Some(row) = parse_address(&quote.token_address)
                 .ok()
                 .and_then(|t| registered.iter().find(|a| a.token_address() == Some(t)))
@@ -283,10 +278,9 @@ impl FeeContext<'_> {
 
     /// Enforce the shielded fee, where this chain collects one.
     ///
-    /// Belongs after the proof check, so the public inputs a fee is bound to
-    /// are known good, and before the tree-mirror lock, so a caller who
-    /// underpays does not park every other submission on the chain behind their
-    /// mistake.
+    /// Runs after the proof check, so the public inputs a fee is bound to are known
+    /// good, and before the tree-mirror lock, so a caller who underpays does not
+    /// park every other submission on the chain.
     pub async fn charge(
         &self,
         pi: &PubInputsDto,
@@ -297,9 +291,9 @@ impl FeeContext<'_> {
             return Ok(());
         };
         let paid = checker.require(pi, aux, gas_used).await?;
-        // The asset and the amount, and nothing tying them to this payer: the
-        // output index would say which slot of which submission the note sits
-        // in, and that link is what the shielded fee exists to avoid.
+        // The asset and the amount, with nothing tying them to this payer: the
+        // output index would identify which slot of which submission holds the
+        // note, which is the link the shielded fee exists to avoid.
         info!(
             chain_id = self.chain_id,
             asset_id = paid.asset_id,

@@ -25,23 +25,19 @@ pub async fn refresh_hourly_mv(pool: &DbPool) -> Result<(), ExplorerIndexerError
 }
 
 /// All-time per-(chain, asset) escrow totals. Refreshed on the same trigger as
-/// the hourly view — both derive from `asset_flows`, so a tick that changed one
-/// changed the other, and leaving this one behind would show a stale balance
-/// beside a fresh chart.
+/// the hourly view: both derive from `asset_flows`, so a tick that changes one
+/// changes the other.
 pub async fn refresh_locked_mv(pool: &DbPool) -> Result<(), ExplorerIndexerError> {
     refresh(pool, "asset_locked").await
 }
 
 /// `CONCURRENTLY`, so readers keep serving the previous contents while the
-/// refresh runs — every one of these views backs a dashboard that polls.
+/// refresh runs; each of these views backs a polling dashboard.
 ///
-/// `view` is a compile-time literal at every call site; it is interpolated
+/// `view` is a compile-time literal at every call site. It is interpolated
 /// because a view name cannot be a bind parameter.
 async fn refresh(pool: &DbPool, view: &'static str) -> Result<(), ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     sql_query(format!("REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
         .execute(&mut conn)
         .await?;
@@ -49,10 +45,7 @@ async fn refresh(pool: &DbPool, view: &'static str) -> Result<(), ExplorerIndexe
 }
 
 pub async fn insert(pool: &DbPool, row: NewAssetFlow) -> Result<usize, ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     Ok(diesel::insert_into(asset_flows::table)
         .values(&row)
         .on_conflict((

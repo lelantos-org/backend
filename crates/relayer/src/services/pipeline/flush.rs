@@ -5,7 +5,7 @@ use crate::adapters::calldata::{
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
 use crate::services::asset_registry::AssetRegistry;
-use crate::services::deposit_fee::assess;
+use crate::services::deposit_fee::{FeeNote, assess};
 use crate::services::deposit_mempool::{DepositMempool, EscrowLeaf, PendingDeposit};
 use crate::services::escrow::EscrowReader;
 use crate::services::events::{DepositEvent, EventBroadcaster};
@@ -35,13 +35,12 @@ pub struct FlushPipeline {
     pub max_n: usize,
     pub events: Arc<EventBroadcaster>,
     pub failures: DepositFailures,
-    /// Absent means this chain subsidises flushes: the fee leaf is still
-    /// minted, but nothing here inspects it.
+    /// Absent means this chain subsidises flushes: the fee leaf is still minted,
+    /// but nothing here inspects it.
     pub shielded_fee: Option<Arc<ShieldedFeeChecker>>,
     pub gas_witness: Arc<GasWitness>,
     /// Held for `/v1/deposit/estimate`, which prices the same `EntryPoint::Flush`
-    /// the fee gate does — so a wallet is quoted exactly what `preflight` will
-    /// later require.
+    /// the fee gate does, so a wallet is quoted what `preflight` later requires.
     pub fee_quoter: Arc<FeeQuoter>,
     pub assets: Arc<AssetRegistry>,
 }
@@ -49,10 +48,10 @@ pub struct FlushPipeline {
 impl FlushPipeline {
     /// What a deposit must pay this relayer to be flushed.
     ///
-    /// Priced against `EntryPoint::Flush` — this deposit's share of a future
-    /// `flushBatch` — rather than against a transaction the caller is about to
-    /// send. It is the same number `fee_gate` will hold the deposit to, which
-    /// is what lets a wallet build a note that will actually be accepted.
+    /// Priced against `EntryPoint::Flush`, this deposit's share of a future
+    /// `flushBatch`, rather than against a transaction the caller is about to send.
+    /// It is the number `fee_gate` holds the deposit to, so a wallet can build a
+    /// note that will be accepted.
     pub async fn estimate(&self) -> AppResult<crate::domain::responses::EstimateResponse> {
         FeeContext {
             chain_id: self.chain_id,
@@ -66,17 +65,17 @@ impl FlushPipeline {
 
     /// One flush attempt. Returns `Ok(None)` if no pending deposits.
     ///
-    /// A deposit is two leaves — the depositor's note and the note paying
-    /// whoever flushes it — so `n` deposits advance the tree by `2n` leaves
-    /// and `actualCount = 2n`. The contract enforces the doubling, so an odd
-    /// leaf count is now a `BadBatchSize` rather than a legitimate batch.
+    /// A deposit is two leaves, the depositor's note and the note paying whoever
+    /// flushes it, so `n` deposits advance the tree by `2n` leaves and
+    /// `actualCount = 2n`. The contract enforces the doubling, so an odd leaf count
+    /// is a `BadBatchSize` rather than a valid batch.
     #[instrument(skip_all, fields(chain_id = self.chain_id, n, start_index))]
     pub async fn tick(&self) -> AppResult<Option<B256>> {
-        // `Priority::Flush` never queues for the process-wide prover permit, so
-        // a busy prover means this tick cannot finish. Bail out before the DB
-        // read, the escrow eth_calls and — the point — the mirror lock:
-        // reserving leaves only to unwind them blocks this chain's spends for
-        // nothing, and at `flush_interval_s = 3` that is a frequent tick.
+        // `Priority::Flush` never queues for the process-wide prover permit, so a
+        // busy prover means this tick cannot finish. Bailing out here avoids the
+        // database read, the escrow `eth_call`s and the mirror lock: reserving
+        // leaves only to unwind them would block this chain's spends, and the tick
+        // runs frequently.
         if self.prover.is_busy() {
             return Err(AppError::ProverBusy);
         }
@@ -89,20 +88,25 @@ impl FlushPipeline {
         if pending.is_empty() {
             return Ok(None);
         }
-        // Everything below this line is paid for — a `tree_update_batch`
-        // Groth16 and a transaction — and `flushBatch` is all-or-nothing, so
-        // deposits that cannot land are dropped first.
+        // Everything below costs a `tree_update_batch` Groth16 and a transaction,
+        // and `flushBatch` is all-or-nothing, so deposits that cannot land are
+        // dropped first.
         let pending = self.preflight(pending).await?;
         if pending.is_empty() {
             return Ok(None);
         }
         let n = pending.len();
+        // Summed before `pending` is consumed below. Deposits in one batch can name
+        // different assets, so this is a batch total rather than an amount of a
+        // single token, and is meaningful only alongside the per-deposit lines
+        // `fee_gate` emits.
+        let fees_collected: u64 = pending.iter().map(|p| p.fee_in).sum();
         tracing::Span::current().record("n", n);
         info!("flush batch starting");
 
-        // Both leaves of every deposit, already in the order the tree inserts
-        // them — see `PendingDeposit::leaves`. Every leaf-indexed array below
-        // is derived from this one vec, so none of them can disagree.
+        // Both leaves of every deposit, in the order the tree inserts them; see
+        // `PendingDeposit::leaves`. Every leaf-indexed array below derives from
+        // this one vector, so they cannot disagree.
         let leaves: Vec<EscrowLeaf> = pending.iter().flat_map(PendingDeposit::leaves).collect();
         let n_leaves = leaves.len();
 
@@ -110,8 +114,8 @@ impl FlushPipeline {
         let tree_leaves: Vec<(fmd_crypto::tree::Field, [U256; 2])> =
             leaves.iter().map(|l| (l.cm, l.cv_dep)).collect();
         let ids_u64: Vec<u64> = pending.iter().map(|p| p.id).collect();
-        // Digest preimage the contract dropped from storage; a wrong field
-        // here reverts `DigestMismatch` for the whole batch.
+        // Digest preimage the contract dropped from storage; a wrong field here
+        // reverts `DigestMismatch` for the whole batch.
         let meta: Vec<IMasp::DepositMeta> = pending
             .iter()
             .map(|p| IMasp::DepositMeta {
@@ -143,8 +147,8 @@ impl FlushPipeline {
             })
             .collect();
 
-        // Hold the mirror lock through prove+submit. SpendPipeline shares
-        // this mutex; concurrent ops on the same chain serialize.
+        // Hold the mirror lock through prove and submit. `SpendPipeline` shares
+        // this mutex, so concurrent operations on the chain serialise.
         let mut mirror = self.mirror.lock().await;
         let (slot, advanced) = mirror.reserve_and_advance_batch(&tree_leaves)?;
         let start_index = slot.start_index;
@@ -156,7 +160,7 @@ impl FlushPipeline {
         let prove_started = std::time::Instant::now();
         let tu_proof = match self.prover.prove(tu_witness, Priority::Flush).await {
             Ok(p) => p,
-            // `ProverBusy` means another chain holds the prover — expected
+            // `ProverBusy` means another chain holds the prover, which is normal
             // under load, and `abandon` does not charge it to the batch.
             Err(e) => return Err(self.abandon(&mut mirror, n_leaves, &ids_u64, e)),
         };
@@ -180,22 +184,23 @@ impl FlushPipeline {
             Ok(r) => r,
             Err(e) => return Err(self.abandon(&mut mirror, n_leaves, &ids_u64, e)),
         };
-        // Drop the mirror lock before the DB write so other pipelines can proceed.
+        // Drop the mirror lock before the database write so other pipelines can
+        // proceed.
         drop(mirror);
         self.failures.note_success();
 
-        // Optimistic mark — keeps these IDs out of subsequent `pop_pending`
-        // until the ingester observes the on-chain `DepositFlushed` event
-        // and overwrites with the canonical block number.
+        // An optimistic mark, keeping these ids out of later `pop_pending` calls
+        // until the indexer observes the on-chain `DepositFlushed` event and
+        // overwrites with the canonical block number.
         match self
             .mempool
             .mark_submitted(&ids_u64, receipt.block_number)
             .await
         {
             Ok(claimed) if claimed != n => {
-                // The indexer writes the canonical flush unconditionally, and
-                // `submit` waits for a confirmation — so it often wins this
-                // race. Nothing is lost then; its row is the better one.
+                // The indexer writes the canonical flush unconditionally and
+                // `submit` waits for a confirmation, so the indexer often wins this
+                // race. Nothing is lost: its row is the authoritative one.
                 match self.mempool.count_unflushed(&ids_u64).await {
                     Ok(0) => info!(
                         claimed,
@@ -220,9 +225,9 @@ impl FlushPipeline {
             Err(e) => warn!(error = %e, "flush mark_submitted failed (ingester will catch up)"),
         }
 
-        // Per deposit, because that is what a deposit's fee note is quoted
-        // against — the receipt covers the whole batch. Recorded only on a
-        // confirmed submission, so a reverted flush cannot move the quote.
+        // Per deposit, since that is what a deposit's fee note is quoted against
+        // while the receipt covers the whole batch. Recorded only on a confirmed
+        // submission, so a reverted flush cannot move the quote.
         self.gas_witness
             .observe(EntryPoint::Flush, receipt.gas_used / n as u64);
 
@@ -230,6 +235,13 @@ impl FlushPipeline {
         info!(
             tx_hash = %tx_hash_hex,
             gas_used = receipt.gas_used,
+            gas_per_deposit = receipt.gas_used / n as u64,
+            // Circuit units, summed over the batch. The gas above came out of the
+            // relayer's own account and this is what came back. The two are in
+            // different units, and converting between them needs the asset's scale
+            // and a price, so this is a raw pair to reconcile from rather than a
+            // margin.
+            fees_collected = fees_collected,
             block = receipt.block_number,
             "flushBatch submitted"
         );
@@ -246,8 +258,8 @@ impl FlushPipeline {
 
     /// Roll the mirror back after a failed stage and charge the batch for it.
     ///
-    /// Which failures are the batch's own is [`DepositFailures::note_failure`]'s
-    /// call; infrastructure faults pass through uncounted.
+    /// [`DepositFailures::note_failure`] decides which failures are the batch's
+    /// own; infrastructure faults pass through uncounted.
     #[must_use = "the returned error must be propagated"]
     fn abandon(
         &self,
@@ -265,17 +277,17 @@ impl FlushPipeline {
     ///
     /// The contract keeps only `escrowed[id]`, a digest over every field the
     /// relayer replays. Reading it back and re-deriving the digest locally
-    /// reproduces the per-deposit guards in `_drainDeposit` for one `eth_call`
-    /// each, instead of one wasted Groth16 per tick. [`classify`] holds the
-    /// decision table; this applies it.
+    /// reproduces the per-deposit guards in `_drainDeposit` at one `eth_call` each
+    /// rather than one wasted Groth16 per tick. [`classify`] holds the decision
+    /// table and this applies it.
     ///
-    /// An RPC failure aborts the tick rather than rejecting anything: a
-    /// deposit must never be judged unflushable because the node was down.
+    /// An RPC failure aborts the tick rather than rejecting anything: a deposit
+    /// must never be judged unflushable because the node was down.
     async fn preflight(&self, pending: Vec<PendingDeposit>) -> AppResult<Vec<PendingDeposit>> {
         let ids: Vec<u64> = pending.iter().map(|d| d.id).collect();
         let stored = self.escrow.digests(&ids).await?;
-        // Deposits are matched to slots by position, so a short read would
-        // silently judge deposits against the wrong slot.
+        // Deposits are matched to slots by position, so a short read would judge
+        // deposits against the wrong slot.
         if stored.len() != pending.len() {
             return Err(AppError::Internal(format!(
                 "escrow read returned {} digests for {} deposits",
@@ -289,12 +301,11 @@ impl FlushPipeline {
         let mut flushable = Vec::with_capacity(pending.len());
         let mut mismatched = Vec::new();
         for (deposit, stored) in std::iter::zip(pending, stored) {
-            // Priced eagerly, before `classify` decides whether the fee even
-            // matters. Deliberate: the alternative is for this loop to know
-            // which verdicts outrank a fee, which is exactly the decision
-            // table `classify` owns. A batch is at most
+            // Priced before `classify` decides whether the fee matters, so this
+            // loop does not need to know which verdicts outrank a fee; that is the
+            // decision table `classify` owns. A batch is at most
             // `MAX_DEPOSITS_PER_BATCH` deposits and the quoter caches, so the
-            // wasted work is bounded and small.
+            // redundant work is bounded.
             let gate = self.fee_gate(&deposit).await?;
             match classify(&deposit, stored, masp, chain_id, &gate) {
                 Verdict::Flushable => flushable.push(deposit),
@@ -308,8 +319,8 @@ impl FlushPipeline {
                 Verdict::DigestMismatch => mismatched.push(deposit.id),
             }
         }
-        // One deposit that hashed correctly proves the derivation agrees with
-        // this pool, which is what makes the mismatches below trustworthy.
+        // One deposit that hashed correctly shows the derivation agrees with this
+        // pool, which is what makes the mismatches below trustworthy.
         if !flushable.is_empty() {
             self.failures.note_digest_verified();
         }
@@ -319,13 +330,13 @@ impl FlushPipeline {
 
     /// What this deposit's fee leaf pays, and what it would have to pay.
     ///
-    /// The quote is per deposit, not per batch: `flush.rs` observes
-    /// `gas_used / deposits` after each submission, so `EntryPoint::Flush`
-    /// already holds a per-deposit figure.
+    /// The quote is per deposit rather than per batch: `flush.rs` observes
+    /// `gas_used / deposits` after each submission, so `EntryPoint::Flush` already
+    /// holds a per-deposit figure.
     ///
-    /// A pricing failure — an asset this relayer will not take, an oracle that
-    /// is down — is not the deposit's fault, so it reads as an unpaid fee and
-    /// the deposit waits, rather than being quarantined.
+    /// A pricing failure, such as an asset this relayer will not take or an oracle
+    /// that is down, is not the deposit's fault, so it reads as an unpaid fee and
+    /// the deposit waits rather than being quarantined.
     async fn fee_gate(&self, d: &PendingDeposit) -> AppResult<FeeGate> {
         let Some(checker) = self.shielded_fee.as_ref() else {
             return Ok(FeeGate::Subsidised);
@@ -344,17 +355,33 @@ impl FlushPipeline {
                 return Ok(FeeGate::Unpriceable);
             }
         };
+        // What the deposit escrowed against what this flush needs, in circuit units
+        // of the deposit's asset. `fee_in` is public on chain, so this reveals
+        // nothing the escrow event did not.
+        //
+        // Logged whatever the verdict and before `classify` reaches one: a skip
+        // reports that the fee was short, and this reports by how much, which
+        // separates an under-quoting payer from a moving gas price.
+        info!(
+            chain_id = self.chain_id,
+            deposit_id = d.id,
+            asset_id = d.public_asset_id,
+            escrowed = d.fee_in,
+            required,
+            gas,
+            ours = matches!(note, FeeNote::Paid { .. }),
+            "deposit flush fee priced"
+        );
         Ok(FeeGate::Charged { note, required })
     }
 
     /// Act on deposits whose replayed fields did not hash to their escrow slot.
     ///
-    /// A wrong derivation in `deposit_digest` — or a misconfigured
-    /// `pool_address` — looks exactly like every deposit being corrupt, and
-    /// acting on that would quarantine the whole mempool on a single bug. So a
-    /// mismatch is only believed once some deposit on this pool has matched.
-    /// Until then the deposits are still dropped from the batch, which costs
-    /// an `eth_call` per tick and no proof.
+    /// A wrong derivation in `deposit_digest`, or a misconfigured `pool_address`,
+    /// looks identical to every deposit being corrupt, and acting on that would
+    /// quarantine the whole mempool over one bug. A mismatch is therefore believed
+    /// only once some deposit on this pool has matched. Until then the deposits are
+    /// still dropped from the batch, costing one `eth_call` per tick and no proof.
     fn judge_mismatches(&self, ids: &[u64]) {
         if ids.is_empty() {
             return;

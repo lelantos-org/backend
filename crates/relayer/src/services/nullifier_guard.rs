@@ -1,17 +1,16 @@
 //! Pre-SNARK nullifier validation.
 //!
-//! Every check covers all `TRANSACT_IN` nullifiers. The handlers used to pass
-//! only the first two — a leftover from the 2x2 shape — which left the last
-//! one unguarded on all three layers.
+//! Every check covers all `TRANSACT_IN` nullifiers; passing a fixed prefix would
+//! leave the remaining ones unguarded on all three layers.
 //!
 //! Three layers, cheapest first:
 //!   1. Per-chain set of nullifiers currently being processed by this relayer.
 //!      Rejects concurrent duplicate submissions before proof generation.
-//!   2. Per-chain TTL cache of nullifiers this relayer has *already* landed
-//!      on-chain. `spent_nullifiers` is written by the indexer, which trails
-//!      the chain by some blocks; without this layer a resubmit inside that
-//!      window passes both other checks and burns a Groth16 plus gas on a tx
-//!      the contract will reject.
+//!   2. Per-chain TTL cache of nullifiers this relayer has already landed on
+//!      chain. `spent_nullifiers` is written by the indexer, which trails the
+//!      chain by some blocks; without this layer a resubmit inside that window
+//!      passes both other checks and spends a Groth16 plus gas on a transaction
+//!      the contract rejects.
 //!   3. `spent_nullifiers` lookup. Catches replays this process did not submit
 //!      itself, and everything older than the TTL.
 //!
@@ -28,20 +27,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// How long a landed nullifier stays in the recently-spent cache. Needs to
-/// comfortably exceed indexer lag — it only has to hold until the nullifier
-/// reaches `spent_nullifiers`, after which layer 3 takes over.
+/// How long a landed nullifier stays in the recently-spent cache. Must exceed
+/// indexer lag: it only has to hold until the nullifier reaches
+/// `spent_nullifiers`, after which layer 3 takes over.
 const RECENTLY_SPENT_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// The nullifier set of one transact payload, at the deployed circuit arity.
 /// Named so a shape change is a compile error at every call site rather than a
-/// silently short slice.
+/// short slice.
 pub type Nullifiers = [[u8; 32]; TRANSACT_IN];
 
 /// Every nullifier a payload spends, parsed from the wire.
 ///
-/// Takes the whole array rather than an index range: reading a fixed prefix is
-/// exactly the bug this replaces.
+/// Takes the whole array rather than an index range, so no nullifier is skipped.
 pub fn nullifiers_of(pi: &PubInputsDto) -> AppResult<Nullifiers> {
     let mut out = [[0u8; 32]; TRANSACT_IN];
     for (i, slot) in out.iter_mut().enumerate() {
@@ -50,8 +48,8 @@ pub fn nullifiers_of(pi: &PubInputsDto) -> AppResult<Nullifiers> {
     Ok(out)
 }
 
-/// Nullifier admission control, one entry per configured chain. A chain that
-/// is absent is an unknown chain, not an empty set.
+/// Nullifier admission control, one entry per configured chain. An absent chain
+/// is an unknown chain rather than an empty set.
 pub struct NullifierGuards {
     chains: HashMap<i64, Arc<ChainNullifiers>>,
 }
@@ -66,13 +64,12 @@ impl NullifierGuards {
         }
     }
 
-    /// Reserve every nullifier in the payload and verify none is already
-    /// spent. The returned guard releases the reservation on drop — success,
-    /// error, or panic alike — so callers can hold it for the whole submission
-    /// and forget about it.
+    /// Reserve every nullifier in the payload and verify none is already spent.
+    /// The returned guard releases the reservation on drop, whether from success,
+    /// error or panic, so callers can hold it for the whole submission.
     ///
-    /// On success the caller must call [`PendingGuard::spent`]; plain drop
-    /// only releases the reservation.
+    /// On success the caller must call [`PendingGuard::spent`]; a plain drop only
+    /// releases the reservation.
     pub async fn reserve(
         &self,
         pool: &DbPool,
@@ -84,8 +81,8 @@ impl NullifierGuards {
             .get(&chain_id)
             .ok_or(AppError::UnknownChain(chain_id))?;
 
-        // Layers 1 and 2 are in-memory and cheap; do them before touching the
-        // pool. `guard` exists from here on, so every later `?` releases.
+        // Layers 1 and 2 are in-memory and cheap, so they run before touching the
+        // pool. `guard` exists from here on, so every later `?` releases it.
         let guard = chain.reserve_local(chain_id, nfs).await?;
 
         let hits = spent_nullifiers::any_spent(pool, chain_id, &nfs).await?;
@@ -123,8 +120,8 @@ impl ChainNullifiers {
         chain_id: i64,
         nfs: Nullifiers,
     ) -> AppResult<PendingGuard> {
-        // Hold the lock across contains+insert so two concurrent identical
-        // requests cannot both pass through the gap.
+        // Hold the lock across the contains and insert so two concurrent identical
+        // requests cannot both pass.
         {
             let mut in_flight = self.in_flight.lock().await;
             if nfs.iter().any(|nf| in_flight.contains(nf)) {
@@ -158,9 +155,8 @@ pub struct PendingGuard {
 }
 
 impl PendingGuard {
-    /// Record that these nullifiers landed on-chain, so a resubmit is rejected
-    /// during the window before the indexer writes them to
-    /// `spent_nullifiers`.
+    /// Record that these nullifiers landed on chain, so a resubmit is rejected
+    /// during the window before the indexer writes them to `spent_nullifiers`.
     pub async fn spent(&self) {
         for nf in &self.nfs {
             self.chain.recently_spent.insert(*nf, ()).await;
@@ -177,7 +173,8 @@ impl Drop for PendingGuard {
                 in_flight.remove(nf);
             }
         };
-        // try_lock fast path avoids spawning when uncontended (the common case).
+        // The `try_lock` fast path avoids spawning when uncontended, the common
+        // case.
         if let Ok(mut in_flight) = chain.in_flight.try_lock() {
             release(&mut in_flight);
             return;
@@ -200,7 +197,7 @@ mod tests {
         let mut out = [[0u8; 32]; TRANSACT_IN];
         out[0] = [a; 32];
         out[1] = [b; 32];
-        // Padding has to be seed-dependent, or two calls with different (a, b)
+        // Padding must be seed-dependent, or two calls with different `(a, b)`
         // would still collide on the slots past the second.
         for (i, slot) in out.iter_mut().enumerate().skip(2) {
             *slot = [a.wrapping_mul(31).wrapping_add(b).wrapping_add(i as u8); 32];
@@ -208,8 +205,7 @@ mod tests {
         out
     }
 
-    /// Same as `nfs`, but the collision sits in the LAST slot — the one the
-    /// handlers never used to pass.
+    /// Same as `nfs`, but the collision sits in the last slot.
     fn nfs_colliding_on_last(last: u8) -> Nullifiers {
         let mut out = nfs(50, 51);
         out[TRANSACT_IN - 1] = [last; 32];
@@ -236,8 +232,8 @@ mod tests {
         c.reserve_local(CHAIN_ID, nfs(3, 4)).await.unwrap();
     }
 
-    /// Dropping without `spent()` is the failure path: the submission never
-    /// landed, so the nullifiers must become available again.
+    /// Dropping without `spent()` is the failure path: the submission did not
+    /// land, so the nullifiers become available again.
     #[tokio::test]
     async fn dropping_a_guard_releases_the_reservation() {
         let c = chain();
@@ -258,8 +254,8 @@ mod tests {
         c.reserve_local(CHAIN_ID, nfs(1, 2)).await.unwrap();
     }
 
-    /// The indexer-lag window: the tx landed and the guard dropped, but
-    /// `spent_nullifiers` has not caught up yet.
+    /// The indexer-lag window: the transaction landed and the guard dropped, but
+    /// `spent_nullifiers` has not caught up.
     #[tokio::test]
     async fn a_landed_nullifier_is_rejected_after_its_guard_drops() {
         let c = chain();
@@ -274,7 +270,7 @@ mod tests {
         );
     }
 
-    /// Only the nullifiers that actually landed are held back.
+    /// Only the nullifiers that landed are held back.
     #[tokio::test]
     async fn marking_spent_does_not_block_unrelated_nullifiers() {
         let c = chain();
@@ -285,9 +281,8 @@ mod tests {
         c.reserve_local(CHAIN_ID, nfs(3, 4)).await.unwrap();
     }
 
-    /// The regression: a payload whose only reused nullifier is the last one
-    /// used to sail through every layer, burning a Groth16 on a tx the pool
-    /// would reject.
+    /// A payload whose only reused nullifier is the last one must not pass the
+    /// guard, or it would spend a Groth16 on a transaction the pool rejects.
     #[tokio::test]
     async fn a_collision_on_the_last_nullifier_is_rejected() {
         let c = chain();

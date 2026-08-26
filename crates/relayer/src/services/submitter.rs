@@ -1,11 +1,10 @@
-// Submits a single MASP.transact() call per chain. Sequential nonces are
-// implicit because the pipeline mutex serializes per-chain submissions.
-//
-// The provider is built once, at construction. Alloy's filler stack is deeply
-// generic and resists `dyn Provider` boxing, which is why it used to be rebuilt
-// per submission — but the type can be named, and rebuilding it threw away
-// `ChainIdFiller`'s cache, so every submission paid an `eth_chainId` round trip
-// before the transaction went out. See [`PoolProvider`].
+//! Submits one MASP call per chain. Nonces are sequential because the pipeline
+//! mutex serialises per-chain submissions.
+//!
+//! The provider is built once at construction. Alloy's filler stack is deeply
+//! generic and resists `dyn Provider` boxing, but the type can be named, and
+//! rebuilding it per submission would discard `ChainIdFiller`'s cache and pay an
+//! `eth_chainId` round trip before every transaction. See [`PoolProvider`].
 
 use crate::adapters::rpc::{HttpTransport, RpcEndpoint};
 use crate::domain::error::{AppError, AppResult, revert_reason};
@@ -23,15 +22,15 @@ use tracing::{error, info, instrument, warn};
 /// What `ProviderBuilder::new().with_recommended_fillers().wallet(..)` builds,
 /// spelled out so it can be held in a field.
 ///
-/// Naming it is the whole trick: the fillers carry per-provider state, and
-/// [`ChainIdFiller`] in particular is a `OnceLock` that caches the chain id
-/// after its first fetch. A provider rebuilt per call never gets to use it.
+/// Naming the type is what allows it to be held: the fillers carry per-provider
+/// state, and [`ChainIdFiller`] is a `OnceLock` caching the chain id after its
+/// first fetch, which a provider rebuilt per call never reuses.
 ///
-/// The nonce filler is deliberately left at its default, [`SimpleNonceManager`],
-/// which re-reads the pending transaction count on every submission. Holding the
-/// provider does *not* change that — and it must not: a cached nonce that
-/// desyncs produces a replacement transaction, which is a bad failure mode when
-/// idempotency is keyed on the transaction hash.
+/// The nonce filler stays at its default, [`SimpleNonceManager`], which re-reads
+/// the pending transaction count on every submission. Holding the provider does
+/// not change that, and must not: a cached nonce that desyncs produces a
+/// replacement transaction, which is a poor failure mode when idempotency is
+/// keyed on the transaction hash.
 ///
 /// [`ChainIdFiller`]: alloy::providers::fillers::ChainIdFiller
 /// [`SimpleNonceManager`]: alloy::providers::fillers::SimpleNonceManager
@@ -62,10 +61,11 @@ pub struct Submitter {
 #[derive(Debug, Clone)]
 pub struct SubmissionReceipt {
     pub tx_hash: B256,
-    /// Mined-in block number. Some chains omit this in pre-finality receipts;
-    /// the relayer waits for 1 confirmation so it should always be present.
+    /// Block the transaction mined in. Some chains omit this in pre-finality
+    /// receipts, but the relayer waits for one confirmation, so it should be
+    /// present.
     pub block_number: i64,
-    /// Gas units used by the executed tx (post-EIP-1559 receipt field).
+    /// Gas units used by the executed transaction, a post-EIP-1559 receipt field.
     pub gas_used: u64,
 }
 
@@ -100,17 +100,17 @@ impl Submitter {
         })
     }
 
-    /// Submit ABI-encoded calldata to the MASP pool. Awaits 1 confirmation.
-    /// Pipeline picks the encoding (`flushBatch` / `transfer` / `withdraw` /
-    /// `withdrawNative`) and passes the bytes here, keeping this layer
-    /// call-shape-agnostic. None of the supported entry points are payable.
+    /// Submit ABI-encoded calldata to the MASP pool and await one confirmation.
+    /// The pipeline picks the encoding — `flushBatch`, `transfer`, `withdraw` or
+    /// `withdrawNative` — and passes the bytes here, keeping this layer agnostic
+    /// of the call shape. None of the supported entry points are payable.
     ///
-    /// Failure modes are deliberately distinct, because the caller's tree
-    /// mirror rollback is only sound for some of them:
-    ///   - [`AppError::Rpc`] — the node refused the broadcast; nothing landed.
-    ///   - [`AppError::Reverted`] — mined, but reverted; no leaves inserted.
-    ///   - [`AppError::SubmitUnknown`] — broadcast accepted, no receipt within
-    ///     the timeout. It may still mine. Do not roll back.
+    /// The failure modes are distinct because the caller's tree-mirror rollback is
+    /// sound only for some of them:
+    ///   - [`AppError::Rpc`]: the node refused the broadcast; nothing landed.
+    ///   - [`AppError::Reverted`]: mined but reverted; no leaves inserted.
+    ///   - [`AppError::SubmitUnknown`]: broadcast accepted with no receipt inside
+    ///     the timeout. It may still mine, so do not roll back.
     #[instrument(
         skip_all,
         fields(chain_id = self.chain_id, pool = %self.pool_address, calldata_len = data.len()),
@@ -120,8 +120,8 @@ impl Submitter {
             .to(self.pool_address)
             .input(data.into());
         let envelope = self.fill_and_sign(tx).await?;
-        // Known before the broadcast, which is what makes an unanswered send
-        // resolvable against the chain instead of guessed at.
+        // Known before the broadcast, which makes an unanswered send resolvable
+        // against the chain rather than guessed at.
         let tx_hash = *envelope.tx_hash();
         let receipt = self.broadcast(envelope, tx_hash).await?;
         self.receipt_outcome(receipt, tx_hash)
@@ -129,16 +129,16 @@ impl Submitter {
 
     /// Price and sign, without broadcasting.
     ///
-    /// Split from [`Self::broadcast`] because the two fail differently in the
-    /// one way that matters to the caller: everything here happens before the
-    /// transaction is signed, so a failure proves nothing reached the mempool
-    /// and the speculative leaves may be rolled back.
+    /// Split from [`Self::broadcast`] because the two fail differently in the way
+    /// that matters to the caller: everything here happens before the transaction
+    /// is signed, so a failure proves nothing reached the mempool and the
+    /// speculative leaves may be rolled back.
     async fn fill_and_sign(&self, tx: TxRequest) -> AppResult<TxEnvelope> {
-        // The happy path does not probe. A contract guard that rejects the
-        // payload surfaces from the gas estimate as an opaque failure, so the
-        // `eth_call` that makes the revert legible is run *after* that failure
-        // instead of ahead of every submission — same diagnosis, one fewer RPC
-        // round trip per successful spend.
+        // The success path does not probe. A contract guard rejecting the payload
+        // surfaces from the gas estimate as an opaque failure, so the `eth_call`
+        // that makes the revert legible runs after that failure rather than ahead
+        // of every submission: the same diagnosis, one fewer RPC round trip per
+        // successful spend.
         let filled = match self.provider.fill(tx.clone()).await {
             Ok(filled) => filled,
             Err(e) => {
@@ -148,8 +148,8 @@ impl Submitter {
         };
         match filled {
             SendableTx::Envelope(envelope) => Ok(envelope),
-            // The wallet filler signs during `fill`, so a builder here means
-            // the signer dropped out of the stack: a wiring bug, not a runtime
+            // The wallet filler signs during `fill`, so a builder here means the
+            // signer dropped out of the stack: a wiring bug rather than a runtime
             // condition.
             SendableTx::Builder(_) => Err(AppError::Internal(
                 "transaction was not signed during fill; wallet filler missing".into(),
@@ -159,8 +159,8 @@ impl Submitter {
 
     /// Broadcast a signed transaction and wait for one confirmation.
     ///
-    /// Every path out of here either has a receipt or has established that the
-    /// outcome is genuinely unknowable — never a guess.
+    /// Every path out of here either holds a receipt or has established that the
+    /// outcome is unknowable.
     async fn broadcast(&self, envelope: TxEnvelope, tx_hash: B256) -> AppResult<ChainReceipt> {
         let pending = match self.provider.send_tx_envelope(envelope).await {
             Ok(pending) => pending,
@@ -191,9 +191,9 @@ impl Submitter {
 
     /// Turn a receipt into this layer's verdict.
     ///
-    /// Shared by the ordinary path and by the one that recovers a receipt
-    /// after an unanswered broadcast, so both classify a revert and a
-    /// block-number-less receipt the same way.
+    /// Shared by the ordinary path and by the one recovering a receipt after an
+    /// unanswered broadcast, so both classify a revert and a receipt without a
+    /// block number identically.
     fn receipt_outcome(
         &self,
         receipt: alloy::rpc::types::TransactionReceipt,
@@ -206,8 +206,8 @@ impl Submitter {
                 receipt.transaction_hash
             )));
         }
-        // A receipt without a block number still means the tx executed, so
-        // this is an unknown-outcome failure, not a clean one.
+        // A receipt without a block number still means the transaction executed,
+        // so this is an unknown-outcome failure rather than a clean one.
         let block_number = receipt.block_number.ok_or_else(|| {
             AppError::SubmitUnknown(format!("tx {} receipt missing block_number", tx_hash))
         })? as i64;
@@ -243,14 +243,13 @@ impl Submitter {
     /// Ask the chain what happened to a transaction this layer could not
     /// observe the outcome of.
     ///
-    /// Both callers arrive holding a signed transaction whose hash is known
-    /// but whose fate is not — [`Unresolved`] says which. Keeping them
-    /// distinct matters: "the node may never have seen this" and "the node
-    /// took it and is slow" call for different responses, and it is the first
-    /// thing anyone reading the log needs.
+    /// Both callers arrive holding a signed transaction whose hash is known but
+    /// whose fate is not; [`Unresolved`] records which case applies. The two — the
+    /// node may never have seen it, or the node took it and is slow — call for
+    /// different responses and are the first thing a log reader needs.
     ///
-    /// [`AppError::SubmitUnknown`] parks the chain's tree mirror until a
-    /// restart, so it is worth a full polling window before saying so.
+    /// [`AppError::SubmitUnknown`] parks the chain's tree mirror until a restart,
+    /// so a full polling window is spent before reporting it.
     async fn resolve_by_hash(
         &self,
         tx_hash: B256,
@@ -268,8 +267,8 @@ impl Submitter {
                 match self.provider.get_transaction_receipt(tx_hash).await {
                     Ok(Some(r)) => return r,
                     Ok(None) => {}
-                    // A failing poll says nothing about the transaction, so
-                    // keep trying until the window closes.
+                    // A failing poll says nothing about the transaction, so polling
+                    // continues until the window closes.
                     Err(e) => warn!(%tx_hash, error = %e, "receipt poll failed"),
                 }
                 tokio::time::sleep(interval).await;
@@ -292,17 +291,17 @@ impl Submitter {
 
 /// Why a submission's outcome could not be observed directly.
 ///
-/// Carried into [`Submitter::resolve_by_hash`] so its log line and its error
-/// name the real situation. Collapsing the two into one "no receipt" message
-/// throws away the only clue worth having.
+/// Carried into [`Submitter::resolve_by_hash`] so its log line and error name the
+/// actual situation; collapsing the two into one no-receipt message discards the
+/// distinction.
 enum Unresolved {
     /// The node never answered the broadcast. It may hold the transaction, or
     /// may never have seen it.
     Unanswered(String),
     /// The broadcast was accepted, but no receipt arrived inside the window.
     NoReceipt(String),
-    /// The node answered "no", but with a complaint that a transaction of ours
-    /// already occupying that nonce would produce — see [`broadcast_refused`].
+    /// The node answered no, with a complaint that a transaction of ours already
+    /// occupying that nonce would also produce; see [`broadcast_refused`].
     Refused(String),
 }
 
@@ -316,8 +315,8 @@ impl Unresolved {
         }
     }
 
-    /// The underlying error. Node text, so logs only — it can carry the RPC
-    /// URL, and with it an API key.
+    /// The underlying error. Node text, for logs only: it can carry the RPC URL
+    /// and its API key.
     fn detail(&self) -> &str {
         match self {
             Self::Unanswered(e) | Self::NoReceipt(e) | Self::Refused(e) => e,
@@ -327,29 +326,25 @@ impl Unresolved {
 
 /// Whether a failed broadcast proves the transaction never reached the mempool.
 ///
-/// True when the node answered "no" for a reason that cannot describe a
-/// transaction of ours already on the chain — underpriced, insufficient funds,
-/// an invalid payload. Nothing was accepted, so the caller may roll its
-/// speculative leaves back.
+/// True when the node answered no for a reason that cannot describe a transaction
+/// of ours already on the chain: underpriced, insufficient funds, an invalid
+/// payload. Nothing was accepted, so the caller may roll its speculative leaves
+/// back.
 ///
-/// It is *not* true of a nonce complaint, even though that is a JSON-RPC error
-/// object like any other. The transport retries `eth_sendRawTransaction`, and
-/// on a fast chain the first send can already be in a block by the time the
-/// retry goes out: the node then answers "nonce too low" about our own mined
-/// transaction rather than "already known". Taking that as proof rolls the
-/// mirror back under a swap that landed — which is exactly how chain 42161
-/// ended up at `committedCount = 4` with a mirror holding one leaf, reverting
-/// `StaleOldRoot()` on every later submission.
+/// Not true of a nonce complaint, despite it being an ordinary JSON-RPC error.
+/// The transport retries `eth_sendRawTransaction`, and on a fast chain the first
+/// send can already be in a block by the time the retry goes out, so the node
+/// answers "nonce too low" about our own mined transaction rather than "already
+/// known". Treating that as proof would roll the mirror back under a landed
+/// submission.
 ///
-/// Everything else is silence: a reset connection, a timeout, a gateway 5xx.
-/// The node may have accepted and broadcast the transaction before the answer
-/// was lost. Rolling back there truncates the mirror while the transaction
-/// mines, and a mirror one advance behind the chain fails
-/// `_validateBatchHeader`'s `startIndex == committedCount` check — so *every*
-/// later submission reverts `BatchMisaligned`, each rolling back further. The
-/// chain is then dead with symptoms that do not point at the cause, which is
-/// why both an unanswered broadcast and an inconclusive refusal are resolved
-/// against the chain instead.
+/// Everything else is silence: a reset connection, a timeout, a gateway 5xx. The
+/// node may have accepted and broadcast the transaction before the answer was
+/// lost. Rolling back there truncates the mirror while the transaction mines, and
+/// a mirror one advance behind the chain fails `_validateBatchHeader`'s
+/// `startIndex == committedCount` check, so every later submission reverts
+/// `BatchMisaligned` and rolls back further. Both an unanswered broadcast and an
+/// inconclusive refusal are therefore resolved against the chain.
 fn broadcast_refused(e: &RpcError<TransportErrorKind>) -> bool {
     match e {
         RpcError::ErrorResp(payload) => !may_describe_a_landed_tx(&payload.message),
@@ -360,8 +355,8 @@ fn broadcast_refused(e: &RpcError<TransportErrorKind>) -> bool {
 /// Whether a node's rejection could be about a transaction of ours that has
 /// already been accepted or mined, rather than about this send failing.
 ///
-/// Message text, because no JSON-RPC code distinguishes these: `-32000` covers
-/// every one of them.
+/// Matched on message text, because no JSON-RPC code distinguishes these:
+/// `-32000` covers all of them.
 fn may_describe_a_landed_tx(message: &str) -> bool {
     const MARKERS: [&str; 6] = [
         "nonce too low",
@@ -377,15 +372,14 @@ fn may_describe_a_landed_tx(message: &str) -> bool {
 
 /// Decide what a failure *while filling* a transaction actually was.
 ///
-/// Everything here happened before the transaction was signed, so nothing
-/// reached the mempool and the caller's mirror rollback is sound whatever this
-/// returns. That is why the broadcast is classified separately, by
-/// [`broadcast_refused`], where an unanswered send has to be resolved rather
-/// than assumed.
+/// Everything here happened before the transaction was signed, so nothing reached
+/// the mempool and the caller's mirror rollback is sound whatever this returns.
+/// The broadcast is classified separately by [`broadcast_refused`], where an
+/// unanswered send must be resolved rather than assumed.
 ///
-/// A contract guard that rejects the payload surfaces here as a gas-estimation
-/// failure — RPC-shaped, but not an RPC fault. Prefer the probe's message,
-/// which states the revert plainly; otherwise sniff the fill error for the
+/// A contract guard rejecting the payload surfaces here as a gas-estimation
+/// failure: RPC-shaped, but not an RPC fault. The probe's message states the
+/// revert plainly and is preferred; otherwise the fill error is matched for the
 /// same marker, since the probe can succeed against a state the transaction is
 /// later priced against.
 fn classify_fill_failure(probe_revert: Option<&str>, fill_err: &str) -> AppError {
@@ -425,8 +419,7 @@ mod tests {
         assert!(err.client_message().contains("too little received"));
     }
 
-    /// The whole point of the variant: the reason reaches the caller while the
-    /// node URL that carried it does not.
+    /// The reason reaches the caller while the node URL that carried it does not.
     #[test]
     fn the_rejection_reason_reaches_the_caller_but_the_node_url_does_not() {
         let err = classify_fill_failure(Some(&probe_error()), "gas estimation failed");
@@ -441,12 +434,11 @@ mod tests {
         assert!(matches!(err, AppError::ContractRejected { .. }));
     }
 
-    /// A probe that failed for transport reasons says nothing about the
-    /// payload, so it must not be reported as the caller's fault.
+    /// A probe that failed for transport reasons says nothing about the payload,
+    /// so it must not be reported as the caller's fault.
     ///
-    /// Rollback-safe regardless: this is the fill phase, before anything is
-    /// signed. The broadcast phase is the one that cannot assume — see
-    /// [`broadcast_refused`].
+    /// Rollback-safe either way: this is the fill phase, before anything is signed.
+    /// The broadcast phase cannot assume; see [`broadcast_refused`].
     #[test]
     fn a_transport_failure_while_filling_stays_an_rpc_error() {
         let transport = format!("error sending request for url {NODE_URL}");
@@ -463,8 +455,8 @@ mod tests {
         })
     }
 
-    /// The node said no for a reason that cannot be our own transaction.
-    /// Nothing was accepted, so the mirror may roll back.
+    /// The node said no for a reason that cannot describe our own transaction, so
+    /// nothing was accepted and the mirror may roll back.
     #[test]
     fn a_node_that_answers_no_proves_nothing_was_broadcast() {
         assert!(broadcast_refused(&error_resp(
@@ -473,9 +465,9 @@ mod tests {
         assert!(broadcast_refused(&error_resp("transaction underpriced")));
     }
 
-    /// The retry layer resends the signed envelope, so on a fast chain the
-    /// node can be complaining about our *first* send having already mined.
-    /// Rolling back there is what truncated the mirror under a landed swap.
+    /// The retry layer resends the signed envelope, so on a fast chain the node
+    /// can be complaining about the first send having already mined. Rolling back
+    /// there would truncate the mirror under a landed submission.
     #[test]
     fn a_nonce_complaint_never_proves_the_transaction_did_not_land() {
         let inconclusive = [
@@ -494,8 +486,8 @@ mod tests {
         }
     }
 
-    /// Silence proves nothing. Treating it as "did not land" is what
-    /// truncates a mirror for a transaction that mines.
+    /// Silence proves nothing; treating it as a failure truncates the mirror for a
+    /// transaction that mines.
     #[test]
     fn an_unanswered_broadcast_is_never_assumed_to_have_failed() {
         let unanswered = [

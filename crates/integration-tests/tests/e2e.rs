@@ -1,18 +1,20 @@
-//! Lazy-root v2 integration test.
+//! Integration tests for the indexer halves.
 //!
-//! Drives the indexer halves (fmd + explorer) over synthetic raw_events
+//! Drives fmd-indexer and explorer-indexer over synthetic `raw_events`
 //! representing one MASP `transact()` call:
 //!
-//!   tx_hash T:
-//!     log_index 0  RootAdvanced(start_index=0, inserted=2, oldRoot, newRoot)
-//!     log_index 1  NotesCreated(cm0, cm1, …, ciphertext0, …, ciphertext1)
+//! ```text
+//! tx_hash T:
+//!   log_index 0  RootAdvanced(start_index=0, inserted=2, oldRoot, newRoot)
+//!   log_index 1  NotePayload(cm, …)  — one per output leaf
+//! ```
 //!
-//! Asserts:
-//!   - fmd-indexer consume populates `notes` with leaf_index ∈ {0, 1}.
-//!   - explorer-indexer consume populates `tree_advances` with start_index=0.
+//! Asserts that fmd-indexer's consume populates `notes` with `leaf_index` in
+//! {0, 1}, and that explorer-indexer's consume populates `tree_advances` with
+//! `start_index = 0`.
 //!
-//! Anvil + relayer + snarkjs not booted here — those need node + circuits
-//! build artifacts and live in `cargo run -p relayer` against a real chain.
+//! Anvil, the relayer and snarkjs are not booted here; they need node and
+//! circuit build artifacts and run against a real chain.
 
 use alloy::primitives::{Address, B256, LogData, U256};
 use alloy::sol_types::SolEvent;
@@ -22,16 +24,12 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use shared::entities::EventKind;
 use std::sync::Arc;
-use std::time::Duration;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 const CHAIN_ID: i64 = 31337;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fmd_consume_pairs_root_advanced_with_note_created() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     seed_chain_state(&pool, CHAIN_ID).await;
 
     let cm0 = B256::repeat_byte(0xa0);
@@ -90,8 +88,7 @@ async fn fmd_consume_pairs_root_advanced_with_note_created() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn explorer_consume_writes_tree_advances() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     seed_chain_state(&pool, CHAIN_ID).await;
 
     let old_root = B256::repeat_byte(0x00);
@@ -110,7 +107,7 @@ async fn explorer_consume_writes_tree_advances() {
         tick_ms: 1000,
         batch: 500,
     });
-    // No chains and no metadata RPC: the decimals sweep is a no-op, so this
+    // No chains and no metadata RPC, so the decimals sweep is a no-op and this
     // covers event consumption only.
     let ctx = explorer_indexer::services::consume::ConsumeCtx {
         pool: pool.clone(),
@@ -143,54 +140,22 @@ async fn explorer_consume_writes_tree_advances() {
 
 // ------------------------------------------------------------------ helpers
 
-async fn serial_lock() -> tokio::sync::OwnedMutexGuard<()> {
-    use std::sync::OnceLock;
-    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
-    LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-        .lock_owned()
-        .await
-}
+/// Cleared between tests. Every table the end-to-end path writes, directly or
+/// through a foreign key.
+const TABLES: &[&str] = &[
+    "notes",
+    "raw_events",
+    "tree_advances",
+    "consumer_cursors",
+    "chain_state",
+    "assets",
+    "matches",
+    "subscriptions",
+    "spent_nullifiers",
+];
 
-async fn boot_pool() -> database::DbPool {
-    static CONTAINER: tokio::sync::OnceCell<(testcontainers::ContainerAsync<Postgres>, String)> =
-        tokio::sync::OnceCell::const_new();
-    let (_container, url) = CONTAINER
-        .get_or_init(|| async {
-            let container = Postgres::default().start().await.unwrap();
-            let port = container.get_host_port_ipv4(5432).await.unwrap();
-            let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-            for _ in 0..30 {
-                if database::build_pool(&url, database::PoolCfg::relayer())
-                    .await
-                    .is_ok()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            let migrate_url = url.clone();
-            tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
-                .await
-                .expect("blocking")
-                .expect("migrate");
-            (container, url)
-        })
-        .await;
-
-    let pool = database::build_pool(url, database::PoolCfg::relayer())
-        .await
-        .expect("pool");
-    truncate_all(&pool).await;
-    pool
-}
-
-async fn truncate_all(pool: &database::DbPool) {
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("TRUNCATE TABLE notes, raw_events, tree_advances, consumer_cursors, chain_state, assets, matches, subscriptions, spent_nullifiers RESTART IDENTITY CASCADE")
-        .execute(&mut conn)
-        .await
-        .ok();
+async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
+    test_support::fresh_pool(database::PoolCfg::relayer(), TABLES).await
 }
 
 async fn seed_chain_state(pool: &database::DbPool, chain_id: i64) {
@@ -353,21 +318,19 @@ async fn insert_asset_registered_event(
     .await;
 }
 
-/// The spent set is served as a chunk feed
-/// so wallets filter locally instead of telling the server which
-/// nullifiers they hold. Mirrors the commitment feed's slicing and
-/// cache semantics.
+/// The spent set is served as a chunk feed so wallets filter locally rather than
+/// telling the server which nullifiers they hold, mirroring the commitment feed's
+/// slicing and cache semantics.
 ///
 /// Entries are truncated to their low 10 bytes: the client only tests set
-/// membership, and the feed is downloaded whole by every wallet.
+/// membership, and every wallet downloads the feed whole.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nullifier_chunk_feed_slices_spent_set() {
     use fmd_indexer::repositories::spent_nullifiers::{
         NewSpentNullifier, PostgresSpentNullifiersRepo, SpentNullifiersRepo,
     };
 
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
 
     // One past a chunk boundary, so chunk 0 is complete and chunk 1 is the tail.
     const TOTAL: usize = 1025;
@@ -388,8 +351,8 @@ async fn nullifier_chunk_feed_slices_spent_set() {
         .collect();
     repo.insert_batch(&rows).await.unwrap();
 
-    /// Independent restatement of the server's `WIRE_BYTES`: a change to the
-    /// truncation width has to break this test rather than pass silently.
+    /// Independent restatement of the server's `WIRE_BYTES`, so a change to the
+    /// truncation width breaks this test.
     const WIRE_BYTES: usize = 10;
 
     /// The wire form of a stored nullifier: `0x` plus its low `WIRE_BYTES`.
@@ -440,7 +403,7 @@ async fn nullifier_chunk_feed_slices_spent_set() {
     assert_eq!(tail.len(), TOTAL - 1024);
     assert_eq!(tail[0], wire(&rows[1024].nf));
 
-    // Past the end: empty, not an error — the client has already stopped.
+    // Past the end: empty rather than an error, since the client has stopped.
     let body: serde_json::Value = fetch(2).await.json().await.unwrap();
     assert_eq!(body["nullifiers"].as_array().unwrap().len(), 0);
     assert_eq!(body["isComplete"], false);
@@ -452,8 +415,8 @@ async fn spawn_fmd_webserver(pool: &database::DbPool) -> String {
         cfg: Arc::new(fmd_webserver::FmdWebserverConfig {
             database_url: String::new(),
             bind_addr: String::new(),
-            // Unused: this test drives the router directly and never installs
-            // a metrics recorder, so nothing binds this address.
+            // Unused: this test drives the router directly and installs no metrics
+            // recorder, so nothing binds this address.
             metrics_addr: String::new(),
             indexer_lag_warn_blocks: 50,
         }),
@@ -468,23 +431,21 @@ async fn spawn_fmd_webserver(pool: &database::DbPool) -> String {
 
 /// The chunk feed serves one pre-hashed leaf per entry, as `0x`-prefixed hex.
 ///
-/// Two properties, both load-bearing. The prefix is not cosmetic: the SDK
-/// decodes field elements with a helper that accepts decimal *or* `0x`-hex, so
-/// a bare-hex value whose digits all happen to be decimal would parse as a
-/// completely different number, silently.
+/// Two properties matter. The prefix is required: the SDK decodes field elements
+/// with a helper accepting decimal or `0x`-hex, so a bare-hex value whose digits
+/// are all decimal would parse as a different number.
 ///
-/// And the raw inputs must be gone. `cm`/`cv_dep` existed only for clients to
-/// hash into the leaf themselves; serving them alongside `leafHash` would be
-/// three field elements where one does, tripling the largest feed in a cold
-/// sync for data nothing reads.
+/// The raw inputs must also be absent. `cm` and `cv_dep` exist only for clients
+/// to hash into the leaf themselves, so serving them alongside `leafHash` would
+/// send three field elements where one suffices, tripling the largest feed in a
+/// cold sync.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
     use bigdecimal::BigDecimal;
     use fmd_indexer::repositories::notes::{NewNote, NotesRepo, PostgresNotesRepo};
     use std::str::FromStr;
 
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
 
     // A value whose hex form is all decimal digits — the exact input that a
     // bare-hex wire format would mis-decode on the client.
@@ -547,20 +508,17 @@ async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
 /// A subscription's match feed must be scoped to the chain the caller asks
 /// for.
 ///
-/// `subscriptions` has no `chain_id` — `detection_key` is globally UNIQUE — so
-/// one subscription spans every chain a deployment serves, and `matches` tags
-/// each row instead. Because the detection key is chain-independent, a note
-/// from the wrong chain still trial-decrypts against the caller's `ivk`: the
-/// wallet stores it, inflates its balance, and cannot spend it, since the
-/// `leaf_index` points into a different Merkle tree. Nothing surfaces until a
-/// spend fails, which is why this is pinned by a test rather than left to
-/// review.
+/// `subscriptions` has no `chain_id`, since `detection_key` is globally UNIQUE,
+/// so one subscription spans every chain a deployment serves and `matches` tags
+/// each row instead. The detection key is chain-independent, so a note from the
+/// wrong chain still trial-decrypts against the caller's `ivk`: the wallet stores
+/// it, inflates its balance and cannot spend it, because the `leaf_index` points
+/// into a different Merkle tree. Nothing surfaces until a spend fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn list_matches_returns_only_the_requested_chains_notes() {
     use database::schema::{matches, notes, subscriptions};
 
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
 
     const CHAIN_A: i64 = 31337;
     const CHAIN_B: i64 = 8453;
@@ -649,8 +607,7 @@ async fn asset_metadata_write_leaves_the_column_it_omits_alone() {
     use database::schema::assets;
     use explorer_indexer::repositories::assets as repo;
 
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
 
     const CHAIN: i64 = 31337;
     let mut conn = pool.get().await.unwrap();
@@ -723,8 +680,7 @@ async fn head_reports_per_chain_watermarks() {
     use bigdecimal::BigDecimal;
     use fmd_indexer::repositories::notes::{NewNote, NotesRepo, PostgresNotesRepo};
 
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
 
     const OTHER_CHAIN: i64 = CHAIN_ID + 1;
     let base = spawn_fmd_webserver(&pool).await;
@@ -742,14 +698,14 @@ async fn head_reports_per_chain_watermarks() {
         }
     };
 
-    // An empty chain reports 0 rather than 404 or null: the client treats this
-    // as a cursor, and it must be comparable before anything exists.
+    // An empty chain reports 0 rather than 404 or null: the client treats this as
+    // a cursor, and it must be comparable before anything exists.
     let empty = head(CHAIN_ID).await;
     assert_eq!(empty["maxNoteId"], 0);
     assert_eq!(empty["maxNullifierSeq"], 0);
 
     // `cm` varies per note: `notes` is UNIQUE (chain_id, cm), so a shared
-    // commitment makes every insert past the first a silent no-op.
+    // commitment would make every insert past the first a no-op.
     let note = |chain_id: i64, log_index: i32| NewNote {
         chain_id,
         block_number: 1,
@@ -782,8 +738,8 @@ async fn head_reports_per_chain_watermarks() {
         "another chain's notes leaked into this chain's watermark: {other}"
     );
 
-    // And the endpoint must never be served from a cache: a stale watermark is
-    // exactly the latency this endpoint exists to remove.
+    // The endpoint must never be served from a cache: a stale watermark is the
+    // latency this endpoint exists to remove.
     repo.insert_batch(&[note(CHAIN_ID, 2)]).await.unwrap();
     let again = head(CHAIN_ID).await;
     assert!(

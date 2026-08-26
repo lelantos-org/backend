@@ -24,24 +24,24 @@ pub struct AppCache {
     pub tree_advances: Cache<TreeAdvancesKey, Arc<Vec<TreeAdvanceOut>>>,
     pub tx_counts: Cache<TxCountsKey, Arc<Vec<CountPoint>>>,
     pub chain_flows_24h: Cache<ChainFlows24hKey, Arc<Vec<ChainFlowOut>>>,
-    /// All-time escrow balances. Analytic TTL: they move with the flows the
-    /// same views are built from.
+    /// All-time escrow balances. Analytic TTL, since they move with the flows
+    /// the same views are built from.
     pub locked: Cache<LockedKey, Arc<Vec<ChainLockedOut>>>,
-    /// Classified feed. Tracks the head of the chain, so it shares the short
-    /// TTL rather than the analytic one.
+    /// Classified feed. Tracks the head of the chain, so it uses the short TTL
+    /// rather than the analytic one.
     pub transactions: Cache<TransactionsKey, Arc<Vec<TxOut>>>,
     pub tx_kinds: Cache<TxKindsKey, Arc<Vec<KindCounts>>>,
-    /// `None` records a token the provider could not price. Caching that
-    /// answer is the point: without it every request re-asks upstream about
-    /// tokens that will never have a price.
+    /// `None` records a token the provider could not price. Caching that answer
+    /// stops every request from re-asking upstream about tokens that will never
+    /// have a price.
     pub prices: Cache<TokenKey, Option<TokenPrice>>,
 }
 
 impl AppCache {
-    /// `ttl_s` is the analytic-endpoint TTL from `ExplorerWebserverConfig`.
-    /// `tree_advances` paginated list uses a fixed short TTL because it
-    /// tracks the head of the chain. `price_ttl_s` is longer than either:
-    /// prices move slowly and every miss costs an upstream round-trip.
+    /// `ttl_s` is the analytic-endpoint TTL from `ExplorerWebserverConfig`. The
+    /// paginated `tree_advances` list uses a fixed short TTL because it tracks
+    /// the head of the chain. `price_ttl_s` is longer than either: prices move
+    /// slowly and every miss costs an upstream round-trip.
     pub fn new(ttl_s: u64, price_ttl_s: u64) -> Self {
         let analytic = Duration::from_secs(ttl_s.max(1));
         let head = Duration::from_secs(5);

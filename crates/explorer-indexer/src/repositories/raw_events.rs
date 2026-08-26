@@ -10,7 +10,7 @@ pub struct RawEventRow {
     pub id: i64,
     pub chain_id: i64,
     pub block_number: i64,
-    /// Solidity's `block.number` for this block; NULL for rows ingested before
+    /// Solidity's `block.number` for this block, NULL for rows ingested before
     /// the column existed. Differs from `block_number` only on Arbitrum.
     pub evm_block_number: Option<i64>,
     pub block_hash: Vec<u8>,
@@ -29,10 +29,7 @@ pub async fn batch_after(
     kinds: &[i16],
     limit: i64,
 ) -> Result<Vec<RawEventRow>, ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     Ok(raw_events::table
         .filter(raw_events::chain_id.eq(chain_id))
         .filter(raw_events::id.gt(after_id))
@@ -49,10 +46,7 @@ pub async fn siblings_by_tx(
     chain_id: i64,
     tx_hash: &[u8],
 ) -> Result<Vec<RawEventRow>, ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     Ok(raw_events::table
         .filter(raw_events::chain_id.eq(chain_id))
         .filter(raw_events::tx_hash.eq(tx_hash))
@@ -63,10 +57,7 @@ pub async fn siblings_by_tx(
 }
 
 pub async fn max_id(pool: &DbPool, chain_id: i64) -> Result<i64, ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     let v: Option<i64> = raw_events::table
         .filter(raw_events::chain_id.eq(chain_id))
         .select(diesel::dsl::max(raw_events::id))

@@ -1,15 +1,14 @@
-// Price oracle abstraction + Coinbase HTTP implementation.
-//
-// `PriceOracle` returns the price of 1 unit of `base` denominated in
-// `quote` (e.g. `price("ETH","USDC") -> ~3000.0`). Used by the fee
-// estimator to translate gas cost in native wei into accepted fee-token
-// amounts.
-//
-// Coinbase impl features:
-//   - TTL cache per `(base, quote)` pair
-//   - Single-flight per key (N concurrent estimators cause 1 HTTP req)
-//   - Stale-cache fallback within `max_stale` on fetch failure
-//   - Optional USD-cross fallback if direct pair 404s
+//! Price oracle abstraction and its Coinbase HTTP implementation.
+//!
+//! `PriceOracle` returns the price of one unit of `base` denominated in `quote`,
+//! so `price("ETH", "USDC")` is roughly 3000.0. The fee estimator uses it to
+//! translate gas cost in native wei into accepted fee-token amounts.
+//!
+//! The Coinbase implementation adds:
+//!   - a TTL cache per `(base, quote)` pair
+//!   - single-flight per key, so N concurrent estimators cause one HTTP request
+//!   - a stale-cache fallback within `max_stale` when a fetch fails
+//!   - an optional USD-cross fallback when the direct pair 404s
 
 use crate::app::config::PriceOracleCfg;
 use crate::domain::error::{AppError, AppResult};
@@ -133,8 +132,8 @@ impl CoinbaseOracle {
             .map_err(|e| AppError::Oracle(format!("parse amount '{}': {e}", body.data.amount)))
     }
 
-    /// Single-flight wrapper: only one fetch in flight per `(base,quote)`.
-    /// Other callers hitting the same key during the fetch await the result.
+    /// Single-flight wrapper: one fetch in flight per `(base, quote)`, with other
+    /// callers on the same key awaiting its result.
     async fn single_flight_fetch(&self, base: &str, quote: &str) -> AppResult<f64> {
         let key = (base.to_string(), quote.to_string());
 
@@ -153,7 +152,7 @@ impl CoinbaseOracle {
         let (tx, _) = broadcast::channel::<Result<f64, String>>(8);
         {
             let mut inflight = self.inflight.lock().await;
-            // Double-check: another task may have inserted while we waited.
+            // Re-check: another task may have inserted while this one waited.
             if let Some(existing) = inflight.get(&key) {
                 let mut rx = existing.subscribe();
                 drop(inflight);
@@ -237,12 +236,11 @@ impl PriceOracle for CoinbaseOracle {
                 Ok(p)
             }
             Err(e) => {
-                // `max_stale` extends past the TTL rather than being measured
-                // from the same instant: this branch is only reachable once
-                // the entry is already older than `ttl`, so a `max_stale`
-                // measured from `fetched_at` would make the whole fallback
-                // dead code whenever `max_stale <= ttl` — which the defaults
-                // (300s and 300s) do.
+                // `max_stale` extends past the TTL rather than being measured from
+                // the same instant. This branch is reachable only once the entry is
+                // older than `ttl`, so a `max_stale` measured from `fetched_at`
+                // would make the fallback unreachable whenever
+                // `max_stale <= ttl`, which the defaults are.
                 let cache = self.cache.read().await;
                 if let Some(c) = self.cache_lookup(&cache, base, quote)
                     && c.fetched_at.elapsed() < self.ttl + self.max_stale

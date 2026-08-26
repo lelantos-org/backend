@@ -10,8 +10,8 @@ use diesel_async::RunQueryDsl;
 #[async_trait]
 pub trait ChainStateRepo: Send + Sync {
     async fn fetch(&self, chain_id: i64) -> Result<Option<BlockCursor>, IngesterError>;
-    /// Move `last_scanned_block` forward, creating the row if this chain has
-    /// never committed anything.
+    /// Move `last_scanned_block` forward, creating the row if this chain has never
+    /// committed anything.
     async fn advance_scanned(&self, chain_id: i64, scanned: i64) -> Result<(), IngesterError>;
 }
 
@@ -47,18 +47,18 @@ impl PostgresChainStateRepo {
 
 /// `INSERT … ON CONFLICT DO UPDATE SET last_scanned_block = $n WHERE last_scanned_block < $n`.
 ///
-/// Two properties matter here and neither is obvious:
+/// Two properties matter:
 ///
-/// 1. It must be an upsert, not an `UPDATE`. A bare `UPDATE … WHERE chain_id`
-///    matches zero rows on a chain that has never committed an event, returns
-///    `Ok`, and leaves the cursor unwritten — so a chain whose range contains
-///    no logs rescans the same widening range on every single poll, forever.
-/// 2. `last_block` / `last_block_hash` are seeded empty and never touched on
-///    conflict. They are the reorg anchor and must only ever be written
-///    alongside a real, verified block.
+/// 1. It must be an upsert rather than an `UPDATE`. A bare
+///    `UPDATE … WHERE chain_id` matches zero rows on a chain that has never
+///    committed an event, returns `Ok` and leaves the cursor unwritten, so a
+///    chain whose range contains no logs rescans a widening range on every poll.
+/// 2. `last_block` and `last_block_hash` are seeded empty and never touched on
+///    conflict. They are the reorg anchor and must only be written alongside a
+///    verified block.
 ///
-/// Split out as a free function so the emitted SQL can be asserted in a unit
-/// test without a database.
+/// A free function so the emitted SQL can be asserted in a unit test without a
+/// database.
 fn advance_stmt(
     chain_id: i64,
     scanned: i64,
@@ -107,10 +107,9 @@ mod tests {
         diesel::debug_query::<diesel::pg::Pg, _>(&advance_stmt(1, 42)).to_string()
     }
 
-    /// Diesel will happily attach a `filter` to the *conflict target* — making
-    /// it a partial-index predicate — instead of to the `DO UPDATE`. That
-    /// would silently turn the monotonic guard into a no-op, so pin which
-    /// clause it lands in.
+    /// Diesel can attach a `filter` to the conflict target as a partial-index
+    /// predicate instead of to the `DO UPDATE`, which would turn the monotonic
+    /// guard into a no-op. This pins the clause it lands in.
     #[test]
     fn monotonic_guard_is_on_do_update() {
         let sql = sql();

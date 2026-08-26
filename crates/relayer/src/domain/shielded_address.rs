@@ -1,8 +1,8 @@
 //! bech32m shielded payment address.
 //!
-//! Rust mirror of `sdk/src/keys/address.ts`, and the *only* place this crate
-//! interprets one. It decodes; it never encodes — the relayer publishes the
-//! operator-supplied string verbatim and uses the decoded parts solely to check
+//! Rust mirror of `sdk/src/keys/address.ts`, and the only place this crate
+//! interprets one. It decodes but never encodes: the relayer publishes the
+//! operator-supplied string verbatim and uses the decoded parts only to check
 //! that string against the viewing key configured beside it.
 //!
 //! ```text
@@ -34,17 +34,16 @@ pub struct ShieldedAddress {
     /// Note-commitment binding key, big-endian — this crate's field
     /// convention, not the address payload's little-endian one.
     pub pk: Field,
-    /// FMD clue key, packed. Unused by the fee path; decoded and validated so a
-    /// malformed address is caught at boot rather than at first use.
+    /// FMD clue key, packed. Unused by the fee path, but decoded and validated so
+    /// a malformed address is caught at boot rather than at first use.
     pub ck_packed: [u8; FIELD_BYTES],
 }
 
 /// Decode and fully validate an address.
 ///
-/// Both point slots are checked on-curve, in the prime-order subgroup, and
-/// non-identity, matching `unpackChecked` on the SDK side — an address is a
-/// place a field scalar can be pasted into a point slot by accident, and that
-/// must fail here rather than yield an address nobody can pay.
+/// Both point slots are checked on-curve, in the prime-order subgroup and
+/// non-identity, matching `unpackChecked` on the SDK side. A field scalar pasted
+/// into a point slot must fail here rather than yield an address nobody can pay.
 pub fn decode(addr: &str) -> AppResult<ShieldedAddress> {
     let parsed = CheckedHrpstring::new::<Bech32m>(addr)
         .map_err(|e| bad(format!("not a bech32m string: {e}")))?;
@@ -100,9 +99,9 @@ fn bad(detail: String) -> AppError {
 mod tests {
     use super::*;
 
-    /// Emitted by `sdk/src/keys/address.ts :: encodeAddress` for the spending
-    /// key at seed 7777 — the same key the `fmd-crypto` note vectors use, so
-    /// `pk` here is checkable against those.
+    /// Emitted by `sdk/src/keys/address.ts :: encodeAddress` for the spending key
+    /// at seed 7777, the same key the `fmd-crypto` note vectors use, so `pk` here
+    /// is checkable against those.
     const VALID: &str = include_str!("../../tests/vectors/shielded-address.txt");
 
     fn valid() -> &'static str {

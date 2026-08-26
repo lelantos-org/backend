@@ -28,12 +28,11 @@ pub async fn by_chain(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec
 
 /// One asset's balance, priced where a price exists.
 ///
-/// Locked is `in - out` in base units first and converted after: subtracting
-/// whole tokens would round each half before the difference, and a wei of
-/// difference between two dust amounts would vanish. A negative result is
-/// reported as it stands — escrow cannot really owe money, so a negative balance
-/// means missed deposits, and clamping it to zero would hide the gap it is
-/// evidence of.
+/// Locked is `in - out` in base units, converted afterwards: subtracting whole
+/// tokens would round each side first and lose a wei of difference between two
+/// dust amounts. A negative result is reported as-is; escrow cannot owe money, so
+/// a negative balance indicates missed deposits and clamping it to zero would
+/// hide that.
 fn locked_asset(row: LockedRow, prices: &HashMap<TokenKey, TokenPrice>) -> LockedAssetOut {
     let locked_base = &row.in_base - &row.out_base;
     let locked_usd = prices
@@ -49,12 +48,12 @@ fn locked_asset(row: LockedRow, prices: &HashMap<TokenKey, TokenPrice>) -> Locke
     }
 }
 
-/// Biggest dollar balance first, with the unpriced trailing.
+/// Largest dollar balance first, with unpriced entries trailing.
 ///
-/// `None` sorts below every `Some` under `Option`'s own ordering, which is what
-/// we want reversed: an unpriced asset has no place on a dollar scale, so it
-/// trails rather than ranking as if it were worth nothing. `unwrap_or(Equal)`
-/// only ever fires on a NaN price, which `collect` already refuses to store.
+/// `Option`'s own ordering sorts `None` below every `Some`, which this reverses:
+/// an unpriced asset has no place on a dollar scale, so it trails rather than
+/// ranking as worthless. `unwrap_or(Equal)` fires only on a NaN price, which
+/// `collect` refuses to store.
 fn richest_first(a: Option<f64>, b: Option<f64>) -> Ordering {
     b.partial_cmp(&a).unwrap_or(Ordering::Equal)
 }
@@ -62,8 +61,8 @@ fn richest_first(a: Option<f64>, b: Option<f64>) -> Ordering {
 /// Collapse per-asset balances into one entry per chain.
 ///
 /// The dollar total is the only figure that adds up across assets, and it counts
-/// what it leaves out: an asset with no price lands in `unpriced_assets` instead
-/// of contributing a silent zero.
+/// what it excludes: an asset with no price lands in `unpriced_assets` rather
+/// than contributing zero.
 fn fold(rows: Vec<LockedRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec<ChainLockedOut> {
     let mut chains: BTreeMap<i64, ChainLockedOut> = BTreeMap::new();
     for row in rows {
@@ -88,8 +87,8 @@ fn fold(rows: Vec<LockedRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec<Cha
             richest_first(a.locked_usd, b.locked_usd).then(a.asset_id_u64.cmp(&b.asset_id_u64))
         });
     }
-    // Ties break on the id so the order is stable between requests — every
-    // chain is tied while nothing can be priced at all.
+    // Ties break on the id so the order is stable between requests; every chain
+    // ties while nothing can be priced.
     out.sort_by(|a, b| richest_first(a.locked_usd, b.locked_usd).then(a.chain_id.cmp(&b.chain_id)));
     out
 }
@@ -100,7 +99,7 @@ mod tests {
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
 
-    /// A balance row. `asset_id_u64` derives from the token so a test names each
+    /// A balance row. `asset_id_u64` derives from the token so each test names an
     /// asset once, by the identity it also prices and asserts on.
     fn row(chain_id: i64, token: &str, decimals: i16, r#in: &str, out: &str) -> LockedRow {
         LockedRow {
@@ -120,7 +119,8 @@ mod tests {
             (chain_id, token.to_string()),
             TokenPrice {
                 price_usd,
-                // The asset's own decimals win, so the feed need not report any.
+                // The asset's own decimals take precedence, so the feed need not
+                // report any.
                 decimals: None,
                 quoted_at: 0,
             },
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn the_difference_is_taken_before_the_conversion() {
         // Two amounts that each round to nothing in whole tokens still differ by
-        // a wei, and that wei has to survive.
+        // a wei, which must survive the conversion.
         let out = fold(vec![row(1, "aa", 18, "3", "1")], &HashMap::new());
         assert_eq!(
             amount_of(&out[0], "aa").amount.as_deref(),
@@ -187,7 +187,7 @@ mod tests {
         let out = fold(rows, &HashMap::from([priced(1, "aa", 1.0)]));
         assert!((out[0].locked_usd.unwrap() - 5.0).abs() < 1e-9);
         assert_eq!(out[0].unpriced_assets, 1);
-        // It still reports its token amount: unknown price, known quantity.
+        // The token amount is still reported: unknown price, known quantity.
         let unpriced = amount_of(&out[0], "bb");
         assert_eq!(unpriced.amount.as_deref(), Some("9"));
         assert_eq!(unpriced.locked_usd, None);
@@ -212,8 +212,8 @@ mod tests {
 
     #[test]
     fn a_negative_balance_is_reported_not_clamped() {
-        // Escrow cannot owe money: this is evidence of missed deposits, and
-        // hiding it behind a zero hides the gap.
+        // Escrow cannot owe money, so this indicates missed deposits; clamping to
+        // zero would hide it.
         let out = fold(vec![row(1, "aa", 6, "1000000", "4000000")], &HashMap::new());
         assert_eq!(amount_of(&out[0], "aa").amount.as_deref(), Some("-3"));
     }

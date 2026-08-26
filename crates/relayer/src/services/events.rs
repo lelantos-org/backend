@@ -1,12 +1,12 @@
-// Process-wide pub/sub for relayer-side deposit lifecycle events.
-//
-// `FlushPipeline` publishes `DepositEvent::Flushed` after each successful
-// `flushBatch` submission; the SSE handler in `handlers::http::deposits`
-// fans the events out to subscribed webapp clients.
-//
-// Backed by a `tokio::sync::broadcast` channel — bounded queue, lagging
-// receivers drop oldest events. 256 slots is enough for steady-state
-// flush rates (≤ MAX_L_BATCH per tick, default 4).
+//! Process-wide pub/sub for relayer-side deposit lifecycle events.
+//!
+//! `FlushPipeline` publishes `DepositEvent::Flushed` after each successful
+//! `flushBatch` submission, and the SSE handler in `handlers::http::deposits`
+//! fans the events out to subscribed clients.
+//!
+//! Backed by a `tokio::sync::broadcast` channel: a bounded queue where lagging
+//! receivers drop the oldest events. 256 slots covers steady-state flush rates,
+//! which are at most `MAX_L_BATCH` per tick.
 
 use serde::Serialize;
 use tokio::sync::broadcast::{self, Receiver, Sender};
@@ -43,7 +43,7 @@ impl EventBroadcaster {
         Self { tx }
     }
 
-    /// Best-effort publish. No subscribers = silently dropped.
+    /// Best-effort publish; dropped when there are no subscribers.
     pub fn publish(&self, ev: DepositEvent) {
         let _ = self.tx.send(ev);
     }

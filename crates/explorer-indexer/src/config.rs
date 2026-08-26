@@ -5,7 +5,7 @@ pub struct ExplorerIndexerConfig {
     pub database_url: String,
     /// Per-chain RPC, used only to read ERC20 `decimals()` for registered
     /// assets. A chain absent here still indexes; its assets keep
-    /// `decimals = NULL` and render no human amount.
+    /// `decimals = NULL` and render no human-readable amount.
     #[serde(default)]
     pub chains: Vec<ChainCfg>,
     #[serde(default = "default_tick_ms")]
@@ -23,6 +23,7 @@ pub struct ChainCfg {
 impl ExplorerIndexerConfig {
     /// Same env-overlay convention as the other binaries:
     ///   EXPLORER_INDEXER_CHAIN_<id>_RPC_URL=http://…
+    ///
     /// Only rewrites chains already present in the TOML.
     pub fn apply_env_overlay(&mut self) {
         for c in &mut self.chains {

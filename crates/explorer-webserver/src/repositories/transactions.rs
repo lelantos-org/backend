@@ -1,14 +1,14 @@
 //! Transaction classification.
 //!
-//! Every MASP transaction falls into exactly one of four kinds, and the
-//! contract makes the split exact rather than heuristic:
+//! Every MASP transaction falls into exactly one of four kinds, and the contract
+//! makes the split exact rather than heuristic:
 //!
-//! - `AssetMoved` is emitted from two sites only — `withdraw()` emits
+//! - `AssetMoved` is emitted from two sites only: `withdraw()` emits
 //!   `(0, outAmt)` and `_finalizeDeposit()` emits `(inAmt, 0)`. Both sides can
-//!   never be non-zero: `withdraw` reverts on `publicIn != 0` and every spend
-//!   entry point forces `publicIn == 0`. So the sign of an `asset_flows` row
-//!   is the label.
-//! - `RootAdvanced` is emitted from two sites only — `_finalize` (used by
+//!   never be non-zero, since `withdraw` reverts on `publicIn != 0` and every
+//!   spend entry point forces `publicIn == 0`, so the sign of an `asset_flows`
+//!   row determines the label.
+//! - `RootAdvanced` is emitted from two sites only: `_finalize` (used by
 //!   `withdraw` and `transfer`) and `flushBatch`.
 //!
 //! | tx                       | AssetMoved  | RootAdvanced | kind     |
@@ -18,13 +18,12 @@
 //! | withdraw                 | `(0, out>0)`| yes          | withdraw |
 //! | transfer                 | none        | yes          | transfer |
 //!
-//! A deposit counts at flush time, because that is when its note enters the
-//! tree; until then it is `pending` at its escrow time. `DepositFlushed` is
-//! emitted per deposit inside `flushBatch`, so a batch of eight counts as
-//! eight deposits, not one.
+//! A deposit counts at flush time, when its note enters the tree; until then it
+//! is `pending` at its escrow time. `DepositFlushed` is emitted per deposit
+//! inside `flushBatch`, so a batch of eight counts as eight deposits.
 //!
-//! A flush transaction is therefore never a `transfer`, which is exactly what
-//! `flushed_tx_hash` exists to guarantee.
+//! A flush transaction is therefore never a `transfer`, which `flushed_tx_hash`
+//! guarantees.
 
 use crate::domain::error::{AppError, AppResult};
 use bigdecimal::BigDecimal;
@@ -34,10 +33,10 @@ use diesel::sql_query;
 use diesel::sql_types::{BigInt, Bytea, Nullable, Numeric, SmallInt, Text};
 use diesel_async::RunQueryDsl;
 
-/// SQL producing one row per classified transaction. Shared by the feed and
-/// the bucketed counts so the two can never disagree about a kind.
+/// SQL producing one row per classified transaction. Shared by the feed and the
+/// bucketed counts so the two cannot disagree about a kind.
 ///
-/// `$1` chain filter (NULL = all), `$2` since-ts filter (NULL = all).
+/// `$1` is the chain filter and `$2` the since-ts filter; NULL matches all.
 const CLASSIFIED: &str = "\
     SELECT f.chain_id, f.tx_hash, f.block_number, f.block_ts, \
            'withdraw' AS kind, f.asset_id_u64, a.decimals, f.out_amount AS amount \
@@ -102,11 +101,11 @@ pub struct ClassifiedTxRow {
 
 /// Newest-first feed of classified transactions.
 ///
-/// `kind` filters outside the union rather than inside it: the kind of a row
-/// is decided by which branch produced it, so the only place all four are
-/// comparable is the classified result. `LIMIT` applies after that filter, so
-/// a filtered feed is a full page of one kind and not the leftovers of a
-/// mixed one.
+/// `kind` filters outside the union rather than inside it: a row's kind is
+/// decided by the branch that produced it, so the classified result is the only
+/// place all four are comparable. `LIMIT` applies after that filter, so a
+/// filtered feed is a full page of one kind rather than the remainder of a mixed
+/// page.
 pub async fn recent(
     pool: &DbPool,
     chain_id: Option<i64>,
@@ -114,7 +113,7 @@ pub async fn recent(
     kind: Option<&str>,
     limit: i64,
 ) -> AppResult<Vec<ClassifiedTxRow>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     sql_query(format!(
         "SELECT * FROM ({CLASSIFIED}) c \
           WHERE ($4::TEXT IS NULL OR c.kind = $4) \
@@ -146,7 +145,7 @@ pub async fn kind_counts(
     bucket_sec: i64,
     since_ts: Option<i64>,
 ) -> AppResult<Vec<KindCountRow>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     sql_query(format!(
         "SELECT (c.block_ts / $3) * $3 AS ts, c.kind, COUNT(*)::BIGINT AS count \
            FROM ({CLASSIFIED}) c \

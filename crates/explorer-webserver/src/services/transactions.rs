@@ -72,8 +72,8 @@ pub async fn kind_counts(
 
 /// Pivot (bucket, kind, count) rows into one row per bucket.
 ///
-/// A kind absent from a bucket is a real zero — the SQL only emits rows for
-/// kinds that occurred — so the series stay aligned for a stacked chart.
+/// A kind absent from a bucket is a genuine zero, since the SQL emits rows only
+/// for kinds that occurred, so the series stay aligned for a stacked chart.
 fn fold(rows: Vec<KindCountRow>) -> Vec<KindCounts> {
     let mut buckets: BTreeMap<i64, KindCounts> = BTreeMap::new();
     for r in rows {
@@ -81,7 +81,7 @@ fn fold(rows: Vec<KindCountRow>) -> Vec<KindCounts> {
             warn!(kind = %r.kind, "unknown transaction kind");
             continue;
         };
-        let b = buckets.entry(r.ts).or_insert(KindCounts {
+        let b = buckets.entry(r.ts).or_insert_with(|| KindCounts {
             ts: r.ts,
             ..Default::default()
         });

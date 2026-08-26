@@ -29,18 +29,14 @@ async fn main() -> Result<()> {
     shared::tracing_init::init();
 
     info!(
-        version = app::version::CARGO_PKG_VERSION,
-        commit = app::version::GIT_SHA,
+        version = app::build_info::PKG_VERSION,
+        commit = app::build_info::GIT_SHA,
         "fmd-indexer starting"
     );
 
     let cfg = FmdIndexerConfig::load().context("load config")?;
 
-    let metrics_addr: std::net::SocketAddr = cfg
-        .metrics_addr
-        .parse()
-        .with_context(|| format!("metrics_addr {}", cfg.metrics_addr))?;
-    shared::metrics::init(metrics_addr).context("install metrics listener")?;
+    shared::metrics::init_addr(&cfg.metrics_addr)?;
 
     #[cfg(feature = "parallel")]
     rayon::ThreadPoolBuilder::new()
@@ -76,11 +72,11 @@ async fn main() -> Result<()> {
 
     info!(workers = cfg.filter_workers, "fmd-indexer ready");
 
-    let (trigger, shutdown) = app::shutdown::channel();
+    let (trigger, shutdown) = shared::shutdown::channel();
 
-    // Wake sources, not schedules: each loop still polls on its own ceiling, so
-    // a listener that never connects costs only the latency it was meant to
-    // remove. Consume follows the ingester; filter follows consume.
+    // Wake sources rather than schedules: each loop still polls on its own
+    // ceiling, so a listener that never connects costs only latency. Consume
+    // follows the ingester; filter follows consume.
     let consume_wake = listen::spawn(&cfg.database_url, CONSUME_CHANNELS);
     let filter_wake = listen::spawn(&cfg.database_url, FILTER_CHANNELS);
 
@@ -99,7 +95,7 @@ async fn main() -> Result<()> {
         Some(filter_wake),
     ));
 
-    app::shutdown::watch_signals(trigger).await;
+    shared::shutdown::watch_signals(trigger).await;
 
     let _ = tokio::join!(consume_handle, filter_handle);
     Ok(())

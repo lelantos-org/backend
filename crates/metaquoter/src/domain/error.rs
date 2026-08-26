@@ -21,8 +21,8 @@ pub enum AppError {
 impl AppError {
     /// This variant's HTTP status and its log label.
     ///
-    /// One match rather than two so a new variant cannot pick up a status here
-    /// and be forgotten in `class`, or the reverse.
+    /// One match rather than two, so a new variant cannot be given a status
+    /// here and omitted from `class`, or the reverse.
     fn kind(&self) -> (StatusCode, &'static str) {
         match self {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
@@ -38,10 +38,9 @@ impl AppError {
     ///
     /// Log this instead of the error itself. The `Display` forms carry payload:
     /// `UnsupportedChain` a chain id, and `Rpc` and `Internal` a driver string
-    /// that echoes the failing call's arguments — which for this service is the
-    /// token pair and amount that `post_quote` deliberately keeps out of its own
-    /// fields. A variant name is enough to tell an operator which class of
-    /// failure is spiking.
+    /// echoing the failing call's arguments, which here is the token pair and
+    /// amount that `post_quote` keeps out of its own fields. The variant name is
+    /// enough to identify which class of failure is spiking.
     pub fn class(&self) -> &'static str {
         self.kind().1
     }
@@ -65,11 +64,9 @@ mod tests {
 
     /// Rejects a new `AppError` variant at compile time.
     ///
-    /// `every_variant` is a hand-written list, so nothing about it alone forces
-    /// an update when the enum grows — and a variant missing from it would
-    /// silently go untested for the exact leak these tests exist to catch. This
-    /// wildcard-free match is what makes the compiler say so; the fix is to
-    /// extend both.
+    /// `every_variant` is a hand-written list, so a new variant would otherwise
+    /// go untested for the leak these tests cover. This wildcard-free match makes
+    /// the compiler flag it; extend both.
     fn assert_listed(e: &AppError) {
         match e {
             AppError::BadRequest(_)
@@ -81,7 +78,7 @@ mod tests {
         }
     }
 
-    /// Every variant, each carrying the payload it would in production — a
+    /// Every variant, each carrying the payload it would carry in production: a
     /// token address, an amount, a chain id.
     fn every_variant() -> Vec<AppError> {
         vec![
@@ -96,11 +93,10 @@ mod tests {
         ]
     }
 
-    /// A token address or amount must never reach a log through the error
-    /// path. `post_quote` scrubs the pair from its own fields; that is undone
-    /// if the error it logs alongside carries the same values in its `Display`
-    /// form, which `Rpc` and `Internal` readily do — an `eth_call` failure
-    /// echoes the call arguments.
+    /// A token address or amount must never reach a log through the error path.
+    /// `post_quote` scrubs the pair from its own fields, which is undone if the
+    /// error logged alongside carries the same values in its `Display` form, as
+    /// `Rpc` and `Internal` do when an `eth_call` failure echoes its arguments.
     #[test]
     fn class_carries_no_payload() {
         for e in every_variant() {
@@ -124,7 +120,7 @@ mod tests {
         );
     }
 
-    /// 4xx bodies still echo the caller's own input; only the *log* label is
+    /// 4xx bodies still echo the caller's own input; only the log label is
     /// scrubbed. Guards against `kind` being mistaken for the response body.
     #[test]
     fn the_response_body_is_unchanged() {

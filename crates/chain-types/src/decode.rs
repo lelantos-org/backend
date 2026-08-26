@@ -15,13 +15,12 @@ pub enum DecodeError {
     Alloy(String),
 }
 
-/// The fee leaf of a `DepositEscrowed`: a note addressed to whoever the payer
-/// chose to pay for the flush.
+/// The fee leaf of a `DepositEscrowed`: a note addressed to the party the
+/// payer chose to pay for the flush.
 ///
-/// Grouped rather than spread across [`DecodedEvent::DepositEscrowed`]'s
-/// fields because the ten travel together everywhere, and every one of them is
-/// either escrow digest preimage or needed to spend the note — a consumer that
-/// carries nine of ten has produced a deposit that cannot be flushed.
+/// Grouped into one struct because every field is either part of the escrow
+/// digest preimage or required to spend the note; a partial set yields a
+/// deposit that cannot be flushed.
 #[derive(Debug, Clone)]
 pub struct DepositFeeNote {
     pub fee_in: u64,
@@ -86,9 +85,8 @@ pub enum DecodedEvent {
         eph_pub_y: U256,
         ciphertext: Vec<u8>,
         /// The relayer's fee note — the second leaf every deposit mints.
-        /// Carried alongside the depositor's rather than as a separate event
-        /// so consumers see one row per deposit, and so the pair cannot be
-        /// observed half-applied.
+        /// Carried alongside the depositor's note so consumers see one row per
+        /// deposit and the pair cannot be observed half-applied.
         fee: DepositFeeNote,
     },
     DepositFlushed {
@@ -105,7 +103,7 @@ pub enum DecodedEvent {
 /// Decode one source log into a `DecodedEvent`.
 ///
 /// Every kind yields exactly one entry: `NotePayload` is emitted once per
-/// output leaf, so there is no fan-out to perform.
+/// output leaf, so no fan-out is required.
 pub fn decode(
     event_kind: EventKind,
     topics: &[Vec<u8>],

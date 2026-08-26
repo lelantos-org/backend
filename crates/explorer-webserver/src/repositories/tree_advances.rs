@@ -1,24 +1,11 @@
 use crate::domain::error::{AppError, AppResult};
 use database::DbPool;
+pub use database::models::TreeAdvanceRow;
 use database::schema::tree_advances;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Integer, Nullable};
 use diesel_async::RunQueryDsl;
-
-#[derive(Debug, Clone, Queryable, Selectable)]
-#[diesel(table_name = tree_advances)]
-pub struct TreeAdvanceRow {
-    pub chain_id: i64,
-    pub block_number: i64,
-    pub log_index: i32,
-    pub start_index: i64,
-    pub inserted: i32,
-    pub old_root: Vec<u8>,
-    pub new_root: Vec<u8>,
-    pub tx_hash: Vec<u8>,
-    pub block_ts: i64,
-}
 
 pub async fn list(
     pool: &DbPool,
@@ -26,7 +13,7 @@ pub async fn list(
     since_start_index: Option<i64>,
     limit: i64,
 ) -> AppResult<Vec<TreeAdvanceRow>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     let mut q = tree_advances::table.into_boxed();
     if let Some(c) = chain_id {
         q = q.filter(tree_advances::chain_id.eq(c));
@@ -59,7 +46,7 @@ pub async fn count_buckets(
     bucket_sec: i64,
     since_ts: Option<i64>,
 ) -> AppResult<Vec<CountBucketRow>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     sql_query(
         "SELECT (ts_hour / $1) * $1 AS ts, \
                 SUM(tx_count)::BIGINT AS count \
@@ -88,7 +75,7 @@ pub struct ChainFlow24hRow {
 }
 
 pub async fn chain_flows_24h(pool: &DbPool, hour_start: i64) -> AppResult<Vec<ChainFlow24hRow>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     sql_query(
         "SELECT chain_id, \
                 ((ts_hour - $1) / 3600)::INT AS slot, \

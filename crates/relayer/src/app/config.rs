@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub struct RelayerConfig {
     pub database_url: String,
     pub listen_addr: String,
-    /// Per-chain settings; relayer holds one in-memory tree mirror + one
+    /// Per-chain settings. The relayer holds one in-memory tree mirror and one
     /// alloy provider per entry.
     pub chains: Vec<ChainCfg>,
     pub prover: ProverCfg,
@@ -19,104 +19,99 @@ pub struct RelayerConfig {
 pub struct ChainCfg {
     pub chain_id: i64,
     pub rpc_url: String,
-    /// MASP pool address (target of `transact` calls).
+    /// MASP pool address, the target of `transact` calls.
     pub pool_address: String,
-    /// Relayer signer key (32-byte hex). MUST match the on-chain bound
-    /// `relayer` address that wallets pin in their transact proofs. A
-    /// `withdrawNative` payload pins `native_adapter_address` instead — the
-    /// adapter is the pool's caller there.
+    /// Relayer signer key, 32-byte hex. Must match the on-chain `relayer` address
+    /// wallets pin in their transact proofs. A `withdrawNative` payload pins
+    /// `native_adapter_address` instead, since the adapter is the pool's caller
+    /// there.
     pub signer_key_hex: String,
-    /// Receipt poll budget in seconds. Submission revert ⇒ in-memory tree
-    /// rolls back two leaves and the HTTP caller gets 502.
+    /// Receipt poll budget in seconds. On a submission revert the in-memory tree
+    /// rolls back and the HTTP caller receives a 502.
     #[serde(default = "default_receipt_timeout_s")]
     pub receipt_timeout_s: u64,
-    /// Receipt poll interval (ms). Drives alloy's pending-tx watcher cadence.
-    /// Pick ~1/4 of block time so confirmation latency tracks block production
-    /// without hammering the RPC.
+    /// Receipt poll interval in milliseconds, driving alloy's pending-transaction
+    /// watcher. Roughly a quarter of block time keeps confirmation latency tracking
+    /// block production without over-polling the RPC.
     #[serde(default = "default_receipt_poll_interval_ms")]
     pub receipt_poll_interval_ms: u64,
-    /// Cron interval (seconds) for the shield flush worker. The worker
-    /// polls `deposit_escrowed_events` for unflushed deposits, batches up
-    /// to `flush_max_n`, and submits one `flushBatch` tx.
+    /// Interval in seconds for the shield flush worker, which polls
+    /// `deposit_escrowed_events` for unflushed deposits, batches up to
+    /// `flush_max_n`, and submits one `flushBatch` transaction.
     #[serde(default = "default_flush_interval_s")]
     pub flush_interval_s: u64,
-    /// Upper bound on per-flush batch size, counted in deposits. A deposit
-    /// is two leaves — its own note and the note paying the flusher — so this
-    /// is capped at `MAX_L_BATCH / LEAVES_PER_DEPOSIT = 2`.
+    /// Upper bound on per-flush batch size, counted in deposits. A deposit is two
+    /// leaves, its own note and the note paying the flusher, so this is capped at
+    /// `MAX_L_BATCH / LEAVES_PER_DEPOSIT`.
     #[serde(default = "default_flush_max_n")]
     pub flush_max_n: usize,
     /// How many attributable failures one deposit is allowed before the flush
     /// worker stops batching it. `flushBatch` is all-or-nothing and the oldest
-    /// deposits are always batched first, so without a cap a single deposit
-    /// that can never land blocks every newer one on its chain. `0` disables
-    /// quarantine. Skipping is safe: the payer can still reclaim the deposit
-    /// with `cancelDeposit`.
+    /// deposits are batched first, so without a cap a single deposit that can never
+    /// land blocks every newer one on its chain. `0` disables quarantine. Skipping
+    /// is safe: the payer can still reclaim the deposit with `cancelDeposit`.
     #[serde(default = "default_flush_max_attempts")]
     pub flush_max_attempts: u32,
-    /// Optional. When set, enables `withdrawNative` for this chain: the
-    /// submitter targets this address, and the SNARK must name it as both
-    /// `recipient` and `relayer`. Mirrors `NativeAdapter.sol` deployed
-    /// alongside MASP, which is ERC-20 only.
+    /// When set, enables `withdrawNative` for this chain: the submitter targets
+    /// this address and the SNARK must name it as both `recipient` and `relayer`.
+    /// Mirrors `NativeAdapter.sol` deployed alongside MASP, which is ERC-20 only.
     #[serde(default)]
     pub native_adapter_address: Option<String>,
-    /// Optional. When set, enables `/v1/swap` for this chain. Submitter
-    /// targets this address for swap calldata; spend ops still target
-    /// `pool_address`. Mirrors `SwapWrapper.sol` deployed alongside MASP.
+    /// When set, enables `/v1/swap` for this chain. The submitter targets this
+    /// address for swap calldata while spends still target `pool_address`. Mirrors
+    /// `SwapWrapper.sol` deployed alongside MASP.
     #[serde(default)]
     pub swap_wrapper_address: Option<String>,
-    /// Oracle base symbol for the chain's native gas token (e.g. "ETH",
-    /// "BNB", "MATIC"). Used as `base` in Coinbase price lookups.
+    /// Oracle base symbol for the chain's native gas token, such as "ETH" or
+    /// "BNB". Used as `base` in Coinbase price lookups.
     #[serde(default = "default_native_symbol")]
     pub native_symbol: String,
-    /// Native token decimals (18 for all EVM chains today).
+    /// Native token decimals; 18 on every EVM chain currently supported.
     #[serde(default = "default_native_decimals")]
     pub native_decimals: u8,
-    /// Per-chain markup applied on top of the raw gas cost. bps: 1000 = 10%.
+    /// Per-chain markup applied on top of the raw gas cost, in basis points
+    /// (1000 = 10%).
     #[serde(default = "default_fee_markup_bps")]
     pub fee_markup_bps: u32,
-    /// How long a swap the wallet did not pin a deadline on stays valid,
-    /// in seconds. The wrapper reverts `SwapExpired` past it. Without a
-    /// bound, a swap can sit in the mempool and execute at an arbitrarily
-    /// later price with only `min_out` protecting the user.
+    /// How long a swap without a wallet-supplied deadline stays valid, in seconds.
+    /// The wrapper reverts `SwapExpired` past it. Without a bound, a swap can sit
+    /// in the mempool and execute at an arbitrarily later price with only
+    /// `min_out` protecting the user.
     #[serde(default = "default_swap_deadline_s")]
     pub swap_default_deadline_s: u64,
     /// Accepted fee tokens for `/v1/spend/estimate` and `/v1/swap/estimate`.
     #[serde(default)]
     pub accepted_fee_tokens: Vec<FeeTokenCfg>,
-    /// bech32m shielded payment address the relayer is paid at. Setting it
-    /// turns on shielded fee collection for this chain: `/chains` publishes the
-    /// terms, and every spend and swap must then carry an output note to this
-    /// address covering the quote. Absent means the relayer keeps subsidising
-    /// gas, which is the behaviour that predates this.
+    /// bech32m shielded payment address the relayer is paid at. Setting it enables
+    /// shielded fee collection for this chain: `/chains` publishes the terms, and
+    /// every spend and swap must carry an output note to this address covering the
+    /// quote. Absent means the relayer subsidises gas.
     #[serde(default)]
     pub shielded_fee_address: Option<String>,
     /// Incoming viewing key for [`Self::shielded_fee_address`], 0x-hex or
     /// decimal, big-endian.
     ///
-    /// Decrypt-only: it recognises payments and reads their value, and confers
-    /// no authority to spend them. The spending key can therefore stay off
-    /// this host entirely — which is the point, since this one has to be
-    /// readable by a process exposed to the internet. Normally supplied as
+    /// Decrypt-only: it recognises payments and reads their value but confers no
+    /// authority to spend them, so the spending key can stay off this host, which
+    /// is exposed to the internet. Normally supplied as
     /// `RELAYER_CHAIN_<id>_SHIELDED_FEE_IVK` rather than written into the TOML.
     #[serde(default)]
     pub shielded_fee_ivk: Option<String>,
-    /// How far below the relayer's own submit-time quote a fee may fall before
-    /// it is refused. bps: 300 = 3%.
+    /// How far below the relayer's submit-time quote a fee may fall before it is
+    /// refused, in basis points (300 = 3%).
     ///
-    /// A quote is not signed and not stored, so the relayer re-derives the
-    /// requirement when the spend arrives. Between the client's estimate and
-    /// that moment the gas price and the oracle rate both move, and a payer who
-    /// quoted honestly should not lose a proof to a tick of drift. Too wide a
-    /// band is a discount anyone can take by waiting, so this is a tolerance,
-    /// not a margin.
+    /// A quote is unsigned and unstored, so the relayer re-derives the requirement
+    /// when the spend arrives. The gas price and the oracle rate both move between
+    /// the client's estimate and that moment. A wide band is a discount anyone can
+    /// take by waiting, so this is a tolerance rather than a margin.
     #[serde(default = "default_shielded_fee_grace_bps")]
     pub shielded_fee_grace_bps: u32,
     /// MASP asset ids accepted as shielded fees. Empty means every asset in
     /// `accepted_fee_tokens` is accepted.
     ///
-    /// The wallet builds one spend in one asset, so a payer can only ever pay
-    /// the fee in the asset they are already moving; an asset left out of this
-    /// list is one the relayer will not move at all.
+    /// The wallet builds one spend in one asset, so a payer can only pay the fee in
+    /// the asset they are already moving; an asset left out of this list is one the
+    /// relayer will not move at all.
     #[serde(default)]
     pub shielded_fee_assets: Vec<u64>,
     /// Wallet-facing description, served verbatim by `/chains`.
@@ -127,13 +122,12 @@ pub struct ChainCfg {
 /// What a wallet needs in order to talk to this chain, and nothing the relayer
 /// itself reads.
 ///
-/// It lives here because the relayer is the only service that already
-/// enumerates every chain, which makes it the natural registry to boot a
-/// wallet from: a deployment can add a chain without rebuilding any frontend.
+/// It lives here because the relayer is the only service that already enumerates
+/// every chain, making it the registry a wallet boots from: a deployment can add
+/// a chain without rebuilding any frontend.
 ///
-/// Every field is optional so existing configs keep booting. A client that
-/// finds one absent falls back to its own build-time configuration, which is
-/// exactly the single-chain behaviour that predates this.
+/// Every field is optional so existing configs keep booting. A client that finds
+/// one absent falls back to its own build-time configuration.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ChainPublicCfg {
     /// Human label; also what `wallet_addEthereumChain` registers.
@@ -141,9 +135,9 @@ pub struct ChainPublicCfg {
     pub name: Option<String>,
     /// Browser-reachable RPC.
     ///
-    /// Deliberately separate from `ChainCfg::rpc_url`, which is the relayer's
-    /// own endpoint and is typically cluster-internal — serving that one to a
-    /// browser would hand out an unreachable URL.
+    /// Separate from `ChainCfg::rpc_url`, which is the relayer's own endpoint and
+    /// is typically cluster-internal; serving that to a browser would hand out an
+    /// unreachable URL.
     #[serde(default)]
     pub rpc_url: Option<String>,
     /// Merkle depth of the deployed pool.
@@ -158,11 +152,10 @@ pub struct ChainPublicCfg {
 
 /// The `shielded_fee_*` keys, grouped once they are known to be coherent.
 ///
-/// They live flat on [`ChainCfg`] so the `RELAYER_CHAIN_<id>_<FIELD>` overlay
-/// can reach the viewing key — a nested table would force the one secret among
-/// them into the committed TOML. Callers get them as one thing anyway, because
-/// four loose fields that are only meaningful together are four chances to use
-/// one without the others.
+/// They live flat on [`ChainCfg`] so the `RELAYER_CHAIN_<id>_<FIELD>` overlay can
+/// reach the viewing key; a nested table would force the one secret among them
+/// into the committed TOML. Callers receive them grouped, since four fields that
+/// are only meaningful together should not be usable apart.
 #[derive(Debug, Clone, Copy)]
 pub struct ShieldedFeeSettings<'a> {
     pub address: &'a str,
@@ -176,7 +169,7 @@ impl ChainCfg {
     /// This chain's shielded fee settings, or `None` where it charges nothing.
     ///
     /// `Some` implies both an address and a key: [`RelayerConfig::validate`]
-    /// refuses one without the other, so the half-configured case cannot reach
+    /// refuses one without the other, so a half-configured chain cannot reach
     /// here.
     pub fn shielded_fee(&self) -> Option<ShieldedFeeSettings<'_>> {
         let address = self.shielded_fee_address.as_deref()?;
@@ -195,7 +188,7 @@ pub struct FeeTokenCfg {
     pub symbol: String,
     pub address: String,
     pub decimals: u8,
-    /// Oracle quote symbol, e.g. "USDC".
+    /// Oracle quote symbol, for example "USDC".
     pub quote_symbol: String,
 }
 
@@ -208,9 +201,9 @@ pub struct PriceOracleCfg {
     /// How long a cached price is served without refetching.
     #[serde(default = "default_oracle_ttl_s")]
     pub cache_ttl_s: u64,
-    /// How much *further* past `cache_ttl_s` a cached price may be served when
-    /// the upstream fetch fails. Measured from the end of the TTL, not from
-    /// the fetch.
+    /// How much further past `cache_ttl_s` a cached price may be served when the
+    /// upstream fetch fails. Measured from the end of the TTL rather than from the
+    /// fetch.
     #[serde(default = "default_oracle_max_stale_s")]
     pub max_stale_s: u64,
     #[serde(default = "default_oracle_allow_usd_cross")]
@@ -231,10 +224,10 @@ impl Default for PriceOracleCfg {
 
 /// Spot USD prices for the registered assets, as `/v1/prices` publishes them.
 ///
-/// Deliberately not `price_oracle` above. That one prices a *fee* from a symbol
-/// pair and a failure there fails a submission; this one prices a *token* from
-/// its address so a wallet can label a balance, and a failure here is a missing
-/// line of text. Different keys, different provider, different consequence.
+/// Distinct from `price_oracle` above. That one prices a fee from a symbol pair
+/// and a failure there fails a submission; this one prices a token from its
+/// address so a wallet can label a balance, and a failure here only omits a
+/// label. Different keys, provider and consequence.
 #[derive(Debug, Deserialize, Clone)]
 pub struct TokenPricesCfg {
     /// DefiLlama-compatible price API root.
@@ -243,7 +236,7 @@ pub struct TokenPricesCfg {
     /// How long a spot price is served without refetching.
     #[serde(default = "default_token_price_ttl_s")]
     pub ttl_s: u64,
-    /// Upstream deadline. Prices are decoration — a slow provider must not hold
+    /// Upstream deadline. Prices are decoration, so a slow provider must not hold
     /// the endpoint open.
     #[serde(default = "default_token_price_timeout_ms")]
     pub timeout_ms: u64,
@@ -261,19 +254,18 @@ impl Default for TokenPricesCfg {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProverCfg {
-    /// `circuits/build/tree_update_js/tree_update.wasm`.
+    /// Path to `circuits/build/tree_update_js/tree_update.wasm`.
     pub wasm_path: PathBuf,
-    /// `circuits/build/tree_update.r1cs`.
+    /// Path to `circuits/build/tree_update.r1cs`.
     pub r1cs_path: PathBuf,
-    /// `circuits/build/tree_update_final.zkey` (snarkjs-compatible).
+    /// Path to `circuits/build/tree_update_final.zkey`, snarkjs-compatible.
     pub zkey_path: PathBuf,
-    /// snarkjs `verification_key.json` for the deployed **transact** circuit
-    /// (`circuits/build/3x3_verification_key.json`).
+    /// snarkjs `verification_key.json` for the deployed transact circuit.
     ///
-    /// Optional so a deployment that has not shipped the artifact still boots,
-    /// but it should always be set: without it the relayer cannot tell a valid
-    /// wallet proof from a fabricated one until the contract does, which means
-    /// every junk payload costs a full `tree_update_batch` Groth16 first.
+    /// Optional so a deployment that has not shipped the artifact still boots, but
+    /// it should be set: without it the relayer cannot distinguish a valid wallet
+    /// proof from a fabricated one until the contract does, so every invalid
+    /// payload costs a full `tree_update_batch` Groth16 first.
     #[serde(default)]
     pub transact_vkey_path: Option<PathBuf>,
 }
@@ -291,8 +283,8 @@ fn default_flush_interval_s() -> u64 {
 }
 
 fn default_flush_max_n() -> usize {
-    // `MAX_L_BATCH / LEAVES_PER_DEPOSIT`. A deposit mints two leaves, so four
-    // deposits no longer fit one proof.
+    // `MAX_L_BATCH / LEAVES_PER_DEPOSIT`. A deposit mints two leaves, so a batch
+    // of four leaves holds two deposits.
     2
 }
 
@@ -352,9 +344,10 @@ fn default_shielded_fee_grace_bps() -> u32 {
     300
 }
 
-/// `10u128.pow(n)` is the widest exponent that fits.
+/// The widest exponent `10u128.pow(n)` accepts.
 const MAX_DECIMALS: u8 = 38;
-/// 100x. Anything above this is a typo, and `10_000 + bps` must not overflow.
+/// A 100x markup. Anything above this is a typo, and `10_000 + bps` must not
+/// overflow.
 const MAX_MARKUP_BPS: u32 = 1_000_000;
 /// One whole in basis points.
 pub const BPS_DENOMINATOR: u32 = 10_000;
@@ -419,9 +412,9 @@ impl ChainCfg {
                 self.shielded_fee_grace_bps
             ),
         );
-        // An address without the key is a relayer that would reject every
-        // spend, and a key without an address is one that would collect
-        // nothing. Both are silent at runtime, so they are fatal here.
+        // An address without the key rejects every spend, and a key without an
+        // address collects nothing. Neither is visible at runtime, so both are
+        // fatal here.
         check(
             self.shielded_fee_address.is_some() == self.shielded_fee_ivk.is_some(),
             "shielded_fee_address and shielded_fee_ivk must be set together".to_string(),
@@ -436,20 +429,14 @@ impl ChainCfg {
 }
 
 impl RelayerConfig {
-    /// Overlay env vars on top of TOML defaults, per chain. Convention:
-    ///   RELAYER_CHAIN_<id>_POOL_ADDRESS=0x…
-    ///   RELAYER_CHAIN_<id>_RPC_URL=http://…
-    ///   RELAYER_CHAIN_<id>_SIGNER_KEY=0x…
-    ///   RELAYER_CHAIN_<id>_SHIELDED_FEE_IVK=0x…
-    /// Boot-time sanity checks on values the code later assumes are sane.
+    /// Boot-time checks on values the rest of the code assumes are sound.
     ///
-    /// Each of these is otherwise a runtime failure far from its cause: a
-    /// duplicate chain silently runs two independent tree mirrors against one
-    /// chain, and the decimal/markup bounds are arithmetic that panics rather
-    /// than erroring.
+    /// Each would otherwise fail at runtime far from its cause: a duplicate chain
+    /// runs two independent tree mirrors against one chain, and the decimal and
+    /// markup bounds guard arithmetic that panics rather than erroring.
     ///
-    /// Every problem is reported, not just the first — an operator fixing a
-    /// config should not have to restart once per mistake.
+    /// Every problem is reported rather than only the first, so an operator fixing
+    /// a config does not restart once per mistake.
     pub fn validate(&self) -> Result<(), ConfigErrors> {
         let mut problems = Vec::new();
         if self.chains.is_empty() {
@@ -473,6 +460,17 @@ impl RelayerConfig {
         }
     }
 
+    /// Overlay env vars on top of the TOML defaults, per chain, using the
+    /// convention `RELAYER_CHAIN_<id>_<FIELD>`, for example:
+    ///   RELAYER_CHAIN_<id>_POOL_ADDRESS=0x…
+    ///   RELAYER_CHAIN_<id>_RPC_URL=http://…
+    ///   RELAYER_CHAIN_<id>_SIGNER_KEY=0x…
+    ///   RELAYER_CHAIN_<id>_SHIELDED_FEE_IVK=0x…
+    ///
+    /// # Panics
+    ///
+    /// If `ACCEPTED_FEE_TOKENS` is set to something that is not a JSON array of
+    /// fee-token records.
     pub fn apply_env_overlay(&mut self) {
         for c in &mut self.chains {
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "POOL_ADDRESS") {
@@ -507,11 +505,31 @@ impl RelayerConfig {
             {
                 c.shielded_fee_address = Some(v);
             }
-            // The one secret among these. Kept flat on `ChainCfg` precisely so
-            // this overlay reaches it: a nested table would force the key into
-            // the TOML, which is the file that gets committed.
+            // The one secret among these. Kept flat on `ChainCfg` so this overlay
+            // reaches it; a nested table would force the key into the committed
+            // TOML.
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "SHIELDED_FEE_IVK") {
                 c.shielded_fee_ivk = Some(v);
+            }
+            // JSON, because this is a list of records while every other overlay is
+            // a scalar. Deployments learn their ERC-20 addresses from a deploy
+            // script, so without this the per-chain config carrying them would have
+            // to be written into the committed TOML.
+            //
+            // Malformed JSON is a hard failure: keeping the TOML's list would leave
+            // the relayer quoting fees against whatever addresses were compiled
+            // in.
+            if let Some(v) =
+                shared::config_env::lookup("RELAYER", c.chain_id, "ACCEPTED_FEE_TOKENS")
+            {
+                match serde_json::from_str::<Vec<FeeTokenCfg>>(&v) {
+                    Ok(tokens) => c.accepted_fee_tokens = tokens,
+                    Err(e) => panic!(
+                        "RELAYER_CHAIN_{}_ACCEPTED_FEE_TOKENS is not a JSON array of \
+                         {{symbol,address,decimals,quote_symbol}}: {e}",
+                        c.chain_id
+                    ),
+                }
             }
         }
     }
@@ -562,8 +580,8 @@ mod tests {
         assert!(cfg(vec![c]).validate().is_err());
     }
 
-    /// A 100% grace band clears any fee at all, including none, which is the
-    /// one setting that looks like enforcement and is not.
+    /// A 100% grace band clears any fee, including none, so it looks like
+    /// enforcement without being it.
     #[test]
     fn a_grace_band_of_a_whole_is_refused() {
         let mut c = chain(1);
@@ -604,10 +622,10 @@ mod tests {
         }
     }
 
-    /// The shipped TOMLs declare no `[token_prices]` section, so every field of
-    /// it comes from a serde default. If one ever loses its `#[serde(default)]`
-    /// the relayer stops booting — and it would do so only in a deployment,
-    /// since nothing else here parses a real config file.
+    /// The shipped TOMLs declare no `[token_prices]` section, so every field comes
+    /// from a serde default. A field losing its `#[serde(default)]` would stop the
+    /// relayer booting, and only in a deployment, since nothing else here parses a
+    /// real config file.
     #[test]
     fn the_shipped_configs_still_parse_without_a_token_prices_section() {
         for path in [
@@ -631,15 +649,15 @@ mod tests {
         cfg(vec![chain(1), chain(2)]).validate().unwrap();
     }
 
-    /// A duplicate silently built two independent `TreeMirror`s and two flush
-    /// workers for one chain — a guaranteed desync rather than a config typo.
+    /// A duplicate would build two independent `TreeMirror`s and two flush workers
+    /// for one chain, which desyncs rather than merely misconfigures.
     #[test]
     fn a_duplicate_chain_id_is_refused() {
         let err = cfg(vec![chain(1), chain(1)]).validate().unwrap_err();
         assert!(err.to_string().contains("more than once"), "got {err}");
     }
 
-    /// An operator fixing a config should see every mistake at once.
+    /// An operator fixing a config sees every mistake at once.
     #[test]
     fn every_problem_is_reported_not_just_the_first() {
         let mut c = chain(1);
@@ -682,5 +700,67 @@ mod tests {
         let mut c = chain(1);
         c.flush_interval_s = 0;
         assert!(cfg(vec![c]).validate().is_err());
+    }
+
+    /// The overlay lets a deploy script inject ERC-20 addresses it only learns at
+    /// deploy time. A chain id no other test touches keeps the process-wide env
+    /// mutation from reaching them.
+    ///
+    /// SAFETY: the mutations are scoped to a chain id used nowhere else, so no
+    /// concurrent test observes them.
+    #[test]
+    fn test_accepted_fee_tokens_env_overlay_replaces_the_toml_list() {
+        const CHAIN: i64 = 987_654;
+        let key = format!("RELAYER_CHAIN_{CHAIN}_ACCEPTED_FEE_TOKENS");
+        unsafe {
+            std::env::set_var(
+                &key,
+                r#"[{"symbol":"USDC","address":"0xabc","decimals":6,"quote_symbol":"USD"}]"#,
+            );
+        }
+
+        let mut config = cfg(vec![ChainCfg {
+            accepted_fee_tokens: vec![FeeTokenCfg {
+                symbol: "STALE".into(),
+                address: "0xstale".into(),
+                decimals: 18,
+                quote_symbol: "USD".into(),
+            }],
+            ..chain(CHAIN)
+        }]);
+        config.apply_env_overlay();
+
+        unsafe { std::env::remove_var(&key) };
+
+        let tokens = &config.chains[0].accepted_fee_tokens;
+        assert_eq!(
+            tokens.len(),
+            1,
+            "the TOML entry must be replaced, not merged"
+        );
+        assert_eq!(tokens[0].symbol, "USDC");
+        assert_eq!(tokens[0].address, "0xabc");
+        assert_eq!(tokens[0].decimals, 6);
+    }
+
+    /// Absent means keep what the TOML declared: the overlay is optional, and a
+    /// deployment configuring fee tokens statically must keep working.
+    #[test]
+    fn test_accepted_fee_tokens_without_the_env_var_keeps_the_toml_list() {
+        const CHAIN: i64 = 987_655;
+        unsafe { std::env::remove_var(format!("RELAYER_CHAIN_{CHAIN}_ACCEPTED_FEE_TOKENS")) };
+
+        let mut config = cfg(vec![ChainCfg {
+            accepted_fee_tokens: vec![FeeTokenCfg {
+                symbol: "KEEP".into(),
+                address: "0xkeep".into(),
+                decimals: 18,
+                quote_symbol: "USD".into(),
+            }],
+            ..chain(CHAIN)
+        }]);
+        config.apply_env_overlay();
+
+        assert_eq!(config.chains[0].accepted_fee_tokens[0].symbol, "KEEP");
     }
 }

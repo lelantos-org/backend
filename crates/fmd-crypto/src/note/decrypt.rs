@@ -9,11 +9,11 @@
 //! ct    = ChaCha20-Poly1305(key, nonce, plaintext)
 //! ```
 //!
-//! The sender picks `esk` and sets `epk = esk·B8`, `shared = esk·pk_d`; the
+//! The sender picks `esk` and sets `epk = esk·B8`, `shared = esk·pk_d`. The
 //! holder of `ivk` recovers the same `shared` as `ivk·epk`, since
 //! `pk_d = ivk·B8`. `epk` is fresh per note, so the key is single-use and the
-//! nonce cannot repeat; deriving the nonce from `epk` anyway is defence in
-//! depth against a future path that reuses a key.
+//! nonce cannot repeat; deriving the nonce from `epk` is defence in depth against
+//! a path that reuses a key.
 
 use crate::clue::{pack, scalar_mul, unpack_subgroup};
 use crate::tree::Field;
@@ -31,26 +31,26 @@ const NONCE_DOMAIN: &[u8] = b"lelantos.note.nonce.v1";
 
 /// Recover the plaintext of a note encrypted to `ivk`'s address, or `None`.
 ///
-/// `None` means exactly one thing to a caller: *not for me*. It covers an `epk`
-/// that will not decompress, one outside the prime-order subgroup, and an AEAD
-/// tag that does not verify — deliberately indistinguishable, because a caller
-/// that reacted differently to a malformed `epk` than to a foreign note would
-/// answer "is this yours?" for anyone who asked.
+/// `None` means only "not for this key". It covers an `epk` that will not
+/// decompress, one outside the prime-order subgroup, and an AEAD tag that does
+/// not verify. These are indistinguishable by design: a caller that reacted
+/// differently to a malformed `epk` than to a foreign note would answer "is this
+/// yours?" for any asker.
 ///
-/// `ivk` is big-endian, like every field element crossing this crate; it is
-/// reduced modulo the subgroup order before use, matching `scalar_from_le` on
-/// the wallet side. `epk_packed` is wire bytes — a compressed point, not a
-/// field element, so it stays in the little-endian form the wallet sent.
-/// `body` is the ciphertext **without** the two-byte clue prefix; see
+/// `ivk` is big-endian like every field element crossing this crate, and is
+/// reduced modulo the subgroup order before use, matching `scalar_from_le` on the
+/// wallet side. `epk_packed` is wire bytes: a compressed point rather than a
+/// field element, so it stays in the little-endian form the wallet sent. `body`
+/// is the ciphertext without the two-byte clue prefix; see
 /// [`super::strip_clue_prefix`].
 pub fn try_decrypt(ivk: &Field, epk_packed: &[u8; 32], body: &[u8]) -> Option<Vec<u8>> {
-    // Subgroup check first, before anything secret-dependent runs. Baby-Jubjub
-    // is `Z_8 x Z_n`, so a sender may pick `epk = T + [t]B8` with `T` in the
-    // 8-torsion. Then `shared = [ivk]T + [t]pk_d`, whose second term follows
-    // from the published address and whose first has only eight possible
-    // values — eight crafted notes, one of which decrypts, would reveal
-    // `ivk mod 8`. Deferring the check until after the AEAD would let the
-    // crafted note verify and leave the extra work observable as timing.
+    // Subgroup check first, before anything secret-dependent runs. Baby-Jubjub is
+    // `Z_8 x Z_n`, so a sender may pick `epk = T + [t]B8` with `T` in the
+    // 8-torsion. Then `shared = [ivk]T + [t]pk_d`, whose second term follows from
+    // the published address and whose first has only eight possible values, so
+    // eight crafted notes would reveal `ivk mod 8`. Deferring the check until
+    // after the AEAD would let a crafted note verify and make the extra work
+    // observable as timing.
     let epk = unpack_subgroup(epk_packed).ok()?;
 
     let shared = scalar_mul(epk, Fr::from_be_bytes_mod_order(ivk));

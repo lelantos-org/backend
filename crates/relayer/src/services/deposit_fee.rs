@@ -4,34 +4,33 @@
 //! to a shielded address the payer chose. If that address is this relayer's,
 //! the second leaf is what pays for `flushBatch` gas.
 //!
-//! # Why not simply read `feeIn` from the event
+//! # Why `feeIn` alone is not enough
 //!
-//! `feeIn` is public, so the *amount* needs no decryption. What needs proving
-//! is that the note is **ours and spendable**, and neither is visible on
-//! chain. A payer can escrow `feeIn = 10_000` against a note addressed to
-//! themselves; the deposit looks generously funded and pays nobody. Three
-//! checks turn the leaf into a number worth acting on:
+//! `feeIn` is public, so the amount needs no decryption. What must be
+//! established is that the note is ours and spendable, neither of which is
+//! visible on chain: a payer can escrow `feeIn = 10_000` against a note
+//! addressed to themselves, producing a deposit that looks funded and pays
+//! nobody. Three checks make the leaf actionable:
 //!
-//! 1. **The commitment is rebuilt against our own `pk`.** `feeCm` is escrow
-//!    digest preimage, so it is the value the payer signed a Permit2 witness
-//!    over — not something a relayer or a flusher can vary. Rebuilding
-//!    `Poseidon(asset·2^64 + value, pk, rho, rcm)` from the decrypted
-//!    plaintext against *our* `pk` fails for a note owned by someone else, and
-//!    fails for a plaintext that inflates the value.
-//! 2. **`rcv_dep` must equal the escrowed `feeRcv`.** This has no spend-side
-//!    analogue and is the check a naive port drops. The batch circuit binds
-//!    `cv_dep[k]` to `leaf_public_in[k]` units under blinder `rcv[k]`; the
-//!    relayer must supply that blinder as a witness. A note whose plaintext
-//!    carries a different `rcv_dep` decrypts, rebuilds, and looks entirely
-//!    correct — and then has no witness, so the whole batch fails in proving
-//!    rather than at this deposit.
-//! 3. **The plaintext must agree with the escrow.** `asset_id` and `value`
-//!    are checked against the deposit's own `publicAssetId` and `feeIn`. The
+//! 1. The commitment is rebuilt against this relayer's own `pk`. `feeCm` is
+//!    escrow digest preimage, so it is the value the payer signed a Permit2
+//!    witness over and neither a relayer nor a flusher can vary it. Rebuilding
+//!    `Poseidon(asset·2^64 + value, pk, rho, rcm)` from the decrypted plaintext
+//!    fails for a note owned by someone else and for a plaintext that inflates
+//!    the value.
+//! 2. `rcv_dep` must equal the escrowed `feeRcv`. The batch circuit binds
+//!    `cv_dep[k]` to `leaf_public_in[k]` units under blinder `rcv[k]`, and the
+//!    relayer supplies that blinder as a witness. A note whose plaintext carries
+//!    a different `rcv_dep` decrypts and rebuilds correctly but has no witness,
+//!    so the whole batch fails in proving rather than at this deposit. This has
+//!    no spend-side analogue.
+//! 3. The plaintext must agree with the escrow. `asset_id` and `value` are
+//!    checked against the deposit's own `publicAssetId` and `feeIn`. The
 //!    contract binds `feeCvDep` to `feeIn` units of the leaf's asset, so a
-//!    plaintext that disagrees describes a leaf that cannot be committed.
+//!    disagreeing plaintext describes a leaf that cannot be committed.
 //!
-//! Only `ivk` is needed. The spending key that could move the collected fees
-//! never has to exist on this host — the same property the spend path has.
+//! Only `ivk` is required, so the spending key that could move collected fees
+//! never exists on this host, as on the spend path.
 
 use crate::domain::error::{AppError, AppResult};
 use crate::services::deposit_mempool::PendingDeposit;
@@ -42,17 +41,17 @@ use serde::Deserialize;
 
 /// What the fee leaf of one deposit turned out to be.
 ///
-/// `NotOurs` and `Malformed` are deliberately distinct even though both lead
-/// to the same verdict: `NotOurs` is the ordinary case of a deposit addressed
-/// to a different relayer, while `Malformed` means the payload and the escrow
-/// disagree — worth logging, because a wallet producing them strands its
-/// users' funds until they cancel.
+/// `NotOurs` and `Malformed` are distinct even though both lead to the same
+/// verdict: `NotOurs` is the ordinary case of a deposit addressed to a different
+/// relayer, while `Malformed` means the payload and the escrow disagree, which is
+/// worth logging because a wallet producing them strands its users' funds until
+/// they cancel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeeNote {
     /// Ours, spendable, and worth `paid` circuit units of the deposit's asset.
     Paid { paid: u64 },
-    /// Did not decrypt to a note this relayer owns. A foreign note, a pad and
-    /// a corrupt ciphertext all look the same from here, which is the point.
+    /// Did not decrypt to a note this relayer owns. A foreign note, a pad and a
+    /// corrupt ciphertext are indistinguishable here by design.
     NotOurs,
     /// Decrypted for us, but does not describe the leaf that was escrowed.
     Malformed(&'static str),
@@ -63,9 +62,9 @@ pub enum FeeNote {
 /// Field names match `explorer-indexer`'s `encode_aux`; the values are decimal
 /// strings and a `0x` ciphertext, exactly as they appear in the event.
 ///
-/// `clueRx` / `clueRy` are present in the column and deliberately not read:
-/// FMD exists to narrow a wallet's scan, and this relayer already knows which
-/// leaf to try. Serde ignores them.
+/// `clueRx` and `clueRy` are present in the column and not read: FMD narrows a
+/// wallet's scan, and this relayer already knows which leaf to try. Serde ignores
+/// them.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FeeAux {
@@ -76,8 +75,9 @@ struct FeeAux {
 
 /// Decide what `d`'s fee leaf pays this relayer.
 ///
-/// Pure: no network, no database, no clock. `Err` is reserved for a `fee_aux`
-/// column that could not be parsed at all — a pipeline problem, not a fee one.
+/// Pure: no network, database or clock. `Err` is reserved for a `fee_aux` column
+/// that could not be parsed at all, which is a pipeline problem rather than a fee
+/// one.
 pub fn assess(recipient: &FeeRecipient, d: &PendingDeposit) -> AppResult<FeeNote> {
     let aux: FeeAux = serde_json::from_value(d.fee_aux.clone())
         .map_err(|e| AppError::Internal(format!("deposit {}: fee_aux is unreadable: {e}", d.id)))?;
@@ -86,8 +86,8 @@ pub fn assess(recipient: &FeeRecipient, d: &PendingDeposit) -> AppResult<FeeNote
         return Ok(FeeNote::NotOurs);
     };
 
-    // Rebuilt against our own `pk` and against the plaintext's own
-    // asset/value, so a note merely *encrypted* to us does not pass.
+    // Rebuilt against this relayer's own `pk` and the plaintext's own asset and
+    // value, so a note merely encrypted to us does not pass.
     let cm = note::commitment(
         plain.asset_id,
         plain.value,
@@ -100,15 +100,15 @@ pub fn assess(recipient: &FeeRecipient, d: &PendingDeposit) -> AppResult<FeeNote
         return Ok(FeeNote::NotOurs);
     }
 
-    // Past this point the note is provably ours, so a disagreement with the
-    // escrow is the payer's bug rather than someone else's note.
+    // Past this point the note is provably ours, so a disagreement with the escrow
+    // is the payer's fault rather than another party's note.
     if plain.asset_id != d.public_asset_id {
         return Ok(FeeNote::Malformed("fee note names a different asset"));
     }
     if plain.value != d.fee_in {
         return Ok(FeeNote::Malformed("fee note value disagrees with feeIn"));
     }
-    // The witness check. Without it the batch fails in proving, not here.
+    // The witness check. Without it the batch fails in proving rather than here.
     if U256::from_be_bytes(plain.rcv_dep) != d.fee_rcv {
         return Ok(FeeNote::Malformed(
             "fee note rcv_dep is not the escrowed feeRcv",
@@ -143,13 +143,13 @@ mod tests {
     use serde::Deserialize;
     use serde_json::json;
 
-    /// The same vectors the spend path uses: every ciphertext is one the SDK's
-    /// own encrypt path produced for these keys, so a note here is a note a
-    /// real wallet would have built.
+    /// The same vectors the spend path uses: every ciphertext comes from the SDK's
+    /// own encrypt path for these keys, so a note here matches what a real wallet
+    /// would build.
     ///
-    /// The deposit path derives `rho` freely rather than from a nullifier, so
-    /// only the fields that survive that difference are used — the plaintext,
-    /// its commitment, and the ephemeral key.
+    /// The deposit path derives `rho` freely rather than from a nullifier, so only
+    /// the fields unaffected by that difference are used: the plaintext, its
+    /// commitment and the ephemeral key.
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Fixture {
@@ -209,8 +209,8 @@ mod tests {
         })
     }
 
-    /// Decrypt independently of the module under test, so the expected
-    /// `rcv_dep` is not taken from the code being checked.
+    /// Decrypt independently of the module under test, so the expected `rcv_dep`
+    /// is not taken from the code being checked.
     fn plaintext_of(r: &FeeRecipient, a: &Aux) -> NotePlaintext {
         let wire = hex::decode(a.ciphertext.trim_start_matches("0x")).expect("hex");
         let body = note::strip_clue_prefix(&wire).expect("clue prefix");
@@ -251,8 +251,8 @@ mod tests {
         );
     }
 
-    /// The load-bearing check. This note decrypts for us but its commitment
-    /// was built against someone else's `pk`, so it is not ours to spend.
+    /// This note decrypts for us but its commitment was built against another
+    /// party's `pk`, so it is not ours to spend.
     #[test]
     fn test_assess_a_note_owned_by_another_key_is_not_ours() {
         let f = fixture();
@@ -263,8 +263,8 @@ mod tests {
         assert_eq!(assess(&r, &d).expect("readable"), FeeNote::NotOurs);
     }
 
-    /// Encrypted to a different recipient entirely: it does not decrypt, and
-    /// that is indistinguishable from a pad — deliberately.
+    /// Encrypted to a different recipient: it does not decrypt, which is
+    /// indistinguishable from a pad by design.
     #[test]
     fn test_assess_a_note_encrypted_to_someone_else_is_not_ours() {
         let f = fixture();
@@ -275,10 +275,9 @@ mod tests {
         assert_eq!(assess(&r, &d).expect("readable"), FeeNote::NotOurs);
     }
 
-    /// The check with no spend-side analogue. The note is ours and its
-    /// commitment rebuilds, so everything a port of the spend path would look
-    /// at passes — and the relayer still cannot witness the leaf, which would
-    /// fail the whole batch in proving rather than here.
+    /// The check with no spend-side analogue. The note is ours and its commitment
+    /// rebuilds, so every spend-path check passes, yet the relayer cannot witness
+    /// the leaf, which would fail the whole batch in proving rather than here.
     #[test]
     fn test_assess_a_note_whose_rcv_dep_is_not_the_escrowed_fee_rcv_is_malformed() {
         let f = fixture();
@@ -317,8 +316,8 @@ mod tests {
         );
     }
 
-    /// A pipeline fault, not a fee outcome: the column is unreadable, so the
-    /// caller must not conclude anything about the deposit.
+    /// A pipeline fault rather than a fee outcome: the column is unreadable, so
+    /// the caller draws no conclusion about the deposit.
     #[test]
     fn test_assess_an_unreadable_fee_aux_is_an_error() {
         let f = fixture();

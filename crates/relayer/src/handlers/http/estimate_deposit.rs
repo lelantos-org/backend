@@ -9,8 +9,8 @@ use tracing::instrument;
 /// What a deposit must pay this relayer for the flush that will commit it.
 ///
 /// Quoted against `flushBatch` rather than a spend: the wallet escrows the
-/// deposit itself, and the cost being recovered is this deposit's share of a
-/// batch the relayer will later prove and broadcast.
+/// deposit itself, and the recovered cost is this deposit's share of a batch the
+/// relayer later proves and broadcasts.
 #[instrument(skip_all, fields(chain_id = req.chain_id))]
 pub async fn estimate_deposit(
     State(st): State<AppState>,

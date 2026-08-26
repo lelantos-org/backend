@@ -1,13 +1,13 @@
 //! Synthetic-block stream tests for the ingester.
 //!
-//! Drives `worker::run_with_rpc` against a `MockRpc` script and a real
-//! Postgres testcontainer. Asserts:
-//! - rows ordered by `(chain_id, block_number, log_index)`, no gaps
-//! - replay is idempotent (UNIQUE constraint absorbs duplicates)
-//! - parent-hash mismatch triggers reorg rewind
+//! Drives the worker against a `MockRpc` script and a real Postgres
+//! testcontainer, asserting that:
+//! - rows are ordered by `(chain_id, block_number, log_index)` with no gaps
+//! - replay is idempotent, with the UNIQUE constraint absorbing duplicates
+//! - a parent-hash mismatch triggers a reorg rewind
 //! - two chains advance independently with no row collisions
 //!
-//! Single shared Postgres container per test binary; per-test TRUNCATE.
+//! One shared Postgres container per test binary, with a per-test TRUNCATE.
 
 use alloy::primitives::{Address, B256, Bytes, LogData};
 use alloy::rpc::types::eth::Log;
@@ -32,62 +32,27 @@ use ingester::services::ingest::IngestService;
 use ingester::services::live::{LiveService, LiveServiceImpl};
 use ingester::services::reorg::ReorgService;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
-use testcontainers::{ContainerAsync, runners::AsyncRunner};
-use testcontainers_modules::postgres::Postgres;
+use test_support::db_url;
 
 const POOL_ADDR: &str = "0x0000000000000000000000000000000000000abc";
 
 // ---------- shared Postgres container ----------
-
-struct ContainerHandle {
-    _container: ContainerAsync<Postgres>,
-    url: String,
-}
-
-async fn shared_container() -> &'static ContainerHandle {
-    static CELL: OnceLock<tokio::sync::OnceCell<ContainerHandle>> = OnceLock::new();
-    let cell = CELL.get_or_init(tokio::sync::OnceCell::new);
-    cell.get_or_init(|| async {
-        let container = Postgres::default().start().await.expect("start postgres");
-        let host = container.get_host().await.unwrap();
-        let port = container.get_host_port_ipv4(5432).await.unwrap();
-        let url = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
-        let migrate_url = url.clone();
-        tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
-            .await
-            .unwrap()
-            .expect("migrate");
-        ContainerHandle {
-            _container: container,
-            url,
-        }
-    })
-    .await
-}
+/// Cleared between tests. Every table this binary writes, directly or through a
+/// foreign key.
+const TABLES: &[&str] = &[
+    "raw_events",
+    "chain_state",
+    "chain_reorgs",
+    "consumer_cursors",
+    "notes",
+    "subscriptions",
+    "matches",
+    "assets",
+];
 
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
-    static SERIAL: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
-    let mu = SERIAL
-        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let guard = mu.lock_owned().await;
-    let h = shared_container().await;
-    let pool = database::build_pool(&h.url, database::PoolCfg::indexer())
-        .await
-        .expect("pool");
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query(
-        "TRUNCATE raw_events, chain_state, chain_reorgs, consumer_cursors, notes, \
-         subscriptions, matches, assets \
-         RESTART IDENTITY CASCADE",
-    )
-    .execute(&mut conn)
-    .await
-    .expect("truncate");
-    drop(conn);
-    (pool, guard)
+    test_support::fresh_pool(database::PoolCfg::indexer(), TABLES).await
 }
 
 // ---------- mock RPC ----------
@@ -165,7 +130,7 @@ impl ChainRpc for MockRpc {
         let mut out = HashMap::new();
         for &b in blocks {
             if let Some((_, _, ts, _)) = s.blocks.iter().find(|(n, _, _, _)| *n == b) {
-                // Synthetic chain behaves like Ethereum: block.number is the
+                // The synthetic chain behaves like Ethereum: `block.number` is the
                 // block's own height.
                 out.insert(
                     b,
@@ -337,7 +302,7 @@ async fn idempotent_replay() {
     let first = fetch_all_events(&pool, None).await;
     assert_eq!(first.len(), 5);
 
-    // Manually reset cursor to replay; rows should not duplicate.
+    // Reset the cursor to force a replay; rows must not duplicate.
     {
         use database::schema::chain_state;
         let mut conn = pool.get().await.unwrap();
@@ -366,11 +331,9 @@ async fn reorg_rewinds_correctly() {
     rpc.rewind_to(304);
     populate_blocks(&rpc, 304..=308, 0xff); // different hash_byte → divergent block_hash
 
-    // No cursor reset. That is the whole point: detection has to notice the
-    // fork from the stored anchor alone. The previous implementation compared
-    // incoming logs against stored ones, which can only ever match if
-    // something has already rewound the cursor by hand — so this test used to
-    // pass while production could never detect a reorg at all.
+    // No cursor reset: detection must notice the fork from the stored anchor
+    // alone. Comparing incoming logs against stored ones would only match if
+    // something had already rewound the cursor by hand.
     let first = ctx.tick().await.unwrap();
     assert!(
         matches!(first, TickOutcome::Reorg { .. }),
@@ -430,10 +393,6 @@ async fn multichain_independent_cursors() {
 
 // ---------- replica failover ----------
 
-async fn db_url() -> &'static str {
-    &shared_container().await.url
-}
-
 fn worker_deps(
     pool: &database::DbPool,
     rpc: &Arc<MockRpc>,
@@ -471,10 +430,9 @@ async fn count_raw_events(pool: &database::DbPool) -> i64 {
         .unwrap()
 }
 
-/// A second ingester replica must stand by rather than ingest beside the
-/// leader — and must take over once the leader's lock goes away. Returning
-/// early instead of retrying would leave the standby permanently inert, so
-/// there would be no failover at all.
+/// A second ingester replica must stand by rather than ingest alongside the
+/// leader, and must take over once the leader's lock goes away. Returning early
+/// instead of retrying would leave the standby inert and provide no failover.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn standby_ingester_waits_for_the_lock_then_takes_over() {
     let (pool, _serial) = fresh_pool().await;
@@ -488,8 +446,8 @@ async fn standby_ingester_waits_for_the_lock_then_takes_over() {
         .expect("leader lock");
 
     let deps = worker_deps(&pool, &rpc, cfg(1, 100), url);
-    // Hold the trigger: dropping it closes the watch channel, which every
-    // worker reads as "shutdown now".
+    // Hold the trigger: dropping it closes the watch channel, which every worker
+    // reads as an immediate shutdown.
     let (_trigger, shutdown) = shared::shutdown::channel();
     let worker = tokio::spawn(async move { ingester::handlers::worker::run(deps, shutdown).await });
 
@@ -520,12 +478,10 @@ async fn standby_ingester_waits_for_the_lock_then_takes_over() {
 
 /// A fork whose replacement block emits no logs at all.
 ///
-/// This is unreachable for any scheme that compares incoming logs against
-/// stored ones: the diverged block contributes no incoming row, so there is
-/// nothing to compare it to. The anchor walk finds it anyway, and must rewind
-/// to the *lowest* diverged block — picking any other diverged block (the old
-/// code iterated a HashMap and returned whichever came first) would strand the
-/// rows below it forever.
+/// Unreachable for any scheme comparing incoming logs against stored ones: the
+/// diverged block contributes no incoming row. The anchor walk still finds it,
+/// and must rewind to the lowest diverged block; any other choice would strand
+/// the rows below it.
 #[tokio::test]
 async fn detects_a_fork_whose_replacement_block_has_no_logs() {
     let (pool, _serial) = fresh_pool().await;
@@ -567,10 +523,10 @@ async fn detects_a_fork_whose_replacement_block_has_no_logs() {
 /// A chain whose scanned range contains no matching logs must still record
 /// progress.
 ///
-/// `advance_scanned` used to be a bare `UPDATE`, which matches zero rows until
-/// something has committed an event and created the `chain_state` row. The
-/// cursor therefore never persisted, and every poll rescanned the same
-/// widening range from `start_block` forever.
+/// A bare `UPDATE` in `advance_scanned` would match zero rows until something
+/// committed an event and created the `chain_state` row, so the cursor would
+/// never persist and every poll would rescan a widening range from
+/// `start_block`.
 #[tokio::test]
 async fn advances_the_cursor_on_a_range_with_no_logs() {
     let (pool, _serial) = fresh_pool().await;
@@ -598,8 +554,8 @@ async fn advances_the_cursor_on_a_range_with_no_logs() {
         .unwrap()
         .expect("an empty range must still persist a cursor");
     assert_eq!(cursor.last_scanned_block, 510);
-    // The anchor must stay empty: nothing was verified, so there is no block
-    // for a later reorg check to walk back from.
+    // The anchor must stay empty: nothing was verified, so a later reorg check
+    // has no block to walk back from.
     assert_eq!(cursor.last_block_hash, Vec::<u8>::new());
 
     let second = ctx.tick().await.unwrap();
@@ -609,9 +565,9 @@ async fn advances_the_cursor_on_a_range_with_no_logs() {
     );
 }
 
-/// Postgres caps a statement at 65535 bind parameters and each row binds 10,
-/// so a single-statement insert tops out at 6553 rows — well under what one
-/// backfill chunk of the default 50k blocks can produce.
+/// Postgres caps a statement at 65535 bind parameters and each row binds 10, so a
+/// single-statement insert tops out at 6553 rows, below what one backfill chunk
+/// over the default 50k blocks can produce.
 #[tokio::test]
 async fn inserts_a_batch_larger_than_the_bind_parameter_limit() {
     let (pool, _serial) = fresh_pool().await;
@@ -648,8 +604,8 @@ async fn inserts_a_batch_larger_than_the_bind_parameter_limit() {
     assert_eq!(inserted, N);
     assert_eq!(count_raw_events(&pool).await, N as i64);
 
-    // Replaying the same batch must report zero inserted, not N. Reporting the
-    // decoded count made every replay look like fresh ingest.
+    // Replaying the same batch must report zero inserted rather than the decoded
+    // count, which would make every replay look like fresh ingest.
     let again = writes
         .commit_batch(
             &rows,
@@ -669,11 +625,10 @@ async fn inserts_a_batch_larger_than_the_bind_parameter_limit() {
 /// A reorg must leave a durable, atomic record.
 ///
 /// `pg_notify` is fire-and-forget, so a consumer that is down when the fork
-/// happens never hears about it. Consumers re-read the replacement rows on
-/// their own — the ids are higher — but state they already derived from the
-/// deleted rows sits below their cursor where nothing revisits it. The log row
-/// is what lets them retract it, so it has to be written in the same
-/// transaction as the delete.
+/// happens never hears about it. Consumers re-read the replacement rows on their
+/// own, since the ids are higher, but state derived from the deleted rows sits
+/// below their cursor where nothing revisits it. The log row lets them retract
+/// it, so it must be written in the same transaction as the delete.
 #[tokio::test]
 async fn a_rewind_records_a_durable_reorg_marker() {
     let (pool, _serial) = fresh_pool().await;
@@ -752,12 +707,9 @@ async fn woken_within(wake: &mut database::listen::Wake, what: &str) {
         .expect("listener task dropped its sender");
 }
 
-/// The point of the listener: a committed batch must wake a consumer rather
-/// than leaving it to time out its idle backoff.
-///
-/// The ingester has emitted these notifications since it was written and
-/// nothing subscribed, so this is the first end-to-end assertion that the
-/// channel names, the payload, and the connection all line up.
+/// A committed batch must wake a consumer rather than leave it to time out its
+/// idle backoff. Asserts end to end that the channel names, the payload and the
+/// connection line up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_commit_wakes_a_listener() {
     let (pool, _serial) = fresh_pool().await;
@@ -794,10 +746,9 @@ async fn a_commit_wakes_a_listener() {
     woken_within(&mut wake, "a reorg").await;
 }
 
-/// The listener must survive the database going away, and must bump on the way
-/// back: notifications sent while the socket was down are gone, so a silent
-/// reconnect would leave the consumer waiting out its full idle ceiling for
-/// work that is already queued.
+/// The listener must survive the database going away and must bump on reconnect:
+/// notifications sent while the socket was down are lost, so a quiet reconnect
+/// would leave the consumer waiting out its full idle ceiling for queued work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reconnect_bumps_the_wake() {
     let (_pool, _serial) = fresh_pool().await;
@@ -806,8 +757,8 @@ async fn a_reconnect_bumps_the_wake() {
     let mut wake = database::listen::spawn(url, &[database::listen::CHANNEL_RAW_EVENTS_APPENDED]);
     woken_within(&mut wake, "the initial subscribe").await;
 
-    // Terminate the listener's backend from another connection. This is what a
-    // database restart or a failover looks like from the listener's side.
+    // Terminate the listener's backend from another connection, which is what a
+    // database restart or failover looks like from the listener's side.
     let pool2 = database::build_pool(url, database::PoolCfg::indexer())
         .await
         .expect("pool");

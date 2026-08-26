@@ -1,5 +1,5 @@
-// Builders that map relayer DTOs + tree state into the on-chain `IMasp`
-// argument structs. Pure conversions; no I/O.
+//! Builders mapping relayer DTOs and tree state into the on-chain `IMasp`
+//! argument structs. Pure conversions, no I/O.
 
 use crate::adapters::abi::IMasp;
 use crate::adapters::parse::{parse_address, parse_b32, parse_u256};
@@ -11,16 +11,17 @@ use crate::services::prover::TreeUpdateBatchProof;
 use alloy::primitives::{FixedBytes, U256};
 use fmd_crypto::tree::Field;
 
-/// Max leaves per `tree_update_batch` proof (mirrors `PubInputs.MAX_L_BATCH`).
-/// Counted in leaves, not deposits: a deposit is two leaves, a spend is
-/// `TRANSACT_OUT`.
+/// Maximum leaves per `tree_update_batch` proof, mirroring
+/// `PubInputs.MAX_L_BATCH`. Counted in leaves rather than deposits: a deposit is
+/// two leaves and a spend is `TRANSACT_OUT`.
 pub const MAX_L_BATCH: usize = 4;
 
 /// Leaves one deposit mints (mirrors `PubInputs.LEAVES_PER_DEPOSIT`): the
 /// depositor's note, then the note paying whoever flushed it.
 ///
-/// Widening `MAX_L_BATCH` needs a new trusted setup — `COUNT_BITS = 2` pins it
-/// — so this halves the deposits per batch rather than adding slots.
+/// Widening `MAX_L_BATCH` requires a new trusted setup, since `COUNT_BITS = 2`
+/// pins it, so the second leaf halves the deposits per batch rather than adding
+/// slots.
 pub const LEAVES_PER_DEPOSIT: usize = 2;
 
 /// Deposits one `flushBatch` can carry.
@@ -29,11 +30,11 @@ pub const MAX_DEPOSITS_PER_BATCH: usize = MAX_L_BATCH / LEAVES_PER_DEPOSIT;
 /// The batch circuit's leaf-indexed arrays, at full width.
 ///
 /// One entry per leaf slot: the first `actual_count` are real and the rest are
-/// zero, padding that the circuit and the contract both enforce. Grouped into
-/// a struct rather than passed as five same-shaped arrays — every consumer
-/// needs all of them, and positional arguments of identical type transpose
-/// silently. Keeping `actual_count` here too means the count can never drift
-/// from the arrays it describes.
+/// zero padding that the circuit and the contract both enforce. Grouped into a
+/// struct rather than five same-shaped arrays, since every consumer needs all of
+/// them and positional arguments of identical type transpose without a compiler
+/// error. Holding `actual_count` here keeps the count from drifting from the
+/// arrays it describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaddedBatch {
     pub cms: [FixedBytes<32>; MAX_L_BATCH],
@@ -43,8 +44,8 @@ pub struct PaddedBatch {
     /// `1` marks a deposit leaf, whose value commitment the circuit pins to
     /// its `(leaf_asset, leaf_public_in)`.
     pub is_deposit: [u8; MAX_L_BATCH],
-    /// How many leading slots are real. A leaf count, not a pair count, so an
-    /// odd value is legitimate.
+    /// How many leading slots are real. A leaf count rather than a pair count, so
+    /// an odd value is valid.
     pub actual_count: u64,
 }
 
@@ -61,8 +62,7 @@ impl PaddedBatch {
     }
 
     /// Spend leaves. Every deposit-only field stays zero: the transact SNARK
-    /// already proves conservation, so the per-leaf deposit binding is
-    /// intentionally skipped.
+    /// already proves conservation, so the per-leaf deposit binding is skipped.
     ///
     /// # Panics
     /// If more leaves are supplied than the circuit has slots. Callers are
@@ -76,13 +76,13 @@ impl PaddedBatch {
         batch
     }
 
-    /// Deposit leaves, **two per escrowed deposit**, each carrying the binding
-    /// the circuit checks against its value commitment.
+    /// Deposit leaves, two per escrowed deposit, each carrying the binding the
+    /// circuit checks against its value commitment.
     ///
-    /// The caller supplies them already flattened and in tree order — the
-    /// depositor's note at `2i`, the relayer's fee note at `2i + 1` — which is
-    /// the order `_drainDeposit` reads them back in. Both leaves of a deposit
-    /// carry `is_deposit = 1` and share an asset.
+    /// The caller supplies them flattened and in tree order — the depositor's
+    /// note at `2i`, the relayer's fee note at `2i + 1` — which is the order
+    /// `_drainDeposit` reads them back in. Both leaves of a deposit carry
+    /// `is_deposit = 1` and share an asset.
     ///
     /// # Panics
     /// As [`Self::from_spend`].
@@ -118,8 +118,8 @@ impl PaddedBatch {
     }
 }
 
-/// One leaf slot, borrowed across all five arrays at once, so a write cannot
-/// land in the wrong one.
+/// One leaf slot borrowed across all five arrays at once, so a write cannot land
+/// in the wrong one.
 struct BatchSlot<'a> {
     cm: &'a mut FixedBytes<32>,
     cv_dep: &'a mut [U256; 2],
@@ -141,8 +141,9 @@ pub fn build_proof(p: &ProofDto) -> AppResult<IMasp::Proof> {
     Ok(IMasp::Proof {
         a: [parse_u256(&p.pi_a[0])?, parse_u256(&p.pi_a[1])?],
         b: [
-            // snarkjs proof: pi_b stored low-then-high; on-chain Solidity
-            // verifier expects [imag, real]. Swap matches SDK fixture-gen.
+            // snarkjs stores `pi_b` low-then-high while the on-chain Solidity
+            // verifier expects [imag, real]. The swap matches SDK fixture
+            // generation.
             [parse_u256(&p.pi_b[0][1])?, parse_u256(&p.pi_b[0][0])?],
             [parse_u256(&p.pi_b[1][1])?, parse_u256(&p.pi_b[1][0])?],
         ],
@@ -155,8 +156,8 @@ fn parse_point(p: &PointDto) -> AppResult<[U256; 2]> {
 }
 
 /// Parse a fixed-arity slice into an array, propagating the first error.
-/// `try_map` on arrays is unstable, and the shape is pinned by the DTO, so
-/// the collect-then-unwrap here cannot mis-size.
+/// `try_map` on arrays is unstable and the shape is pinned by the DTO, so the
+/// collect-then-unwrap cannot mis-size.
 fn parse_points<const N: usize>(pts: &[PointDto; N]) -> AppResult<[[U256; 2]; N]> {
     let mut out = [[U256::ZERO; 2]; N];
     for (slot, p) in out.iter_mut().zip(pts.iter()) {
@@ -245,8 +246,8 @@ pub fn build_aux(
 }
 
 /// Map a wire deposit request into the on-chain struct. Used by the swap
-/// pipeline; the plain deposit path is wallet-driven and reaches the relayer
-/// only through the flush flow.
+/// pipeline; the plain deposit path is wallet-driven and reaches the relayer only
+/// through the flush flow.
 pub fn build_deposit_request(d: &DepositRequestDto) -> AppResult<IMasp::DepositRequest> {
     Ok(IMasp::DepositRequest {
         chainId: U256::from(d.chain_id),
@@ -268,10 +269,10 @@ pub fn build_deposit_request(d: &DepositRequestDto) -> AppResult<IMasp::DepositR
 mod tests {
     use super::*;
 
-    /// Mirrors the constructor guard in `MASP.sol`. These three constants
-    /// describe one circuit shape, and `MAX_L_BATCH` cannot move without a new
-    /// trusted setup — so a batch sized against a stale pair would be built,
-    /// proven and only then rejected on chain.
+    /// Mirrors the constructor guard in `MASP.sol`. These three constants describe
+    /// one circuit shape, and `MAX_L_BATCH` cannot move without a new trusted
+    /// setup, so a batch sized against a stale pair would be built and proven
+    /// before being rejected on chain.
     #[test]
     fn test_batch_constants_describe_one_circuit_shape() {
         assert_eq!(MAX_DEPOSITS_PER_BATCH * LEAVES_PER_DEPOSIT, MAX_L_BATCH);
@@ -279,7 +280,7 @@ mod tests {
 
     /// Both leaves of a deposit must be marked as deposit leaves: the circuit
     /// gates its per-leaf value binding on `is_deposit`, so a fee leaf left at
-    /// zero would have its `cv_dep` unconstrained.
+    /// zero would leave its `cv_dep` unconstrained.
     #[test]
     fn test_from_deposits_marks_every_supplied_leaf_as_a_deposit() {
         let leaf = |cm: u8, public_in: u64| DepositLeaf {
@@ -292,7 +293,7 @@ mod tests {
 
         assert_eq!(batch.actual_count, 2);
         assert_eq!(batch.is_deposit, [1, 1, 0, 0]);
-        // Padding stays zero — the contract and the circuit both enforce it.
+        // Padding stays zero; the contract and the circuit both enforce it.
         assert_eq!(batch.cms[2], FixedBytes::<32>::ZERO);
         assert_eq!(batch.leaf_public_in, [1_000, 250, 0, 0]);
     }

@@ -4,12 +4,12 @@ use serde::Deserialize;
 /// Mirrors `PubInputs.TRANSACT_IN` / `TRANSACT_OUT` and
 /// `sdk/src/core/shape.ts :: TRANSACT_4X4`.
 ///
-/// These are wire-format array lengths, so a value that disagrees with the
-/// deployed circuit rejects every submission at the JSON boundary — serde
-/// refuses a fixed-size array of the wrong length — before anything the
-/// relayer could log as a shape problem. Moving them means moving the
-/// `sol!` aux arity in `adapters/abi.rs` and the coefficient layout in
-/// `domain/transact_pi.rs` in the same change.
+/// These are wire-format array lengths, so a value disagreeing with the deployed
+/// circuit rejects every submission at the JSON boundary, where serde refuses a
+/// fixed-size array of the wrong length, before the relayer can log a shape
+/// problem. Moving them requires moving the `sol!` aux arity in
+/// `adapters/abi.rs` and the coefficient layout in `domain/transact_pi.rs` in the
+/// same change.
 pub const TRANSACT_IN: usize = 4;
 pub const TRANSACT_OUT: usize = 4;
 
@@ -18,19 +18,20 @@ pub const TRANSACT_OUT: usize = 4;
 /// field-element strings are decimal (snarkjs convention); addresses are
 /// 0x-hex.
 ///
-/// Shield path is server-initiated (relayer cron picks up `DepositEscrowed`
-/// events from the DB) — wallets do NOT POST deposits through this HTTP
+/// The shield path is server-initiated: the relayer picks up `DepositEscrowed`
+/// events from the database, and wallets do not POST deposits through this HTTP
 /// surface.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitSpendPayload {
     pub chain_id: i64,
     pub kind: SpendKind,
-    /// Groth16 proof for the deployed transact shape (`transact_3x3`).
+    /// Groth16 proof for the deployed transact shape.
     pub proof: ProofDto,
-    /// 27 base logical PIs in `PubInputs.compress(Transact)` order. The
-    /// relayer derives the 9 clue slots and the aux digest from `aux`, so
-    /// they are absent here — 42 coefficients total at 3x3.
+    /// The base logical public inputs, in `PubInputs.compress(Transact)` order.
+    /// The relayer derives the per-output clue slots and the aux digest from
+    /// `aux`, so they are absent here; see `domain::transact_pi` for the full
+    /// coefficient count.
     pub pub_inputs: PubInputsDto,
     pub aux: [OutputAuxDto; TRANSACT_OUT],
 }
@@ -42,9 +43,9 @@ pub enum SpendKind {
     Transfer,
     #[serde(rename = "withdraw")]
     Withdraw,
-    /// Routed to `NativeAdapter.withdrawNative`, not to MASP — the pool is
-    /// ERC-20 only. The SNARK must name the adapter as both `recipient`
-    /// and `relayer`.
+    /// Routed to `NativeAdapter.withdrawNative` rather than to MASP, which is
+    /// ERC-20 only. The SNARK must name the adapter as both `recipient` and
+    /// `relayer`.
     #[serde(rename = "withdrawNative")]
     WithdrawNative,
 }

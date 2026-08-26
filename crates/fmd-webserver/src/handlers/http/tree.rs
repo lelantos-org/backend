@@ -1,8 +1,7 @@
-//! Tree state only. There is deliberately no per-commitment path endpoint:
-//! asking for the proof of one `cm` tells the server (and every cache and
-//! proxy log on the way) exactly which note the caller is about to spend.
-//! Clients build the tree from the commitment chunk feed and derive paths
-//! locally instead.
+//! Tree state only. There is no per-commitment path endpoint: requesting the
+//! proof of one `cm` would tell the server, and every cache and proxy log on the
+//! way, which note the caller is about to spend. Clients build the tree from the
+//! commitment chunk feed and derive paths locally.
 
 use crate::app::AppState;
 use crate::domain::dto::TreeStateQuery;

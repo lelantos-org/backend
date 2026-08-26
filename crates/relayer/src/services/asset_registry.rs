@@ -1,14 +1,13 @@
 //! Cached view of the `assets` table.
 //!
-//! `explorer-indexer` writes it; this relayer only reads it, and reads it from
-//! two places that used to hit the database independently: `/chains`, which
-//! every wallet polls, and the shielded-fee check, which runs on every
-//! submission. The pool is `PoolCfg::relayer()` — four connections — so a
-//! per-request read from either is a real cost.
+//! `explorer-indexer` writes it and this relayer reads it from two places:
+//! `/chains`, which every wallet polls, and the shielded-fee check, which runs on
+//! every submission. The pool is `PoolCfg::relayer()` with four connections, so a
+//! per-request read from either is costly.
 //!
-//! The registry is append-mostly: an asset appears when the indexer first sees
-//! it registered on chain and does not then change. A short TTL is therefore
-//! about picking up *new* assets promptly, not about correcting stale ones.
+//! The registry is append-mostly: an asset appears when the indexer first sees it
+//! registered on chain and does not change afterwards. A short TTL therefore
+//! picks up new assets promptly rather than correcting stale ones.
 
 use crate::domain::error::{AppError, AppResult};
 use crate::repositories::assets::{self, AssetRow};
@@ -20,9 +19,9 @@ use std::time::Duration;
 /// One entry per chain; a deployment serves a handful.
 const CAPACITY: u64 = 64;
 
-/// How long a chain's asset list is reused. Short enough that a newly
-/// registered asset becomes spendable within the minute, long enough that a
-/// herd of wallet polls collapses onto one query.
+/// How long a chain's asset list is reused: short enough that a newly registered
+/// asset becomes spendable within the minute, long enough that a herd of wallet
+/// polls collapses onto one query.
 const TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -41,8 +40,8 @@ impl AssetRegistry {
 
     /// Every registered asset on `chain_id`, lowest id first.
     ///
-    /// An empty list means "the indexer has not caught up", never "this chain
-    /// supports nothing" — the same reading `/chains` documents for its
+    /// An empty list means the indexer has not caught up rather than that the
+    /// chain supports no assets, matching what `/chains` documents for its
     /// `tokens` array.
     pub async fn for_chain(&self, chain_id: i64) -> AppResult<Arc<Vec<AssetRow>>> {
         let pool = self.pool.clone();

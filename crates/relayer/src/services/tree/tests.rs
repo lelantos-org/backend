@@ -14,9 +14,9 @@ fn cv(n: u8) -> [U256; 2] {
     [U256::from(n), U256::from(n) + U256::from(1u8)]
 }
 
-/// Two-leaf advance. Real spends insert `TRANSACT_OUT` leaves and a
-/// flush one per deposit; two keeps the arithmetic in these tests easy
-/// to read without changing what is under test.
+/// Two-leaf advance. Real spends insert `TRANSACT_OUT` leaves and a flush inserts
+/// one per deposit; two keeps the arithmetic in these tests simple without
+/// changing what is under test.
 fn advance2(
     m: &mut TreeMirror,
     cm0: Field,
@@ -50,8 +50,8 @@ fn reserve_advances_by_two_leaves() {
     assert_ne!(slot.old_root, advanced.new_root);
 }
 
-/// A revert or a refused broadcast provably left no leaves on-chain, so
-/// the speculative pair comes back off and the mirror stays usable.
+/// A revert or a refused broadcast provably left no leaves on chain, so the
+/// speculative pair is removed and the mirror stays usable.
 #[test]
 fn unwind_rolls_back_a_clean_failure() {
     let mut m = mirror(1);
@@ -67,8 +67,8 @@ fn unwind_rolls_back_a_clean_failure() {
     reserve_one(&mut m).expect("mirror should still accept work");
 }
 
-/// The tx may still mine, so the leaves must stay — and because the mirror
-/// can no longer be trusted either way, it stops accepting work.
+/// The transaction may still mine, so the leaves stay, and the mirror stops
+/// accepting work because it cannot be trusted either way.
 #[test]
 fn unwind_parks_on_an_unknown_outcome() {
     let mut m = mirror(1);
@@ -85,9 +85,9 @@ fn unwind_parks_on_an_unknown_outcome() {
     ));
 }
 
-/// Rolling back more leaves than exist cannot be honoured, so the mirror
-/// parks rather than silently carrying on — but the caller still sees the
-/// error that actually caused the unwind.
+/// Rolling back more leaves than exist cannot be honoured, so the mirror parks
+/// rather than continuing, while the caller still sees the error that caused the
+/// unwind.
 #[test]
 fn unwind_parks_when_the_rollback_itself_fails() {
     let mut m = mirror(1);
@@ -114,10 +114,9 @@ fn parking_keeps_the_first_reason() {
     assert!(reason.contains("first"), "got {reason}");
 }
 
-/// The corruption path: a wallet-supplied `cm` at or above the BN254
-/// modulus makes Poseidon refuse the leaf. Before, leaf 0 was already in
-/// the tree by then and nothing took it back out — the mirror silently
-/// ran one leaf ahead of the chain forever.
+/// A wallet-supplied `cm` at or above the BN254 modulus makes Poseidon refuse the
+/// leaf. Hashing after the first insert would leave leaf 0 in the tree with
+/// nothing to remove it, running the mirror one leaf ahead of the chain.
 #[test]
 fn a_non_canonical_leaf_leaves_the_tree_untouched() {
     let mut m = mirror(1);
@@ -149,15 +148,13 @@ fn a_non_canonical_cv_dep_also_leaves_the_tree_untouched() {
     assert_eq!(m.committed_count(), 2);
 }
 
-/// Capacity is a length check, so it must come before hashing: an
-/// oversized batch is refused without paying for a single Poseidon, which
-/// is also what keeps this test instant.
+/// Capacity is a length check and must precede hashing: an oversized batch is
+/// refused without computing a single Poseidon, which also keeps this test fast.
 #[test]
 fn a_batch_past_capacity_is_refused_before_any_hashing() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
-    // Deliberately non-canonical: if the capacity check ran after hashing,
-    // this would fail as a hash error instead — and would first hash a
-    // million leaves to get there.
+    // Non-canonical on purpose: if the capacity check ran after hashing, this
+    // would fail as a hash error, after hashing a million leaves.
     let bad = *crate::adapters::parse::BN254_R;
     let leaves: Vec<(Field, [U256; 2])> = (0..MAX_LEAVES + 1)
         .map(|_| (bad.to_be_bytes::<32>(), cv(1)))
@@ -170,8 +167,8 @@ fn a_batch_past_capacity_is_refused_before_any_hashing() {
     assert_eq!(m.committed_count(), 0);
 }
 
-/// `/chains` reads the snapshot, so it has to track every mutation — a
-/// stale one would report a root the relayer is no longer building on.
+/// `/chains` reads the snapshot, so it must track every mutation; a stale one
+/// would report a root the relayer has stopped building on.
 #[test]
 fn the_snapshot_tracks_every_mutation() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
@@ -191,8 +188,8 @@ fn the_snapshot_tracks_every_mutation() {
     assert!(snap.is_desynced());
 }
 
-/// A payload naming a root this mirror has never held cannot land, so the
-/// pipeline can reject it instead of proving against it.
+/// A payload naming a root this mirror has never held cannot land, so the pipeline
+/// rejects it rather than proving against it.
 #[test]
 fn root_history_remembers_what_the_mirror_has_held() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
@@ -206,10 +203,9 @@ fn root_history_remembers_what_the_mirror_has_held() {
     assert!(!m.knows_root(&[0xEEu8; 32]));
 }
 
-/// A rolled-back advance published a root the chain never held. Leaving it in
-/// the accepted window lets a wallet that read it from `/chains` pass
-/// `check_known_root` and then revert `StaleOldRoot` on-chain — the exact
-/// failure that check exists to prevent.
+/// A rolled-back advance published a root the chain never held. Leaving it in the
+/// accepted window would let a wallet that read it from `/chains` pass
+/// `check_known_root` and then revert `StaleOldRoot` on chain.
 #[test]
 fn a_rolled_back_root_stops_being_accepted() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
@@ -231,8 +227,8 @@ fn a_rolled_back_root_stops_being_accepted() {
     assert_eq!(m.current_root().unwrap(), before);
 }
 
-/// Only the newest entry is retracted. An identical root deeper in the window
-/// was reached by an advance that did land, and stays valid.
+/// Only the newest entry is retracted. An identical root deeper in the window was
+/// reached by an advance that landed and stays valid.
 #[test]
 fn a_rollback_retracts_only_the_advance_it_undid() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();

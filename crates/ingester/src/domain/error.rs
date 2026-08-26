@@ -2,15 +2,15 @@ use thiserror::Error;
 
 /// What went wrong at the provider.
 ///
-/// The variants exist to drive behaviour, not to describe the wire format:
-/// [`RpcError::RangeTooLarge`] narrows the query window, [`RpcError::RateLimited`]
-/// backs off. Anything that maps to neither is [`RpcError::Other`] and is
-/// simply retried.
+/// The variants drive behaviour rather than describe the wire format:
+/// [`RpcError::RangeTooLarge`] narrows the query window and
+/// [`RpcError::RateLimited`] backs off. Anything matching neither is
+/// [`RpcError::Other`] and is retried.
 #[derive(Debug, Error)]
 pub enum RpcError {
-    /// The provider refused the query as too wide — by block span or by
-    /// response size. Both are one condition here because both have the same
-    /// remedy: ask for less.
+    /// The provider refused the query as too wide, by block span or by response
+    /// size. Both share one variant because both have the same remedy: request
+    /// less.
     #[error("range too large")]
     RangeTooLarge,
     #[error("rate limited")]
@@ -37,7 +37,7 @@ impl IngesterError {
     }
 }
 
-// Blanket conversions so repositories can use `?` instead of repeating a
+// Blanket conversions so repositories can use `?` rather than repeating a
 // `map_err` on every statement. The pool's error type is a bb8 generic that
 // nothing outside this module needs to name.
 impl From<diesel::result::Error> for IngesterError {

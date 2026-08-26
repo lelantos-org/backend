@@ -3,7 +3,7 @@ use utoipa::IntoParams;
 
 /// Filters for the list-entries audit endpoint.
 ///
-/// Safe as query parameters — unlike screening, none of these values is a
+/// Safe as query parameters: unlike screening, none of these values is a
 /// screened address, so nothing sensitive reaches the access log.
 #[derive(Debug, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +18,7 @@ pub const DEFAULT_LIMIT: i64 = 100;
 pub const MAX_LIMIT: i64 = 500;
 
 impl ListEntriesQuery {
-    /// Clamp to `1..=MAX_LIMIT`; a non-positive limit falls back to the default.
+    /// Clamp to `1..=MAX_LIMIT`. A non-positive limit falls back to the default.
     pub fn clamped_limit(&self) -> i64 {
         match self.limit {
             Some(n) if n > 0 => n.min(MAX_LIMIT),

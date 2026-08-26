@@ -1,21 +1,15 @@
 //! Reorg detection and rewind.
 //!
-//! # Why this is anchor-based
+//! Detection is anchor-based and looks backwards. Comparing incoming logs
+//! against stored hashes for the same blocks cannot detect anything: a tick only
+//! fetches blocks above `last_scanned_block`, and committing raises
+//! `last_scanned_block` to the top of the scanned range, so every incoming block
+//! number is above anything in `raw_events` and the stored lookup always misses.
 //!
-//! The previous design compared the hashes of *incoming* logs against what was
-//! already stored for the same blocks. That can never fire: a tick only ever
-//! fetches blocks above `last_scanned_block`, and committing sets
-//! `last_scanned_block` to the top of the scanned range — so every incoming
-//! block number is strictly greater than anything in `raw_events`, the stored
-//! lookup always misses, and the check always answers "no reorg". The one test
-//! that exercised it first rewound the cursor by hand, which nothing in the
-//! real loop does.
-//!
-//! Detection has to look *backwards* instead: the cursor records the highest
-//! block whose hash was verified, and a reorg is precisely the case where the
-//! chain no longer reports that hash at that height. From there, walk down
-//! through the hashes already stored until one still matches, and rewind to
-//! just above it.
+//! Instead, the cursor records the highest block whose hash was verified, and a
+//! reorg is the case where the chain no longer reports that hash at that height.
+//! From there the walk descends through the stored hashes until one still
+//! matches, and rewinds to just above it.
 
 use crate::adapters::DynRpc;
 use crate::domain::error::IngesterError;
@@ -24,18 +18,17 @@ use crate::repositories::{AtomicWriteRepo, ChainStateRepo, RawEventRepo};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-/// A block height paired with the hash we believe belongs to it.
+/// A block height paired with the hash recorded for it.
 type Checkpoint = (i64, Vec<u8>);
 
 /// A confirmed fork: what to discard, and the last block known to survive it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Divergence {
-    /// First block that is no longer canonical. Everything from here up is
+    /// First block that is no longer canonical. Everything at or above it is
     /// discarded and re-derived from the chain.
     pub rewind_to: i64,
-    /// Highest block still agreeing with the chain, with its hash. `None` when
-    /// the whole search window diverged, in which case there is no verified
-    /// anchor left to record.
+    /// Highest block still agreeing with the chain, with its hash. `None` when the
+    /// whole search window diverged, leaving no verified anchor to record.
     pub anchor: Option<Checkpoint>,
 }
 
@@ -60,11 +53,11 @@ impl ReorgService {
 
     /// Check that the stored anchor is still on the canonical chain.
     ///
-    /// Costs one `eth_getBlockByNumber` in the common case. Only when that
-    /// disagrees does it walk back, and then at most `max_depth` blocks.
+    /// Costs one `eth_getBlockByNumber` in the common case, and walks back at
+    /// most `max_depth` blocks when that disagrees.
     ///
-    /// `floor` is `start_block`: the ingester never claims to know anything
-    /// below it, so the walk stops there.
+    /// `floor` is `start_block`: the ingester claims no knowledge below it, so
+    /// the walk stops there.
     pub async fn check_anchor(
         &self,
         chain_id: i64,
@@ -97,9 +90,9 @@ impl ReorgService {
             }));
         }
 
-        // Nothing in the window survives. Discard it all and re-derive; the
-        // walk is bounded by `max_depth`, so a deeper fork than that needs a
-        // manual cursor reset rather than an unbounded backwards scan.
+        // Nothing in the window survives, so discard it all and re-derive. The
+        // walk is bounded by `max_depth`, so a deeper fork requires a manual
+        // cursor reset rather than an unbounded backwards scan.
         warn!(
             chain_id,
             anchor_block, limit, "no verified block within reorg_depth; rewinding whole window"
@@ -112,9 +105,9 @@ impl ReorgService {
 
     /// The cursor's verified anchor, if it has one.
     ///
-    /// An empty hash means "no verified block yet" — a fresh chain, or one
-    /// whose scanned range has so far produced no logs. That is not an anchor,
-    /// and treating it as one would compare against a hash that is not a hash.
+    /// An empty hash means no verified block yet: a fresh chain, or one whose
+    /// scanned range has produced no logs. It is not an anchor, and treating it as
+    /// one would compare against bytes that are not a hash.
     async fn stored_anchor(&self, chain_id: i64) -> Result<Option<Checkpoint>, IngesterError> {
         let Some(cursor) = self.chain_state.fetch(chain_id).await? else {
             return Ok(None);
@@ -125,8 +118,8 @@ impl ReorgService {
         Ok(Some((cursor.last_block, cursor.last_block_hash)))
     }
 
-    /// Heights to test, highest first: the anchor, then every stored hash down
-    /// to `limit`. The first one that still matches the chain bounds the fork.
+    /// Heights to test, highest first: the anchor, then every stored hash down to
+    /// `limit`. The first that still matches the chain bounds the fork.
     async fn checkpoints(
         &self,
         chain_id: i64,
@@ -177,11 +170,10 @@ impl ReorgService {
             .await?;
         info!(chain_id, deleted, new_scan, "rewind applied");
 
-        // Consumers stream `raw_events` by ascending id, so they will re-read
-        // the replacement rows on their own — but state they already derived
-        // from the rows just deleted is invisible to that cursor. The durable
-        // record lives in `chain_reorgs`, written inside the same transaction;
-        // this is only the low-latency nudge.
+        // Consumers stream `raw_events` by ascending id and re-read the
+        // replacement rows on their own, but state derived from the deleted rows
+        // is invisible to that cursor. The durable record lives in `chain_reorgs`,
+        // written in the same transaction; this notify only reduces latency.
         if let Err(e) = self
             .raw_events
             .notify_reorg(chain_id, divergence.rewind_to)
@@ -195,7 +187,7 @@ impl ReorgService {
 
 /// Does the chain still report `stored` as the hash at `block`?
 ///
-/// A block the node no longer has counts as "not canonical" — it was almost
+/// A block the node no longer has counts as not canonical, since it was almost
 /// certainly orphaned.
 async fn still_canonical(rpc: &DynRpc, block: i64, stored: &[u8]) -> Result<bool, IngesterError> {
     Ok(rpc
@@ -367,8 +359,8 @@ mod tests {
         assert!(got.is_none(), "same hashes, no reorg");
     }
 
-    /// The common case: the chain replaced the top few blocks. Rewinding must
-    /// target the *lowest* diverged block, not whichever one is noticed first.
+    /// The chain replaced the top few blocks. Rewinding must target the lowest
+    /// diverged block rather than the first one noticed.
     #[tokio::test]
     async fn rewinds_to_the_lowest_diverged_block() {
         let store = FakeStore::seeded(100..=110, 0xa0);
@@ -390,8 +382,8 @@ mod tests {
     }
 
     /// A chain that has committed nothing has no anchor to check. Treating the
-    /// seeded empty hash as one would compare against 0 bytes and "diverge"
-    /// on every tick.
+    /// seeded empty hash as one would compare against zero bytes and report a
+    /// divergence on every tick.
     #[tokio::test]
     async fn an_empty_anchor_is_not_a_divergence() {
         let store = FakeStore::with_cursor(Some(BlockCursor {
@@ -424,7 +416,7 @@ mod tests {
     }
 
     /// Deeper than `reorg_depth`: nothing in the window survives, so the whole
-    /// window goes and there is no anchor left to record.
+    /// window is discarded and no anchor remains to record.
     #[tokio::test]
     async fn a_fork_deeper_than_the_window_discards_the_whole_window() {
         let store = FakeStore::seeded(100..=110, 0xa0);
@@ -440,8 +432,8 @@ mod tests {
         assert!(divergence.anchor.is_none(), "nothing survived to anchor on");
     }
 
-    /// The walk must never propose discarding blocks below `start_block` —
-    /// the ingester never claimed to know them.
+    /// The walk must never propose discarding blocks below `start_block`, which
+    /// the ingester never claimed to know.
     #[tokio::test]
     async fn the_walk_stops_at_the_configured_floor() {
         let store = FakeStore::seeded(100..=110, 0xa0);
@@ -456,12 +448,12 @@ mod tests {
         assert_eq!(divergence.rewind_to, FLOOR);
     }
 
-    /// A pruned or unavailable block is not a survivor. Treating a `None` hash
-    /// as a match would anchor onto a block the node cannot even show us.
+    /// A pruned or unavailable block is not a survivor. Treating a `None` hash as
+    /// a match would anchor onto a block the node cannot produce.
     #[tokio::test]
     async fn a_block_the_node_no_longer_has_is_not_canonical() {
         let store = FakeStore::seeded(100..=110, 0xa0);
-        // Only 100..=105 remain visible; the anchor at 110 is simply gone.
+        // Only 100..=105 remain visible; the anchor at 110 is gone.
         let chain = FakeChain::new(100..=105, 0xa0) as DynRpc;
 
         let divergence = service(&store)

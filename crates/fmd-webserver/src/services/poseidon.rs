@@ -4,11 +4,12 @@ use ark_ff::{BigInteger, PrimeField};
 use fmd_crypto::poseidon;
 use fmd_crypto::tree::Field;
 
-/// Domain-separation tag for Merkle leaf hashing — mirrors `TAG_LEAF` in
-/// `circuits/src/lib/tags.circom`. `leaf = Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`.
+/// Domain-separation tag for Merkle leaf hashing, mirroring `TAG_LEAF` in
+/// `circuits/src/lib/tags.circom`:
+/// `leaf = Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`.
 pub const TAG_LEAF: u64 = 10;
 
-/// Compute the in-circuit Merkle leaf hash from (cm, cv_dep_x, cv_dep_y).
+/// Compute the in-circuit Merkle leaf hash from `(cm, cv_dep_x, cv_dep_y)`.
 pub fn leaf_hash(cm: &Field, cv_dep_x: &Field, cv_dep_y: &Field) -> AppResult<Field> {
     let inputs = [
         Fq::from(TAG_LEAF),

@@ -1,17 +1,16 @@
 //! Bounded-attempt tracking for the flush worker.
 //!
-//! `flushBatch` is all-or-nothing and `pop_pending` always returns the oldest
-//! deposits first, so one deposit that can never land blocks every newer
-//! deposit on its chain — forever, at the cost of a `tree_update_batch`
-//! Groth16 per tick. This gives the pipeline a way to give up on one deposit
-//! instead of on the chain.
+//! `flushBatch` is all-or-nothing and `pop_pending` returns the oldest deposits
+//! first, so one deposit that can never land blocks every newer deposit on its
+//! chain, at the cost of a `tree_update_batch` Groth16 per tick. This lets the
+//! pipeline give up on one deposit rather than on the chain.
 //!
-//! Giving up is safe because a stuck deposit is not lost funds: the payer can
-//! reclaim it with `cancelDeposit` once `cancelDelay` has passed.
+//! Giving up is safe because a stuck deposit is not lost: the payer can reclaim
+//! it with `cancelDeposit` once `cancelDelay` has passed.
 //!
-//! State is deliberately in-memory — the relayer keeps no tables of its own,
-//! and the deterministic rejection classes are re-derived on the next tick by
-//! `FlushPipeline::preflight` anyway.
+//! State is in-memory, since the relayer keeps no tables of its own and
+//! `FlushPipeline::preflight` re-derives the deterministic rejection classes on
+//! the next tick.
 
 use crate::domain::error::AppError;
 use parking_lot::Mutex;
@@ -26,18 +25,18 @@ struct State {
     /// A batch failed and no single deposit could be blamed, so the next tick
     /// flushes one deposit at a time to make the next failure attributable.
     degraded: bool,
-    /// Sticky: some deposit's digest has matched the chain at least once, so
-    /// `deposit_digest` is known to agree with this pool. Until then a
-    /// mismatch is more likely our bug than the deposit's, and quarantining
-    /// on it would take out the whole mempool.
+    /// Sticky: at least one deposit's digest has matched the chain, so
+    /// `deposit_digest` is known to agree with this pool. Until then a mismatch is
+    /// more likely a local bug than the deposit's fault, and quarantining on it
+    /// would take out the whole mempool.
     digest_verified: bool,
 }
 
 pub struct DepositFailures {
     chain_id: i64,
-    /// Attributable failures tolerated before a deposit is skipped. `0`
-    /// disables quarantine entirely; deposits are still dropped from a batch
-    /// by pre-flight, just never remembered.
+    /// Attributable failures tolerated before a deposit is skipped. `0` disables
+    /// quarantine; deposits are still dropped from a batch by pre-flight but never
+    /// remembered.
     max_attempts: u32,
     state: Mutex<State>,
 }
@@ -60,7 +59,7 @@ impl DepositFailures {
         self.state.lock().quarantined.iter().copied().collect()
     }
 
-    /// Stop batching this deposit. `reason` is a fixed string, never node
+    /// Stop batching this deposit. `reason` is a fixed string rather than node
     /// text, so it is safe in a log line and stable enough to alert on.
     pub fn quarantine(&self, id: u64, reason: &str) {
         let mut state = self.state.lock();
@@ -77,9 +76,9 @@ impl DepositFailures {
         self.state.lock().digest_verified
     }
 
-    /// A flush landed: the chain is healthy, so every attempt counted so far
-    /// was more likely batch-level noise than a bad deposit. Quarantines
-    /// stand — those were deterministic judgements, not counted ones.
+    /// A flush landed, so the chain is healthy and every attempt counted so far was
+    /// more likely batch-level noise than a bad deposit. Existing quarantines stand,
+    /// since those were deterministic judgements rather than counted ones.
     pub fn note_success(&self) {
         let mut state = self.state.lock();
         state.attempts.clear();
@@ -98,10 +97,10 @@ impl DepositFailures {
             return;
         }
         let mut state = self.state.lock();
-        // With more than one deposit in the batch there is no way to tell
-        // which one the contract refused, and charging all of them would
-        // quarantine the innocent majority. Shrink the batch instead; the
-        // next failure names its deposit.
+        // With more than one deposit in the batch there is no way to tell which one
+        // the contract refused, and charging all of them would quarantine the
+        // majority. The batch shrinks instead, so the next failure names its
+        // deposit.
         let [id] = ids else {
             self.degrade(&mut state, ids.len(), cause);
             return;
@@ -109,8 +108,8 @@ impl DepositFailures {
         let attempts = state.attempts.entry(*id).or_insert(0);
         *attempts += 1;
         let attempts = *attempts;
-        // `max_attempts == 0` disables quarantine, so the count still runs
-        // and still logs — it just never reaches a verdict.
+        // `max_attempts == 0` disables quarantine, so the count still runs and
+        // logs but never reaches a verdict.
         if self.max_attempts > 0 && attempts >= self.max_attempts {
             self.quarantine_locked(&mut state, *id, "exhausted flush attempts");
         } else {
@@ -138,9 +137,9 @@ impl DepositFailures {
         );
     }
 
-    /// The single place quarantine happens, so `max_attempts == 0` disables
-    /// every path into it — counted and deterministic alike — and every
-    /// quarantine is logged exactly once.
+    /// The one place quarantine happens, so `max_attempts == 0` disables every path
+    /// into it, counted and deterministic alike, and every quarantine is logged
+    /// once.
     fn quarantine_locked(&self, state: &mut State, id: u64, reason: &str) {
         if self.max_attempts == 0 || !state.quarantined.insert(id) {
             return;
@@ -158,14 +157,14 @@ impl DepositFailures {
 /// Whether a failure says anything about the deposits that were in the batch.
 ///
 /// Infrastructure faults must not count: an RPC outage or a busy prover would
-/// otherwise quarantine the entire mempool a few ticks in. `SubmitUnknown`
-/// parks the mirror on its own, and `MirrorDesynced` stops the worker.
+/// otherwise quarantine the entire mempool within a few ticks. `SubmitUnknown`
+/// parks the mirror on its own and `MirrorDesynced` stops the worker.
 ///
-/// The remaining classes can still be batch-level rather than per-deposit —
+/// The remaining classes can still be batch-level rather than per-deposit, since
 /// `StaleOldRoot` and `TreeUpdateRejected` both surface as a revert. Charging
-/// them to the head deposit is tolerable: those states stop the chain flushing
-/// at all, and [`DepositFailures::note_success`] clears the counts as soon as
-/// anything lands again.
+/// them to the head deposit is acceptable: those states stop the chain flushing
+/// at all, and [`DepositFailures::note_success`] clears the counts once anything
+/// lands.
 fn is_batch_attributable(cause: &AppError) -> bool {
     matches!(
         cause,
@@ -224,7 +223,7 @@ mod tests {
         f.note_failure(&[1], &reverted());
         f.note_success();
         assert_eq!(f.batch_limit(8), 8);
-        // The two earlier charges are gone, so this one starts from zero.
+        // The two earlier charges are cleared, so this one starts from zero.
         f.note_failure(&[1], &reverted());
         assert!(f.quarantined_ids().is_empty());
     }
@@ -240,8 +239,8 @@ mod tests {
         assert!(f.quarantined_ids().is_empty());
     }
 
-    /// Degradation is not quarantine, so it still applies with the knob off:
-    /// batching one at a time is how a poison deposit is isolated at all.
+    /// Degradation is not quarantine, so it applies even with quarantine disabled:
+    /// batching one at a time is how a bad deposit is isolated.
     #[test]
     fn zero_max_attempts_still_shrinks_the_batch() {
         let f = DepositFailures::new(1, 0);

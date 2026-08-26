@@ -1,8 +1,8 @@
 //! One chain's HTTP JSON-RPC endpoint.
 //!
-//! This holds what sits underneath a provider: the parsed URL and a
-//! `reqwest::Client` whose clones share a connection pool. Without the shared
-//! client every request pays a fresh TCP + TLS handshake.
+//! Holds what sits underneath a provider: the parsed URL and a `reqwest::Client`
+//! whose clones share a connection pool. Without the shared client every request
+//! pays a fresh TCP and TLS handshake.
 
 use crate::domain::error::{AppError, AppResult};
 use alloy::rpc::client::{ClientBuilder, RpcClient};
@@ -12,43 +12,41 @@ use alloy::transports::layers::{RetryBackoffLayer, RetryBackoffService};
 use std::time::Duration;
 
 /// The transport every provider in this crate is built on. Named because the
-/// retry layer wraps it, and `Submitter` has to spell its provider type out to
-/// hold it in a field.
+/// retry layer wraps it and `Submitter` must spell its provider type out to hold
+/// it in a field.
 pub type HttpTransport = RetryBackoffService<Http<reqwest::Client>>;
 
 /// Deadline for a single JSON-RPC call.
 ///
-/// Every call on the submission path is one fast round trip, so this sits far
-/// above a slow `eth_estimateGas` and far below the OS-level TCP timeout that
-/// would otherwise govern. It has to exist: the per-chain tree-mirror mutex is
-/// held across submission, so an untimed call against a hung node holds that
-/// chain's mutex — and every spend, swap and flush queued behind it —
-/// indefinitely.
+/// Every call on the submission path is one fast round trip, so this sits well
+/// above a slow `eth_estimateGas` and well below the OS-level TCP timeout that
+/// would otherwise govern. It is required because the per-chain tree-mirror mutex
+/// is held across submission: an untimed call against a hung node would hold that
+/// chain's mutex, and every spend, swap and flush queued behind it, indefinitely.
 ///
-/// Unrelated to `receipt_timeout_s`, which bounds a *loop* of short polls
-/// rather than any single call.
+/// Unrelated to `receipt_timeout_s`, which bounds a loop of short polls rather
+/// than any single call.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Deadline for reaching the node at all, as opposed to hearing back from it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Retry budget for a call the node failed to answer.
 ///
-/// A single transient 5xx used to fail the whole submission *and* roll the
-/// tree mirror back. `RateLimitRetryPolicy` reads wider than its name: it
-/// retries any transport-level error alloy marks retryable, not just 429s.
+/// Without retries a single transient 5xx fails the whole submission and rolls
+/// the tree mirror back. `RateLimitRetryPolicy` is broader than its name: it
+/// retries any transport-level error alloy marks retryable, not only 429s.
 ///
-/// Retrying is safe on this path. Reads are idempotent, and the one write —
-/// `eth_sendRawTransaction` — carries an already-signed transaction, so a
-/// resend has the same hash and a node that already holds it answers "already
-/// known" rather than broadcasting twice.
+/// Retrying is safe on this path. Reads are idempotent, and the one write,
+/// `eth_sendRawTransaction`, carries an already-signed transaction, so a resend
+/// has the same hash and a node that already holds it answers "already known"
+/// rather than broadcasting twice.
 ///
-/// Worst case for one logical call is therefore `REQUEST_TIMEOUT * (1 +
-/// RETRIES)` plus backoff — bounded, and comfortably inside the router's own
-/// request deadline.
+/// Worst case for one logical call is `REQUEST_TIMEOUT * (1 + RETRIES)` plus
+/// backoff, which stays inside the router's own request deadline.
 const RETRIES: u32 = 3;
 const RETRY_BACKOFF_MS: u64 = 200;
-/// Only used to pace retries after a rate-limit response; generous enough not
-/// to throttle the relayer's own modest call volume.
+/// Paces retries after a rate-limit response, set high enough not to throttle the
+/// relayer's own call volume.
 const COMPUTE_UNITS_PER_SECOND: u64 = 500;
 
 #[derive(Debug, Clone)]
@@ -70,13 +68,13 @@ impl RpcEndpoint {
         Ok(Self { url, http })
     }
 
-    /// A fresh RPC client over the shared connection pool. Feed it to
-    /// `ProviderBuilder::on_client` — once, at construction: the fillers built
-    /// on top of it cache per-provider state.
+    /// A fresh RPC client over the shared connection pool. Pass it to
+    /// `ProviderBuilder::on_client` once, at construction: the fillers built on
+    /// top of it cache per-provider state.
     pub fn client(&self) -> RpcClient<HttpTransport> {
-        /// Alloy's `is_local` flag, which only picks a default poll interval
-        /// (250 ms local, 7 s remote). Submitters override it anyway; leaving
-        /// it remote keeps the conservative default for those that do not.
+        /// Alloy's `is_local` flag, which only selects a default poll interval:
+        /// 250 ms local, 7 s remote. Submitters override it, so leaving it remote
+        /// keeps the conservative default for those that do not.
         const IS_LOCAL: bool = false;
 
         ClientBuilder::default()

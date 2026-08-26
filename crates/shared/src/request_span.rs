@@ -1,28 +1,23 @@
 //! Request span shared by every webserver's `TraceLayer`.
 //!
-//! Separate from [`crate::http`], which owns the error mapping: these are both
-//! webserver plumbing but they answer to different concerns, and the span
-//! carries the larger explanation.
+//! Separate from [`crate::http`], which owns the error mapping.
 
 use axum::http::Request;
 use tower_http::classify::{ServerErrorsAsFailures, SharedClassifier};
 use tower_http::trace::{MakeSpan, TraceLayer};
 use tracing::{Span, info_span};
 
-/// Builds a request span carrying the method and path — never the query string.
+/// Builds a request span carrying the method and path, never the query string.
 ///
-/// `tower_http`'s `DefaultMakeSpan` records the full URI. Query strings here
-/// are per-caller access patterns: `after` on `/v1/matches` is where in the
-/// note feed one wallet has reached, and a sequence of them describes that
-/// wallet's sync history. It records at DEBUG, so it is off under the default
-/// `info` filter — but a single `RUST_LOG=debug` during an incident turns
-/// query-string logging on across every service at once, which is exactly when
-/// nobody is thinking about it.
-///
-/// The path alone is enough to debug routing.
+/// `tower_http`'s `DefaultMakeSpan` records the full URI. Query strings here are
+/// per-caller access patterns: `after` on `/v1/matches` is a wallet's position
+/// in the note feed, and a sequence of them describes that wallet's sync
+/// history. `DefaultMakeSpan` records at DEBUG, so a single `RUST_LOG=debug`
+/// would enable query-string logging across every service at once. The path
+/// alone is sufficient to debug routing.
 ///
 /// Generic over the body type rather than pinned to `axum::body::Body`, so it
-/// composes with a `TraceLayer` anywhere in a stack, not only at the top.
+/// composes with a `TraceLayer` anywhere in a stack.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PathOnly;
 
@@ -34,14 +29,14 @@ impl<B> MakeSpan<B> for PathOnly {
 
 /// The layer type [`trace_layer`] returns.
 ///
-/// Named so a router can store or pass one without spelling out
-/// `tower_http`'s classifier generics.
+/// Named so a router can store or pass one without spelling out `tower_http`'s
+/// classifier generics.
 pub type PathOnlyTrace = TraceLayer<SharedClassifier<ServerErrorsAsFailures>, PathOnly>;
 
 /// `TraceLayer` that records the path only.
 ///
-/// The one call every router should use — `.layer(shared::request_span::trace_layer())`
-/// — so a new webserver cannot pick up `DefaultMakeSpan` by omission.
+/// Every router should use `.layer(shared::request_span::trace_layer())` so a
+/// new webserver cannot pick up `DefaultMakeSpan` by omission.
 pub fn trace_layer() -> PathOnlyTrace {
     TraceLayer::new_for_http().make_span_with(PathOnly)
 }
@@ -55,8 +50,8 @@ mod tests {
 
     /// Collects what the `fmt` layer writes.
     ///
-    /// The guarantee under test is about what reaches a log sink, and a span's
-    /// fields are only rendered there — a `Span` handle exposes no way to read
+    /// The guarantee under test concerns what reaches a log sink. A span's
+    /// fields are rendered only there; a `Span` handle exposes no way to read
     /// back what was recorded on it.
     #[derive(Clone, Default)]
     struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -105,9 +100,8 @@ mod tests {
         assert!(out.contains("GET"), "method missing: {out}");
     }
 
-    /// The reason this type exists, stated as the cases that motivated it: a
-    /// paging cursor, a chain id, and an address that reached a URL despite the
-    /// POST-only convention on `/v1/screen`.
+    /// Covers a paging cursor, a chain id, and an address reaching a URL
+    /// despite the POST-only convention on `/v1/screen`.
     #[test]
     fn omits_the_query_string() {
         const ADDRESS: &str = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";

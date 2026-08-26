@@ -11,8 +11,8 @@ async fn main() -> Result<()> {
 
     let cfg = RiskWebserverConfig::from_env()?;
 
-    // Unlike the other webservers this one migrates: no indexer touches
-    // `screened_addresses`, so nothing else would ever create it.
+    // Unlike the other webservers this one runs migrations: no indexer touches
+    // `screened_addresses`, so nothing else would create it.
     let migrate_url = cfg.database_url.clone();
     tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
         .await

@@ -1,17 +1,21 @@
-// Fiat-Shamir challenge derivation for `tree_update_batch.circom`.
-// Mirrors `contracts/src/libs/PubInputs.sol :: compress(TreeUpdateBatch)`
-// so the relayer feeds the same `z` to the prover that the contract derives
-// from calldata. Every array is leaf-indexed; coefficient layout
-// (4 + 6*MAX_L_BATCH = 28 entries):
-//   [0]                                  oldRoot
-//   [1]                                  newRoot
-//   [2]                                  startIndex
-//   [3]                                  actualCount
-//   [4 .. 3 + MAX_L]                     cms[0 .. MAX_L-1]
-//   [4 + MAX_L .. 3 + 3*MAX_L]           cvDeps flat (x0,y0,x1,y1,...)
-//   [4 + 3*MAX_L .. 3 + 4*MAX_L]         leafAsset[0..MAX_L-1]
-//   [4 + 4*MAX_L .. 3 + 5*MAX_L]         leafPublicIn[0..MAX_L-1]
-//   [4 + 5*MAX_L .. 3 + 6*MAX_L]         isDeposit[0..MAX_L-1]
+//! Fiat-Shamir challenge derivation for `tree_update_batch.circom`.
+//!
+//! Mirrors `contracts/src/libs/PubInputs.sol :: compress(TreeUpdateBatch)` so the
+//! relayer feeds the prover the same `z` the contract derives from calldata.
+//! Every array is leaf-indexed. Coefficient layout, `4 + 6 * MAX_L_BATCH`
+//! entries:
+//!
+//! ```text
+//! [0]                            oldRoot
+//! [1]                            newRoot
+//! [2]                            startIndex
+//! [3]                            actualCount
+//! [4 .. 3 + MAX_L]               cms[0 .. MAX_L-1]
+//! [4 + MAX_L .. 3 + 3*MAX_L]     cvDeps flattened (x0, y0, x1, y1, …)
+//! [4 + 3*MAX_L .. 3 + 4*MAX_L]   leafAsset[0 .. MAX_L-1]
+//! [4 + 4*MAX_L .. 3 + 5*MAX_L]   leafPublicIn[0 .. MAX_L-1]
+//! [4 + 5*MAX_L .. 3 + 6*MAX_L]   isDeposit[0 .. MAX_L-1]
+//! ```
 
 use crate::adapters::calldata::{MAX_L_BATCH, PaddedBatch};
 use crate::adapters::parse::BN254_R;
@@ -47,25 +51,24 @@ mod tests {
     //! `circuits/vectors/tree-update-batch-4.json` (schema
     //! `lelantos.circuits.vectors/1`, template `TreeUpdateBatch(10, 4)`).
     //!
-    //! `compute_z` mirrors `PubInputs.compress(TreeUpdateBatch)`, and the
-    //! circuit Horner-evaluates the same 28 coefficients at the same `z`. All
-    //! three must agree, so pinning the published vectors here catches a
-    //! layout drift that would otherwise surface only on-chain — as
-    //! `TreeUpdateRejected` on the flush path, and as `ProofRejected` on a
-    //! spend, whose two proofs the batched verifier checks in one pairing and
-    //! cannot attribute.
+    //! `compute_z` mirrors `PubInputs.compress(TreeUpdateBatch)`, and the circuit
+    //! Horner-evaluates the same coefficients at the same `z`. All three must
+    //! agree, so pinning the published vectors catches a layout drift that would
+    //! otherwise surface only on-chain: as `TreeUpdateRejected` on the flush path,
+    //! and as `ProofRejected` on a spend, whose two proofs the batched verifier
+    //! checks in one pairing and cannot attribute.
     //!
     //! Held as a table rather than one test per vector: the vectors are data
-    //! published by another repo, so re-syncing them should be a diff of rows,
-    //! not of code. `name` carries the identity into the failure message, and
-    //! the array's declared length makes a row dropped in a re-sync a compile
-    //! error rather than a silently shorter loop.
+    //! published by another repo, so re-syncing them is a diff of rows rather than
+    //! of code. `name` carries the identity into the failure message, and the
+    //! array's declared length makes a row dropped in a re-sync a compile error
+    //! rather than a shorter loop.
 
     use super::*;
     use alloy::primitives::FixedBytes;
 
-    /// One published vector, in the JSON's own decimal-string form so a row
-    /// can be copied across without reformatting.
+    /// One published vector, in the JSON's own decimal-string form so a row can be
+    /// copied across without reformatting.
     struct Vector {
         name: &'static str,
         old_root: &'static str,

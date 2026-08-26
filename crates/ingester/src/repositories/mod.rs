@@ -16,8 +16,8 @@ pub(crate) type PooledConn<'a> =
 
 /// Check a connection out of the pool.
 ///
-/// Exists so repositories can say `checkout(&self.pool).await?` instead of
-/// repeating a `map_err` over bb8's generic error type on every statement.
+/// Lets repositories write `checkout(&self.pool).await?` rather than repeating a
+/// `map_err` over bb8's generic error type on every statement.
 pub(crate) async fn checkout(pool: &DbPool) -> Result<PooledConn<'_>, IngesterError> {
     Ok(pool.get().await?)
 }

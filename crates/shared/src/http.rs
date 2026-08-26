@@ -1,8 +1,7 @@
 //! Shared HTTP plumbing for webserver crates.
 //!
-//! Owns the canonical `AppError` + `IntoResponse` mapping. Caches and
-//! `AppState` stay per-crate because they reference crate-local response
-//! types.
+//! Owns the canonical `AppError` and its `IntoResponse` mapping. Caches and
+//! `AppState` stay per-crate because they reference crate-local response types.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -28,10 +27,10 @@ pub enum AppError {
 const INTERNAL_BODY: &str = "internal server error";
 
 impl IntoResponse for AppError {
-    /// 4xx bodies echo the message: it describes the caller's own input.
-    /// 5xx bodies do not — `Db` carries the raw driver string, which leaks
-    /// table, column and constraint names and sometimes the failing value.
-    /// That detail goes to the log instead.
+    /// 4xx bodies echo the message, which describes the caller's own input. 5xx
+    /// bodies do not: `Db` carries the raw driver string, exposing table, column
+    /// and constraint names and sometimes the failing value. That detail goes to
+    /// the log instead.
     fn into_response(self) -> Response {
         match &self {
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()).into_response(),

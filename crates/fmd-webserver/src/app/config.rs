@@ -5,10 +5,10 @@ use serde::Deserialize;
 pub struct FmdWebserverConfig {
     pub database_url: String,
     pub bind_addr: String,
-    /// Where `/metrics` is served. Defaults to loopback, which is right for a
-    /// bare process; under compose this is set to `0.0.0.0:<port>` and the
-    /// *host* publish is what restricts it to loopback (see
-    /// `shared::metrics::init` for why the bind itself cannot enforce that).
+    /// Where `/metrics` is served. Defaults to loopback, which suits a bare
+    /// process. Under compose this is set to `0.0.0.0:<port>` and the host publish
+    /// restricts it to loopback; see `shared::metrics::init` for why the bind
+    /// cannot enforce that itself.
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
     #[serde(default = "default_lag_warn")]

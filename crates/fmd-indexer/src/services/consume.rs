@@ -1,8 +1,8 @@
 //! Drain ingested clue events into the FMD pipeline.
 //!
-//! Serialised per chain by a Postgres advisory lock: every write below is a
-//! read-then-write with no transaction — the cursor, and `spent_nullifiers`
-//! ordinal assignment — and silently corrupts under a second writer.
+//! Serialised per chain by a Postgres advisory lock. Every write below is a
+//! read-then-write with no transaction — the cursor and the `spent_nullifiers`
+//! ordinal assignment — and corrupts under a second writer.
 
 use crate::adapters::locks::ChainLocks;
 use crate::domain::error::Result;
@@ -32,9 +32,10 @@ const KINDS: [i16; 4] = [
     EventKind::DepositFlushed as i16,
 ];
 
-/// How far the window may be widened when a saturated one is entirely
-/// occupied by a tx that cannot fit in it. A tx needing more than 16×`batch`
-/// rows is not a batch-sizing problem, so stop and let the stall alarm fire.
+/// How far the window may be widened when a saturated one is entirely occupied by
+/// a transaction that cannot fit. A transaction needing more than 16 times
+/// `batch` rows is not a batch-sizing problem, so widening stops and the stall
+/// alarm fires.
 const MAX_WINDOW_GROWTH: i64 = 16;
 
 /// Consecutive no-progress ticks before deferral is treated as a stall rather
@@ -54,23 +55,23 @@ pub trait ConsumeService: Send + Sync {
 enum Planned {
     /// Nothing queued past the cursor.
     Drained,
-    /// Rows are queued, but the tx at the head is not fully observed.
+    /// Rows are queued, but the transaction at the head is not fully observed.
     Incomplete { rows: usize },
     Ready {
         plan: CommitPlan,
-        /// The window came back full, so more rows are queued behind this
-        /// commit. Drives [`TickProgress::Saturated`].
+        /// The window came back full, so more rows are queued behind this commit.
+        /// Drives [`TickProgress::Saturated`].
         window_full: bool,
         /// `block_ts` of the newest row this plan commits, for the event-age
-        /// histogram. Carried here rather than added to [`CommitPlan`] so the
-        /// pure planning domain stays about commits, not instrumentation.
+        /// histogram. Carried here rather than in [`CommitPlan`] to keep the
+        /// planning domain free of instrumentation.
         last_block_ts: Option<i64>,
     },
 }
 
 pub struct ConsumeServiceImpl {
-    /// Needed directly for reorg retraction, which spans several derived
-    /// tables and so has no single repository to sit behind.
+    /// Used directly for reorg retraction, which spans several derived tables and
+    /// so has no single repository behind it.
     pool: database::DbPool,
     cursors: Arc<dyn CursorRepo>,
     raw_events: Arc<dyn RawEventsRepo>,
@@ -103,9 +104,9 @@ impl ConsumeServiceImpl {
     /// Plan the next commit, widening the window while a saturated one keeps
     /// yielding nothing.
     ///
-    /// A tx is committable only once all of its events sit in one window, and
-    /// re-ticking fetches the same rows — so a tx wider than `batch` would
-    /// otherwise never commit, and never say why.
+    /// A transaction is committable only once all its events sit in one window,
+    /// and re-ticking fetches the same rows, so a transaction wider than `batch`
+    /// would otherwise never commit.
     async fn plan_next(&self, chain_id: i64, after: i64, batch: i64) -> Result<Planned> {
         let mut limit = batch;
         loop {
@@ -141,13 +142,13 @@ impl ConsumeServiceImpl {
 
     /// `block_ts` of the newest row `plan` actually commits.
     ///
-    /// The plan stops at a tx boundary inside the window, so this is the row it
-    /// ends on rather than the newest row read.
+    /// The plan stops at a transaction boundary inside the window, so this is the
+    /// row it ends on rather than the newest row read.
     ///
-    /// `None` means `plan.last_event_id` was absent from the window it was
-    /// built from, which would be a bug. Reported by omitting the sample: a
-    /// `0` here is a 1970 timestamp, which the histogram would record as a
-    /// ~56-year event age and quietly ruin every percentile drawn from it.
+    /// `None` means `plan.last_event_id` was absent from the window it was built
+    /// from, which is a bug. The sample is omitted rather than defaulted: a `0`
+    /// is a 1970 timestamp, which the histogram would record as a ~56-year event
+    /// age and distort every percentile.
     fn committed_block_ts(rows: &[RawEventRow], plan: &CommitPlan) -> Option<i64> {
         rows.iter()
             .find(|r| r.id == plan.last_event_id)
@@ -170,9 +171,8 @@ impl ConsumeServiceImpl {
         let mut out = EscrowedMap::with_capacity(escrowed.len());
         for row in &escrowed {
             match decode_escrowed(row) {
-                // `fetch_escrowed_by_ids` orders by id, so a re-used deposit
-                // id resolves to its earliest escrow — deterministically, and
-                // identically on every replica.
+                // `fetch_escrowed_by_ids` orders by id, so a re-used deposit id
+                // resolves to its earliest escrow, identically on every replica.
                 Some((id, payload)) => {
                     out.entry(id).or_insert(payload);
                 }
@@ -185,9 +185,9 @@ impl ConsumeServiceImpl {
     async fn commit(&self, chain_id: i64, plan: CommitPlan) -> Result<()> {
         self.notes.insert_batch(&plan.notes).await?;
         self.spent_nfs.insert_batch(&plan.spent_nfs).await?;
-        // Monotonic: never drag the cursor backwards if a peer is ahead. The
-        // reset in `tick_chain` deliberately stays on plain `upsert` —
-        // rewinding is its whole purpose.
+        // Monotonic, so a peer that is ahead is never dragged backwards. The
+        // reset in `tick_chain` uses plain `upsert` because rewinding is its
+        // purpose.
         let advanced = self
             .cursors
             .upsert_monotonic(UpsertCursor {
@@ -198,11 +198,10 @@ impl ConsumeServiceImpl {
             })
             .await?;
         if !advanced {
-            // This tick holds the chain's advisory lock, so nothing else
-            // should be able to move this cursor. A rejected advance means a
-            // second writer got the lock — the rows above were still written,
-            // so the damage is duplicate work rather than loss, but it must
-            // not pass silently.
+            // This tick holds the chain's advisory lock, so nothing else should
+            // move this cursor. A rejected advance means a second writer holds
+            // the lock; the rows above were written, so the cost is duplicate
+            // work rather than loss, but it must be reported.
             error!(
                 chain_id,
                 last_event_id = plan.last_event_id,
@@ -246,9 +245,9 @@ impl ConsumeServiceImpl {
         Ok(())
     }
 
-    /// Rewind a cursor that points past the end of `raw_events` — the table
-    /// was truncated or re-ingested under us, and every read would come back
-    /// empty forever otherwise.
+    /// Rewind a cursor pointing past the end of `raw_events`, which happens when
+    /// the table has been truncated or re-ingested. Without the reset every read
+    /// comes back empty.
     async fn reset_cursor(&self, chain_id: i64) -> Result<()> {
         warn!(chain_id, "cursor ahead of raw_events.max_id; reset to 0");
         self.cursors
@@ -267,9 +266,9 @@ impl ConsumeServiceImpl {
 impl ConsumeService for ConsumeServiceImpl {
     async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
         // A standby replica has nothing to do; idling lets the backoff grow
-        // instead of polling the lock at full speed.
+        // rather than polling the lock at full speed.
         let leader = self.locks.is_leader(chain_id).await?;
-        // Gauged on both branches: failover is otherwise only visible as one
+        // Gauged on both branches: failover would otherwise appear only as a
         // replica going quiet, which is indistinguishable from a stall.
         metrics::gauge!(
             shared::metrics::name::CHAIN_LEADER,
@@ -280,14 +279,13 @@ impl ConsumeService for ConsumeServiceImpl {
             return Ok(TickProgress::Idle);
         }
 
-        // Retract before reading. Replacement rows for a reorged range come
-        // back with fresh, higher ids and replay on their own, but the notes
-        // and nullifiers derived from the *deleted* rows sit below the cursor
-        // where nothing revisits them — leaving the tree describing a branch
-        // that no longer exists. Applying the reorg log first drops those and
-        // rewinds the cursor so the replay rebuilds them.
-        // Retracting rewinds the cursor, so the replay is work queued right
-        // now — come straight back rather than sleeping on it.
+        // Retract before reading. Replacement rows for a reorged range come back
+        // with fresh, higher ids and replay on their own, but the notes and
+        // nullifiers derived from the deleted rows sit below the cursor where
+        // nothing revisits them, leaving the tree describing an abandoned branch.
+        // Applying the reorg log first drops those and rewinds the cursor so the
+        // replay rebuilds them, which is queued work rather than a reason to
+        // sleep.
         let reorgs = database::reorg::apply_pending(&self.pool, NAME, chain_id).await?;
         if reorgs > 0 {
             metrics::counter!(
@@ -324,7 +322,7 @@ impl ConsumeService for ConsumeServiceImpl {
         match self.plan_next(chain_id, after, batch).await? {
             Planned::Drained => Ok(TickProgress::Idle),
             // The cursor did not move. Reporting progress here would spin the
-            // driver at zero delay against a tx it cannot yet commit.
+            // driver at zero delay against a transaction it cannot yet commit.
             Planned::Incomplete { rows } => {
                 self.stalls.record_idle(chain_id, after, rows).await;
                 Ok(TickProgress::Idle)
@@ -348,8 +346,8 @@ impl ConsumeService for ConsumeServiceImpl {
         match self.cursors.list_chain_ids().await {
             Ok(ids) => ids,
             Err(e) => {
-                // An empty list is indistinguishable from "no chains
-                // configured", so the loop would idle silently.
+                // An empty list is indistinguishable from no chains being
+                // configured, so the failure is logged rather than idled through.
                 warn!(error = %e, "list_chain_ids failed; skipping this round");
                 Vec::new()
             }
@@ -372,7 +370,7 @@ impl shared::tick::TickService for ConsumeServiceImpl {
     }
 }
 
-/// `DepositFlushed` topic1 = deposit id, 32B big-endian.
+/// `DepositFlushed` topic 1 is the deposit id, 32 bytes big-endian.
 fn flushed_deposit_ids(rows: &[RawEventRow]) -> Vec<Vec<u8>> {
     let flushed = EventKind::DepositFlushed.as_i16();
     let mut ids: Vec<Vec<u8>> = rows
@@ -391,9 +389,9 @@ fn decode_escrowed(row: &RawEventRow) -> Option<(String, EscrowedLeaves)> {
         row.data.clone().into(),
     );
     let ev = DepositEscrowed::decode_log_data(&log, true).ok()?;
-    // The fee note is a real leaf with its own FMD payload, so it is scanned
-    // like any other — the relayer detects its own note by trial decryption,
-    // exactly as a wallet does.
+    // The fee note is a leaf with its own FMD payload and is scanned like any
+    // other; the relayer detects its own note by trial decryption, as a wallet
+    // does.
     let leaves = EscrowedLeaves {
         principal: LeafPayload {
             cm: ev.cm.0.to_vec(),
@@ -421,9 +419,8 @@ fn decode_escrowed(row: &RawEventRow) -> Option<(String, EscrowedLeaves)> {
 
 /// How long each chain has been parked on the same cursor.
 ///
-/// Deferring a tx is normal for one tick and a silent outage after a thousand;
-/// this is what tells the two apart. Nothing else would: the tick returns
-/// `Ok(())` either way.
+/// Deferring a transaction is normal for one tick and an outage after a thousand.
+/// The tick returns `Ok(())` either way, so this counter distinguishes them.
 #[derive(Default)]
 struct StallTracker(Mutex<HashMap<i64, Stall>>);
 
@@ -509,7 +506,7 @@ mod tests {
 
         let ids = flushed_deposit_ids(&rows);
 
-        // topics[0] is the event signature; the id is topics[1], 32B BE.
+        // topics[0] is the event signature; the id is topics[1], 32 bytes BE.
         let expect = |n: u64| U256::from(n).to_be_bytes::<32>().to_vec();
         assert_eq!(ids.len(), 2, "sorted and deduped");
         assert!(ids.contains(&expect(7)) && ids.contains(&expect(9)));
@@ -517,7 +514,7 @@ mod tests {
 
     #[test]
     fn flushed_deposit_ids_tolerates_a_log_with_no_indexed_topic() {
-        // A malformed row must be skipped, not panic on `topics[1]`.
+        // A malformed row must be skipped rather than panic on `topics[1]`.
         let rows = [row(1, EventKind::DepositFlushed, Vec::new(), Vec::new())];
 
         assert!(flushed_deposit_ids(&rows).is_empty());
@@ -525,8 +522,8 @@ mod tests {
 
     #[test]
     fn decode_escrowed_keys_the_payload_by_decimal_deposit_id() {
-        // `plan_commit` looks the payload up by `U256::to_string()`, so the
-        // key this produces has to be decimal, not hex or big-endian bytes.
+        // `plan_commit` looks the payload up by `U256::to_string()`, so this key
+        // must be decimal rather than hex or big-endian bytes.
         let ev = chain_types::abi::DepositEscrowed {
             id: U256::from(42u64),
             payer: Default::default(),
@@ -567,9 +564,9 @@ mod tests {
         assert_eq!(id, "42");
         assert_eq!(payload.principal.cm, vec![0xcc; 32]);
         assert_eq!(payload.principal.ciphertext, vec![0x00, 0x07]);
-        // The fee leaf is carried in the same event and must land in the
-        // second slot: the tree inserts it after the principal, so a swap
-        // gives both notes the wrong leaf index.
+        // The fee leaf is carried in the same event and must land in the second
+        // slot: the tree inserts it after the principal, so a swap gives both
+        // notes the wrong leaf index.
         assert_eq!(payload.fee.cm, vec![0xdd; 32]);
         assert_eq!(payload.fee.ciphertext, vec![0x00, 0x09]);
     }

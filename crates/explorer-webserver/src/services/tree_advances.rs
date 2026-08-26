@@ -65,10 +65,9 @@ pub async fn tx_counts(
 const HOURS: usize = 24;
 
 /// Oldest hour bucket of the window, and the slot-0 anchor the SQL projects
-/// against. Anchored on the hour containing `now_ts` so that hour lands in
-/// slot 23: anchoring on `now_ts - 86_400` instead spans 25 distinct hours,
-/// and the newest one has nowhere to go but slot 23 alongside the hour
-/// before it.
+/// against. Anchored on the hour containing `now_ts` so that hour lands in slot
+/// 23; anchoring on `now_ts - 86_400` would span 25 distinct hours and force the
+/// newest into slot 23 alongside the hour before it.
 fn window_start(now_ts: i64) -> i64 {
     let current_hour = now_ts.div_euclid(3600) * 3600;
     current_hour - (HOURS as i64 - 1) * 3600
@@ -88,14 +87,12 @@ fn empty_chain(chain_id: i64) -> ChainFlowOut {
 /// One entry per indexed chain, hottest first.
 ///
 /// Every chain in `indexed` is emitted, at zero when it saw no insertions in the
-/// window: a chain that is scanned and quiet is a fact worth reporting, and
-/// omitting it left a client unable to tell it from a chain nobody indexes. A
-/// chain carrying rows is emitted whether or not it is in `indexed`, because
-/// dropping data to match a list is worse than an unexpected entry.
+/// window, so a client can distinguish a scanned but quiet chain from an
+/// unindexed one. A chain carrying rows is emitted whether or not it appears in
+/// `indexed`, so no data is dropped to match the list.
 ///
-/// Rows outside the window are dropped, not clamped — a clamped slot adds a
-/// foreign hour's count to an edge bucket, which reads as real activity in that
-/// hour.
+/// Rows outside the window are dropped rather than clamped: a clamped slot would
+/// add a foreign hour's count to an edge bucket and read as real activity.
 fn fold_chain_flows(
     rows: Vec<tree_advances::ChainFlow24hRow>,
     indexed: Vec<i64>,
@@ -119,7 +116,7 @@ fn fold_chain_flows(
     }
     let mut out: Vec<ChainFlowOut> = map.into_values().collect();
     // Chain id breaks ties so the quiet chains, all at zero, keep a stable order
-    // between requests instead of shuffling under the reader.
+    // between requests.
     out.sort_by_key(|b| (std::cmp::Reverse(b.tx_count), b.chain_id));
     out
 }
@@ -201,7 +198,7 @@ mod tests {
 
     #[test]
     fn an_indexed_chain_with_no_insertions_reports_zero_rather_than_vanishing() {
-        // Quiet is a measurement; absent reads as "nobody indexes this chain".
+        // A quiet chain is a measurement; an absent one reads as unindexed.
         let out = fold_chain_flows(vec![row(1, 0, 5)], vec![1, 10, 42161]);
         assert_eq!(chain_ids(&out), vec![1, 10, 42161]);
         let quiet = &out[1];
@@ -217,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_chain_with_rows_is_kept_even_when_it_is_not_in_the_indexed_list() {
-        // Dropping data to match a list is worse than an unexpected entry.
+        // Rows are never dropped to match the indexed list.
         let out = fold_chain_flows(vec![row(99, 0, 4)], vec![1]);
         assert_eq!(chain_ids(&out), vec![99, 1]);
     }

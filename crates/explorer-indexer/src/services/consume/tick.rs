@@ -14,8 +14,9 @@ use tracing::{debug, warn};
 
 pub const NAME: &str = "explorer";
 
-/// Public stats + deposit-escrow ledger. NoteCreated is FMD-zone
-/// (fmd-indexer consumes it). NullifierConsumed lives there too.
+/// Kinds backing the public stats and the deposit-escrow ledger. `NoteCreated`
+/// and `NullifierConsumed` belong to the FMD zone and are consumed by
+/// fmd-indexer.
 const KINDS: [i16; 6] = [
     EventKind::AssetRegistered as i16,
     EventKind::RootAdvanced as i16,
@@ -33,22 +34,21 @@ pub struct ConsumeCtx {
     pub token_meta: Arc<HashMap<i64, DynTokenMetadata>>,
 }
 
-/// How many assets one tick will try to resolve. The registry is small and
-/// only grows on `AssetRegistered`, so this is a throttle on retry storms
-/// when an RPC is down, not a paging mechanism.
+/// How many assets one tick tries to resolve. The registry is small and grows
+/// only on `AssetRegistered`, so this throttles retry storms while an RPC is
+/// down rather than serving as a paging mechanism.
 const METADATA_PER_TICK: i64 = 16;
 
 /// Fill in `decimals` and `symbol` for assets that do not have them yet.
 ///
-/// Runs outside the event path on purpose: `AssetRegistered` carries neither,
-/// and doing the RPC reads inline would let a flaky endpoint stall event
-/// consumption or, worse, drop the values permanently. Sweeping instead means
-/// a failed read is simply retried next tick, and it repairs rows that predate
-/// these columns.
+/// Runs outside the event path: `AssetRegistered` carries neither column, and
+/// inline RPC reads would let a flaky endpoint stall event consumption or drop
+/// the values permanently. Sweeping retries a failed read on the next tick and
+/// repairs rows that predate these columns.
 ///
-/// Each column is fetched only when absent and written only when resolved, so
-/// a token whose `symbol()` reverts still gets its decimals, and neither read
-/// can clear the other's stored value.
+/// Each column is fetched only when absent and written only when resolved, so a
+/// token whose `symbol()` reverts still gets its decimals, and neither read can
+/// clear the other's stored value.
 async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
     let Some(rpc) = ctx.token_meta.get(&chain_id) else {
         return;
@@ -72,8 +72,8 @@ async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
         if row.decimals.is_none() {
             match rpc.decimals(token).await {
                 Ok(d) => meta.decimals = Some(i16::from(d)),
-                // Left NULL and retried next tick rather than defaulted:
-                // assuming 18 would silently misreport every amount.
+                // Left NULL and retried next tick rather than defaulted;
+                // assuming 18 would misreport every amount.
                 Err(e) => warn!(chain_id, asset_id_u64, "decimals() failed: {}", e),
             }
         }
@@ -101,12 +101,11 @@ async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
 pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<TickProgress> {
     let cursors = PostgresCursorRepo::new(ctx.pool.clone());
 
-    // Retract before reading. The replacement rows for a reorged range come
-    // back with fresh, higher ids and so replay on their own, but the stats
-    // and ledger rows derived from the *deleted* rows sit below the cursor
-    // where nothing revisits them. Applying the reorg log first drops those
-    // and rewinds the cursor so the replay rebuilds them.
-    // Retracting rewinds the cursor, so the replay is work queued right now.
+    // Retract before reading. Replacement rows for a reorged range come back
+    // with fresh, higher ids and replay on their own, but the stats and ledger
+    // rows derived from the deleted rows sit below the cursor where nothing
+    // revisits them. Applying the reorg log first drops those and rewinds the
+    // cursor so the replay rebuilds them, which is queued work.
     if database::reorg::apply_pending(&ctx.pool, NAME, chain_id).await? > 0 {
         return Ok(TickProgress::Saturated);
     }
@@ -121,8 +120,8 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<T
 
     let rows = raw_events::batch_after(&ctx.pool, chain_id, after, &KINDS, batch).await?;
     if rows.is_empty() {
-        // Still sweep: a previous attempt may have failed, and an idle chain
-        // is exactly when there is room to retry.
+        // Sweep anyway: a previous attempt may have failed, and an idle chain
+        // has room to retry.
         fill_missing_metadata(ctx, chain_id).await;
         return Ok(TickProgress::Idle);
     }
@@ -159,9 +158,8 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<T
         warn!(chain_id, "tree_advances_hourly refresh failed: {}", e);
     }
     if asset_moved_seen {
-        // Both views derive from the rows this tick just wrote. Independently
-        // logged and independently attempted: a failure on one is not a reason
-        // to leave the other stale.
+        // Both views derive from the rows this tick wrote. Attempted and logged
+        // independently so a failure on one does not leave the other stale.
         if let Err(e) = asset_flows::refresh_hourly_mv(&ctx.pool).await {
             warn!(chain_id, "asset_flows_hourly refresh failed: {}", e);
         }

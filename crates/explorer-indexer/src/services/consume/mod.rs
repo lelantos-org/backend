@@ -1,7 +1,7 @@
 //! Explorer consume service.
 //!
-//! Wraps the per-chain tick logic in a trait so the binary main can run it
-//! through `shared::tick`, mirroring fmd-indexer.
+//! Wraps the per-chain tick logic in a trait so `main` can run it through
+//! `shared::tick`, mirroring fmd-indexer.
 
 mod events;
 mod tick;

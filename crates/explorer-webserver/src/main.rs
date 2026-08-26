@@ -31,13 +31,10 @@ async fn main() -> Result<()> {
     };
     let app = build_router(state);
 
-    let (trigger, mut shutdown) = shared::shutdown::channel();
-    tokio::spawn(shared::shutdown::watch_signals(trigger));
-
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     info!(addr = %cfg.bind_addr, "explorer-webserver listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown.recv().await })
+        .with_graceful_shutdown(shared::shutdown::signal())
         .await?;
     Ok(())
 }

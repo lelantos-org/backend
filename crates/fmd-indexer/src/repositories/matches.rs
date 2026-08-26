@@ -18,10 +18,10 @@ pub trait MatchesRepo: Send + Sync {
     async fn insert_batch(&self, rows: &[NewMatch]) -> Result<usize>;
 }
 
-/// Rows per INSERT, against Postgres' 65535 bind-parameter cap at 3 columns
-/// each. Unlike the other repos this one is not bounded by `filter_batch`:
-/// hits are a note × subscription cartesian product, so a busy batch with a
-/// large subscriber set overshoots easily.
+/// Rows per INSERT, against Postgres' 65535 bind-parameter cap at 3 columns each.
+/// Unlike the other repos this one is not bounded by `filter_batch`: hits are a
+/// note by subscription cartesian product, so a busy batch with a large
+/// subscriber set overshoots easily.
 const INSERT_CHUNK: usize = 5000;
 
 pub struct PostgresMatchesRepo {

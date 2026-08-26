@@ -1,7 +1,7 @@
 //! Graceful-shutdown primitive shared by every long-running binary.
 //!
-//! Single producer (signal handler) → many consumers (worker tasks).
-//! Workers hold a `Shutdown` and `.recv().await` to be woken when stop is
+//! Single producer (the signal handler) to many consumers (worker tasks).
+//! Workers hold a `Shutdown` and await `.recv()` to be woken when stop is
 //! signalled.
 
 use tokio::sync::watch;
@@ -28,9 +28,9 @@ impl Shutdown {
 
     /// Whether stop has already been signalled, without awaiting.
     ///
-    /// A loop that can skip its `recv().await` — the tick driver does exactly
-    /// that while a service still has queued work — would otherwise never
-    /// observe shutdown and could not be killed during a long catch-up.
+    /// A loop that skips its `recv().await`, as the tick driver does while a
+    /// service still has queued work, would otherwise never observe shutdown and
+    /// could not be stopped during a long catch-up.
     pub fn is_triggered(&self) -> bool {
         *self.rx.borrow()
     }
@@ -42,8 +42,11 @@ impl ShutdownTrigger {
     }
 }
 
-/// Wait for ctrl-c (or SIGTERM on unix) and fire the trigger once.
-pub async fn watch_signals(trigger: ShutdownTrigger) {
+/// Resolve on ctrl-c, or on SIGTERM where the platform has one.
+///
+/// Hand this to `axum::serve(..).with_graceful_shutdown` in a binary that serves
+/// requests and has no worker tasks to signal.
+pub async fn signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -58,5 +61,10 @@ pub async fn watch_signals(trigger: ShutdownTrigger) {
         let _ = tokio::signal::ctrl_c().await;
         info!("ctrl-c received");
     }
+}
+
+/// Wait for [`signal`] and fire the trigger once.
+pub async fn watch_signals(trigger: ShutdownTrigger) {
+    signal().await;
     trigger.fire();
 }

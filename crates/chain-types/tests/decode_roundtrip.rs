@@ -193,9 +193,9 @@ fn deposit_escrowed_roundtrip() {
             assert_eq!(*eph_pub_x, U256::from(13u64));
             assert_eq!(*eph_pub_y, U256::from(14u64));
             assert_eq!(*ciphertext, ct);
-            // The fee note must survive the roundtrip intact: it is digest
-            // preimage, so a single dropped field makes the deposit
-            // unflushable rather than merely mispriced.
+            // The fee note must survive the round trip intact: it is digest
+            // preimage, so one dropped field makes the deposit unflushable rather
+            // than merely mispriced.
             assert_eq!(fee.fee_in, 500);
             assert_eq!(fee.cm, fee_cm_v);
             assert_eq!(fee.cv_dep_x, U256::from(3001u64));

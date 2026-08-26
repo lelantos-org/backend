@@ -13,13 +13,11 @@ fn cc_layer(value: HeaderValue) -> SetResponseHeaderLayer<HeaderValue> {
     SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, value)
 }
 
-/// Screening is POST rather than GET-with-path-param even though it is a
-/// read: an address in the URL would be copied into access logs. The trace
-/// layer now records the path only (`shared::http::trace_layer`), so that is
-/// no longer the sole thing keeping addresses out of the logs — but POST stays,
-/// because coupling address safety to one layer's configuration is how it comes
-/// back. `no-store` on every route for the same reason — verdicts must not sit
-/// in an intermediary cache.
+/// Screening is POST rather than a GET with a path parameter even though it is a
+/// read: an address in the URL would reach access logs. The trace layer records
+/// the path only (`shared::request_span::trace_layer`), and POST keeps address
+/// safety from depending on that one layer's configuration. `no-store` on every
+/// route keeps verdicts out of intermediary caches.
 pub fn build(state: AppState) -> Router {
     let no_store = HeaderValue::from_static("no-store");
 

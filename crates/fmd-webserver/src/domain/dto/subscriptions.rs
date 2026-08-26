@@ -6,12 +6,12 @@ use utoipa::ToSchema;
 pub struct CreateSubscription {
     pub detection_key_hex: String,
     pub gamma: i32,
-    /// Client-chosen capability token, 32 bytes hex. Wallets derive it from
-    /// `ivk`, so there is nothing extra to persist and re-registering
-    /// re-attaches instead of duplicating.
+    /// Client-chosen capability token, 32 bytes of hex. Wallets derive it from
+    /// `ivk`, so nothing extra is persisted and re-registering re-attaches rather
+    /// than duplicating.
     ///
     /// It must not be derived from anything a sender or this server already
-    /// knows — in particular not from `dk`, which is public in the address
-    /// and recoverable from the detection key this request carries.
+    /// knows, in particular not from `dk`, which is public in the address and
+    /// recoverable from the detection key this request carries.
     pub token_hex: String,
 }

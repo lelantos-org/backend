@@ -1,4 +1,4 @@
-// snarkjs-shaped `tree_update_batch.circom` witness builder.
+//! snarkjs-shaped witness builder for `tree_update_batch.circom`.
 
 use crate::adapters::calldata::MAX_L_BATCH;
 use crate::services::prover::TreeUpdateBatchWitness;
@@ -8,8 +8,8 @@ use fmd_crypto::tree::Field;
 
 /// One escrowed deposit leaf. The circuit pins
 /// `cv_dep == public_in · V^asset + rcv · H` for every slot flagged
-/// `is_deposit`, so each leaf carries its own binding — there is no
-/// per-pair aggregate to sum into.
+/// `is_deposit`, so each leaf carries its own binding and there is no per-pair
+/// aggregate.
 #[derive(Debug, Clone)]
 pub struct LeafDeposit {
     pub cv_dep: [U256; 2],
@@ -18,9 +18,9 @@ pub struct LeafDeposit {
     pub rcv: U256,
 }
 
-/// Spend-side witness: `TRANSACT_OUT` leaves, all `is_deposit = 0`. The
-/// transact SNARK already proves conservation, so the per-leaf deposit
-/// binding is skipped and `rcv` stays zero.
+/// Spend-side witness: `TRANSACT_OUT` leaves, all with `is_deposit = 0`. The
+/// transact SNARK already proves conservation, so the per-leaf deposit binding is
+/// skipped and `rcv` stays zero.
 pub fn build_spend(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
@@ -53,9 +53,9 @@ pub fn build_spend(
     )
 }
 
-/// Flush-side witness. One leaf per escrowed deposit, so `deposits.len()`
-/// is the leaf count. All padding slots emit zero (cm, cv_dep, leaf_asset,
-/// leaf_public_in, is_deposit, rcv).
+/// Flush-side witness, one leaf per escrowed deposit, so `deposits.len()` is the
+/// leaf count. Padding slots emit zero for `cm`, `cv_dep`, `leaf_asset`,
+/// `leaf_public_in`, `is_deposit` and `rcv`.
 pub fn build_batch(
     slot: &ReservedSlot,
     advanced: &AdvancedState,

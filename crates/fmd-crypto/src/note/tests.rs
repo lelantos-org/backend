@@ -1,10 +1,10 @@
 //! Parity against the wallet.
 //!
-//! `tests/vectors/note-parity.json` is emitted by the SDK's own encrypt path
-//! (`sdk/src/notes/encrypt.ts` + `codec.ts`), so these assertions pin this
-//! module to the format a real wallet produces rather than to a second reading
-//! of the spec. Regenerate it from the SDK if the note format ever changes —
-//! and expect every issued proof to be invalidated when it does.
+//! `tests/vectors/note-parity.json` is emitted by the SDK's encrypt path
+//! (`sdk/src/notes/encrypt.ts` and `codec.ts`), so these assertions pin this
+//! module to the format a real wallet produces rather than to a second reading of
+//! the spec. Regenerate it from the SDK if the note format changes; doing so
+//! invalidates every issued proof.
 
 use super::*;
 use crate::clue::{
@@ -49,17 +49,17 @@ fn fq(dec: &str) -> crate::tree::Field {
     fq_to_be(Fq::from_str(dec).expect("decimal field element"))
 }
 
-/// The SDK spells `ivk` little-endian; this crate takes it big-endian, like
-/// every other field element crossing its boundary.
+/// The SDK spells `ivk` little-endian; this crate takes it big-endian, like every
+/// other field element crossing its boundary.
 fn ivk_be(hex_le: &str) -> crate::tree::Field {
     let mut b = bytes32(hex_le);
     b.reverse();
     b
 }
 
-/// The whole recipient-side pipeline, end to end, against wallet-produced
-/// bytes: strip the clue prefix, trial-decrypt, decode, and rebuild the
-/// commitment the proof would have carried.
+/// The recipient-side pipeline end to end against wallet-produced bytes: strip
+/// the clue prefix, trial-decrypt, decode, and rebuild the commitment the proof
+/// would have carried.
 #[test]
 fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
     for (i, v) in vectors().iter().enumerate() {
@@ -80,13 +80,13 @@ fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
         assert_eq!(note.rcm, fq(&v.rcm_dec), "vector {i}");
         assert_eq!(note.rcv_dep, fq(&v.rcv_dep_dec), "vector {i}");
 
-        // `ivk` alone recovers the owner key, which is what lets a party that
-        // holds no spending key verify a payment to its own address.
+        // `ivk` alone recovers the owner key, letting a party without a spending
+        // key verify a payment to its own address.
         let pk = derive_pk(&ivk).expect("poseidon");
         assert_eq!(pk, fq(&v.pk_dec), "vector {i}");
 
-        // The circuit pins output rho, so it is recomputable from public
-        // inputs and does not have to be taken from the plaintext.
+        // The circuit pins output rho, so it is recomputable from public inputs
+        // rather than taken from the plaintext.
         let rho = derive_rho(&fq(&v.nf0_dec), v.out_index).expect("poseidon");
         assert_eq!(rho, note.rho, "vector {i}");
 
@@ -96,7 +96,7 @@ fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
     }
 }
 
-/// Someone else's note must be silently not-ours, never an error and never a
+/// A note addressed to another key must read as not ours, never as an error or a
 /// partial decode.
 #[test]
 fn a_foreign_ivk_yields_nothing() {
@@ -117,8 +117,7 @@ fn a_foreign_ivk_yields_nothing() {
 }
 
 /// Flipping one byte of the AEAD body must fail the tag rather than yield a
-/// mangled note. This is what makes the value in a decrypted plaintext worth
-/// reading at all.
+/// mangled note, which is what makes a decrypted plaintext trustworthy.
 #[test]
 fn a_tampered_ciphertext_fails_the_tag() {
     let v = &vectors()[0];
@@ -132,8 +131,8 @@ fn a_tampered_ciphertext_fails_the_tag() {
 
 /// An `epk` outside the prime-order subgroup is rejected before the ECDH runs.
 ///
-/// Without this, eight submissions carrying `epk = T + [t]B8` for the eight
-/// 8-torsion points `T` leak `ivk mod 8`: exactly one of them decrypts.
+/// Without it, eight submissions carrying `epk = T + [t]B8` for the eight
+/// 8-torsion points `T` leak `ivk mod 8`, since exactly one decrypts.
 #[test]
 fn an_eight_torsion_epk_is_rejected() {
     let mixed = add_circom(scalar_mul(base8_circom(), Fr::from(12345u64)), order_two());
@@ -144,8 +143,8 @@ fn an_eight_torsion_epk_is_rejected() {
     assert!(!mixed.is_in_prime_subgroup());
 
     let packed = pack(&mixed);
-    // It decompresses fine — which is the point: `unpack` alone would let it
-    // through, and only the subgroup test stops it.
+    // It decompresses successfully, so `unpack` alone would let it through and
+    // only the subgroup test stops it.
     assert!(unpack(&packed).is_ok());
     assert!(unpack_subgroup(&packed).is_err());
 
@@ -184,7 +183,7 @@ fn order_two() -> CircomPoint {
 }
 
 /// Twisted-Edwards addition in circomlib coordinates, for building a point the
-/// public API deliberately offers no way to build.
+/// public API offers no way to construct.
 fn add_circom(p: CircomPoint, q: CircomPoint) -> CircomPoint {
     let a = Fq::from(crate::clue::COEFF_A_CIRCOM);
     let d = Fq::from(crate::clue::COEFF_D_CIRCOM);

@@ -1,17 +1,16 @@
 //! Replay protection for submissions, keyed by the caller's `Idempotency-Key`.
 //!
-//! A spend is not safe to send twice. The wallet knows this, and sends one key
-//! per submission, holding it across its own retries — so a request that was
-//! received but whose response never got home arrives again under the same
-//! key. Without this, the second arrival is indistinguishable from a fresh
-//! double-spend: the nullifier guard refuses it with a 409, and a caller who
-//! only ever saw a timeout is told their spend conflicts with itself.
+//! A spend is not safe to send twice, so the wallet sends one key per submission
+//! and holds it across its own retries. A request that was received but whose
+//! response never arrived therefore returns under the same key. Without this, the
+//! second arrival is indistinguishable from a fresh double-spend: the nullifier
+//! guard refuses it with a 409, and a caller who only saw a timeout is told their
+//! spend conflicts with itself.
 //!
-//! Keyed per chain, since a key is only unique to the wallet that minted it.
+//! Keyed per chain, since a key is unique only to the wallet that minted it.
 //!
-//! One process, deliberately: this mirrors `nullifier_guard`, and both are
-//! sound for the same reason — the tree mirror is per-process state, so two
-//! relayers cannot serve the same chain anyway.
+//! Single-process, mirroring `nullifier_guard`: the tree mirror is per-process
+//! state, so two relayers cannot serve the same chain.
 
 use crate::domain::error::{AppError, AppResult};
 use std::future::Future;
@@ -21,12 +20,12 @@ use std::time::Duration;
 use tracing::info;
 
 /// How long an answered key is replayable. Matches the nullifier guard's
-/// recently-spent window: past it, a resubmit is caught by the spent set
-/// instead, which is the honest answer once the indexer has the nullifier.
+/// recently-spent window: past it a resubmit is caught by the spent set, which is
+/// the correct answer once the indexer has the nullifier.
 const TTL: Duration = Duration::from_secs(15 * 60);
 
-/// Most keys held at once. A key costs a hash and a transaction hash, so this
-/// is sized for headroom rather than against memory.
+/// Most keys held at once. A key costs a hash and a transaction hash, so this is
+/// sized for headroom rather than against memory.
 const CAPACITY: u64 = 10_000;
 
 /// What a key answered: the transaction hash, plus the fingerprint of the
@@ -55,22 +54,21 @@ impl IdempotencyCache {
     /// Run `submit` once per key, and hand every later caller of that key the
     /// same transaction hash.
     ///
-    /// Concurrent callers collapse onto one run: the retry that races the
-    /// original — the wallet gave up waiting while the relayer was still
-    /// proving — waits for it rather than being refused as a duplicate.
+    /// Concurrent callers collapse onto one run: a retry racing the original,
+    /// where the wallet gave up waiting while the relayer was still proving, waits
+    /// for it rather than being refused as a duplicate.
     ///
-    /// `fingerprint` pins the key to its payload. A key is chosen by the
-    /// caller and proves nothing about what it stands for, so a repeat that
-    /// carries *different* contents is refused rather than quietly served the
-    /// first answer — otherwise a reused key silently swallows a real
-    /// submission and reports someone else's transaction as its own.
+    /// `fingerprint` pins the key to its payload. A key is caller-chosen and
+    /// proves nothing about what it stands for, so a repeat carrying different
+    /// contents is refused rather than served the first answer; otherwise a reused
+    /// key would absorb a real submission and report another transaction as its
+    /// own.
     ///
-    /// Failures are not recorded. A submission that did not land leaves the
-    /// key free, so a client that retries after a genuine failure is served
-    /// rather than handed back the error forever.
+    /// Failures are not recorded, so a submission that did not land leaves the key
+    /// free and a client retrying after a genuine failure is served.
     ///
-    /// `key` is `None` when the caller sent no header, which runs `submit`
-    /// with no replay protection at all — the pre-header behaviour.
+    /// `key` is `None` when the caller sent no header, which runs `submit` with no
+    /// replay protection.
     pub async fn run<F>(
         &self,
         chain_id: i64,
@@ -85,9 +83,9 @@ impl IdempotencyCache {
             return submit.await;
         };
 
-        // A replay is otherwise invisible: the caller gets a transaction hash
-        // and the logs show no submission behind it. `try_get_with` does not
-        // say whether it ran the future, so the future says so itself.
+        // A replay is otherwise invisible: the caller receives a transaction hash
+        // and the logs show no submission behind it. `try_get_with` does not report
+        // whether it ran the future, so the future records that itself.
         let ran = AtomicBool::new(false);
         let answer = self
             .entries
@@ -165,9 +163,9 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1, "second call re-submitted");
     }
 
-    /// A key stands for one submission. Reusing it under different contents
-    /// must not hand the second caller the first one's transaction hash — and
-    /// must not silently drop their submission either.
+    /// A key stands for one submission. Reusing it under different contents must
+    /// neither hand the second caller the first one's transaction hash nor drop
+    /// their submission.
     #[tokio::test]
     async fn the_same_key_with_a_different_payload_is_refused() {
         let cache = IdempotencyCache::new();
@@ -190,8 +188,8 @@ mod tests {
         assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
     }
 
-    /// The case the wallet actually hits: it stops waiting and retries while
-    /// the relayer is still proving the first attempt.
+    /// The case a wallet hits in practice: it stops waiting and retries while the
+    /// relayer is still proving the first attempt.
     #[tokio::test]
     async fn a_retry_that_races_the_original_waits_for_it() {
         let cache = Arc::new(IdempotencyCache::new());
@@ -210,8 +208,8 @@ mod tests {
         };
 
         let first = tokio::spawn(call(cache.clone(), runs.clone(), gate.clone()));
-        // The second caller must not start its own run, so only the first can
-        // reach the barrier — release it from here.
+        // The second caller must not start its own run, so only the first reaches
+        // the barrier; release it from here.
         let second = tokio::spawn({
             let cache = cache.clone();
             let runs = runs.clone();

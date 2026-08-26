@@ -1,18 +1,14 @@
 //! End-to-end screening over a real Postgres.
 //!
-//! The service has no write API, so fixtures go in with a direct insert —
-//! which is also exactly how the list is populated in production, and
-//! therefore exercises the "stored form must already be normalized"
-//! contract that a write endpoint would otherwise hide.
+//! The service has no write API, so fixtures are inserted directly, which is also
+//! how the list is populated in production. That exercises the contract that the
+//! stored form is already normalized, which a write endpoint would hide.
 
 use database::schema::screened_addresses;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use risk_webserver::{RiskWebserverConfig, build_router, build_state};
 use std::sync::Arc;
-use std::time::Duration;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 /// Same address in the two spellings a caller might send.
 const EVM_CHECKSUMMED: &str = "0x8589427373D6D84E98730D7795D8f6f8731FDA16";
@@ -21,8 +17,7 @@ const EVM_CLEAN: &str = "0x0000000000000000000000000000000000000001";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn screen_matches_checksummed_input_against_lowercase_row() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     insert_entry(&pool, "evm", EVM_LOWER, "banned", "ofac_sdn", Some("SDN")).await;
     let base = spawn(&pool).await;
 
@@ -38,8 +33,7 @@ async fn screen_matches_checksummed_input_against_lowercase_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn screen_unlisted_address_is_none_and_not_blocked() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     let base = spawn(&pool).await;
 
     let body = screen_one(&base, "evm", EVM_CLEAN).await;
@@ -50,8 +44,7 @@ async fn screen_unlisted_address_is_none_and_not_blocked() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn screen_takes_max_risk_across_sources() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     insert_entry(&pool, "evm", EVM_LOWER, "high", "internal", None).await;
     insert_entry(&pool, "evm", EVM_LOWER, "banned", "ofac_sdn", None).await;
     let base = spawn(&pool).await;
@@ -63,8 +56,7 @@ async fn screen_takes_max_risk_across_sources() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn screen_batch_returns_verdicts_in_request_order() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     insert_entry(&pool, "evm", EVM_LOWER, "banned", "ofac_sdn", None).await;
     let base = spawn(&pool).await;
 
@@ -91,8 +83,7 @@ async fn screen_batch_returns_verdicts_in_request_order() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn malformed_evm_address_is_rejected() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     let base = spawn(&pool).await;
 
     let resp = reqwest::Client::new()
@@ -106,8 +97,7 @@ async fn malformed_evm_address_is_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_evm_chain_is_case_sensitive() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     let btc = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
     insert_entry(&pool, "btc", btc, "banned", "ofac_sdn", None).await;
     let base = spawn(&pool).await;
@@ -115,16 +105,15 @@ async fn non_evm_chain_is_case_sensitive() {
     let hit = screen_one(&base, "btc", btc).await;
     assert_eq!(hit["risk"], "banned");
 
-    // Lowercasing a base58 address makes it a different address, and must
-    // not match. Confirms the EVM case-folding is not applied everywhere.
+    // Lowercasing a base58 address yields a different address and must not match,
+    // confirming the EVM case-folding is not applied to every chain.
     let miss = screen_one(&base, "btc", &btc.to_lowercase()).await;
     assert_eq!(miss["risk"], "none");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn list_entries_filters_by_chain_and_source() {
-    let _guard = serial_lock().await;
-    let pool = boot_pool().await;
+    let (pool, _guard) = fresh_pool().await;
     insert_entry(&pool, "evm", EVM_LOWER, "banned", "ofac_sdn", None).await;
     insert_entry(&pool, "evm", EVM_CLEAN, "low", "internal", None).await;
     insert_entry(&pool, "btc", "1abc", "high", "ofac_sdn", None).await;
@@ -146,51 +135,11 @@ async fn list_entries_filters_by_chain_and_source() {
 
 // ───────────────────────────────────────────────────────────── harness ──
 
-async fn serial_lock() -> tokio::sync::OwnedMutexGuard<()> {
-    use std::sync::OnceLock;
-    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
-    LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-        .lock_owned()
-        .await
-}
+/// Cleared between tests.
+const TABLES: &[&str] = &["screened_addresses"];
 
-async fn boot_pool() -> database::DbPool {
-    static CONTAINER: tokio::sync::OnceCell<(testcontainers::ContainerAsync<Postgres>, String)> =
-        tokio::sync::OnceCell::const_new();
-    let (_container, url) = CONTAINER
-        .get_or_init(|| async {
-            let container = Postgres::default().start().await.unwrap();
-            let port = container.get_host_port_ipv4(5432).await.unwrap();
-            let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-            for _ in 0..30 {
-                if database::build_pool(&url, database::PoolCfg::relayer())
-                    .await
-                    .is_ok()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            let migrate_url = url.clone();
-            tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
-                .await
-                .expect("blocking")
-                .expect("migrate");
-            (container, url)
-        })
-        .await;
-
-    let pool = database::build_pool(url, database::PoolCfg::relayer())
-        .await
-        .expect("pool");
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("TRUNCATE TABLE screened_addresses RESTART IDENTITY CASCADE")
-        .execute(&mut conn)
-        .await
-        .unwrap();
-    drop(conn);
-    pool
+async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
+    test_support::fresh_pool(database::PoolCfg::relayer(), TABLES).await
 }
 
 async fn insert_entry(
@@ -215,8 +164,8 @@ async fn insert_entry(
         .unwrap();
 }
 
-/// Boot the real router in-process. Each test gets its own service, so the
-/// verdict cache never leaks a fixture across tests.
+/// Boot the real router in-process. Each test gets its own service, so the verdict
+/// cache cannot leak a fixture across tests.
 async fn spawn(pool: &database::DbPool) -> String {
     let cfg = Arc::new(RiskWebserverConfig {
         database_url: String::new(),

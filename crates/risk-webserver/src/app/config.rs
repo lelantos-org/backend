@@ -5,9 +5,9 @@ use serde::Deserialize;
 pub struct RiskWebserverConfig {
     pub database_url: String,
     pub bind_addr: String,
-    /// Verdict cache TTL. With no write API there is nothing to invalidate,
-    /// so this is exactly the worst-case lag between a row appearing in
-    /// `screened_addresses` and the service acting on it — per replica.
+    /// Verdict cache TTL. With no write API there is nothing to invalidate, so
+    /// this is the worst-case per-replica lag between a row appearing in
+    /// `screened_addresses` and the service acting on it.
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_s: u64,
 }

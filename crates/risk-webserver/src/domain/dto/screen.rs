@@ -3,13 +3,13 @@ use utoipa::ToSchema;
 
 /// Screen a single address.
 ///
-/// A body, not a path or query parameter: `TraceLayer` records the request
-/// URI, so an address in the URL would be copied into access logs and every
-/// downstream log shipper. Keep it in the body.
+/// Carried in the body rather than a path or query parameter: `TraceLayer`
+/// records the request URI, so an address in the URL would reach access logs and
+/// every downstream log shipper.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenRequest {
-    /// Address family, e.g. `evm`.
+    /// Address family, for example `evm`.
     pub chain: String,
     pub address: String,
 }

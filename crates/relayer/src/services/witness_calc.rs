@@ -1,21 +1,19 @@
 //! Circom witness calculator, specialised for BN254.
 //!
-//! This is `ark_circom`'s wasm witness calculator with its two hot spots
-//! removed. Upstream resolves every wasm export by name on *every* call —
-//! `instance.exports.get_function("readSharedRWMemory")`, a string-keyed
-//! hashmap lookup — and then invokes it through wasmer's dynamic path, which
-//! boxes arguments and results. Extracting a 130k-signal witness costs one
-//! `getWitness` plus eight `readSharedRWMemory` calls per signal, so that is
-//! ~1.2M lookups and ~1.2M boxed calls per proof. It then rebuilds each field
-//! element with eight `BigInt` multiply-adds and converts through `BigUint`,
-//! for another ~2M heap allocations.
+//! `ark_circom`'s wasm witness calculator with its two hot spots removed.
+//! Upstream resolves every wasm export by name on every call, a string-keyed
+//! hashmap lookup, then invokes it through wasmer's dynamic path, which boxes
+//! arguments and results. Extracting a 130k-signal witness costs one `getWitness`
+//! plus eight `readSharedRWMemory` calls per signal, roughly 1.2M lookups and
+//! 1.2M boxed calls per proof, and rebuilding each field element takes eight
+//! `BigInt` multiply-adds and a `BigUint` conversion, another ~2M allocations.
 //!
-//! Here the exports are resolved once into typed handles, and a signal goes
-//! straight from its eight little-endian 32-bit words into `Fr`'s limbs.
+//! Here the exports are resolved once into typed handles and a signal goes
+//! directly from its eight little-endian 32-bit words into `Fr`'s limbs.
 //!
-//! The wasm module, the calling sequence and the resulting witness are
-//! unchanged — this produces the same field elements in the same order, which
-//! is what the zkey's signal indexing requires.
+//! The wasm module, the calling sequence and the resulting witness are unchanged:
+//! the same field elements in the same order, as the zkey's signal indexing
+//! requires.
 
 use crate::domain::error::{AppError, AppResult, ErrorContext};
 use ark_bn254::Fr;
@@ -34,9 +32,9 @@ type Words = [u32; FIELD_WORDS];
 /// Linear memory the circom runtime expects, in 64 KiB pages (128 MiB).
 const MEMORY_PAGES: u32 = 2000;
 
-/// circom's own per-signal assignment checks, run inside the wasm on every
-/// build. The prover verifies the finished proof instead, which covers the
-/// same failure class against the whole witness at once and costs less.
+/// circom's per-signal assignment checks, run inside the wasm on every build. The
+/// prover verifies the finished proof instead, covering the same failure class
+/// against the whole witness at once for less cost.
 const SANITY_CHECK: bool = false;
 
 /// Signal inputs by circom name, as decimal-parsed integers.
@@ -162,9 +160,9 @@ impl WitnessCalculator {
         Ok(witness)
     }
 
-    /// The zkey is BN254 and this module must agree, down to the modulus — a
-    /// mismatched circuit would otherwise yield a witness that is silently
-    /// wrong rather than one that fails to load.
+    /// The zkey is BN254 and this module must agree down to the modulus; a
+    /// mismatched circuit would otherwise yield a wrong witness rather than one
+    /// that fails to load.
     fn check_field(&mut self) -> AppResult<()> {
         let words = self
             .exports
@@ -180,8 +178,8 @@ impl WitnessCalculator {
             .get_raw_prime
             .call(&mut self.store)
             .prover("getRawPrime")?;
-        // The modulus is not itself a reducible field element, so compare
-        // limbs rather than going through `fr_from_words`.
+        // The modulus is not a reducible field element, so compare limbs rather
+        // than going through `fr_from_words`.
         if limbs_from_words(&self.read_shared().prover("read prime")?) != Fr::MODULUS.0 {
             return Err(AppError::Prover(
                 "witness wasm is not a BN254 circuit (field modulus mismatch)".into(),
@@ -190,8 +188,8 @@ impl WitnessCalculator {
         Ok(())
     }
 
-    /// Drain one field element from the wasm's shared scratch buffer. Whatever
-    /// was asked for — a witness signal, the field modulus — lands here first.
+    /// Drain one field element from the wasm's shared scratch buffer, where every
+    /// requested value, a witness signal or the field modulus, lands first.
     fn read_shared(&mut self) -> Result<Words, RuntimeError> {
         let mut words = [0u32; FIELD_WORDS];
         for (i, word) in words.iter_mut().enumerate() {
@@ -215,12 +213,12 @@ impl WitnessCalculator {
     }
 }
 
-/// Eight little-endian 32-bit words → `Fr`.
+/// Eight little-endian 32-bit words to `Fr`.
 ///
-/// Circom's shared memory holds the value in plain (non-Montgomery) form, so
-/// this is a repack into `Fr`'s four 64-bit limbs plus the one Montgomery
-/// conversion `from_bigint` does. `None` if the value is not reduced — which
-/// the circuit should never produce.
+/// Circom's shared memory holds the value in plain, non-Montgomery form, so this
+/// repacks into `Fr`'s four 64-bit limbs plus the Montgomery conversion
+/// `from_bigint` performs. `None` if the value is not reduced, which the circuit
+/// should not produce.
 fn fr_from_words(words: &Words) -> Option<Fr> {
     Fr::from_bigint(BigInteger256::new(limbs_from_words(words)))
 }
@@ -234,9 +232,9 @@ fn limbs_from_words(w: &Words) -> [u64; 4] {
     ]
 }
 
-/// `BigInt` → eight little-endian 32-bit words. `None` for a negative value or
-/// one too wide for the field, both of which would otherwise be truncated into
-/// a silently different signal.
+/// `BigInt` to eight little-endian 32-bit words. `None` for a negative value or
+/// one too wide for the field, both of which would otherwise be truncated into a
+/// different signal.
 fn words_from_bigint(value: &BigInt) -> Option<Words> {
     let mut words = [0u32; FIELD_WORDS];
     let radix = BigInt::from(1u64 << 32);
@@ -245,15 +243,16 @@ fn words_from_bigint(value: &BigInt) -> Option<Words> {
         if rem.is_zero() {
             return Some(words);
         }
-        // A negative input makes the remainder negative, and `to_u32` rejects
-        // it — so this doubles as the sign check.
+        // A negative input makes the remainder negative and `to_u32` rejects it,
+        // so this also serves as the sign check.
         *word = (&rem % &radix).to_u32()?;
         rem /= &radix;
     }
     rem.is_zero().then_some(words)
 }
 
-/// FNV-1a, split high/low — how circom addresses an input signal by name.
+/// FNV-1a, split into high and low halves, which is how circom addresses an input
+/// signal by name.
 fn fnv1a(name: &str) -> (u32, u32) {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -264,14 +263,14 @@ fn fnv1a(name: &str) -> (u32, u32) {
     ((hash >> 32) as u32, hash as u32)
 }
 
-/// Host functions the circom runtime imports. All but `error` are debug hooks
-/// the circuit calls and we ignore; they still have to be supplied, or the
+/// Host functions the circom runtime imports. All but `error` are debug hooks the
+/// circuit calls and this module ignores; they must still be supplied or the
 /// module will not instantiate.
 mod runtime {
     use wasmer::{Function, RuntimeError, Store};
 
-    /// A failed assert inside the circuit. Trapping here is what turns it into
-    /// an `Err` out of `calculate` rather than a silently wrong witness.
+    /// A failed assert inside the circuit. Trapping here turns it into an `Err`
+    /// from `calculate` rather than a wrong witness.
     pub fn error(store: &mut Store) -> Function {
         Function::new_typed(
             store,
@@ -308,7 +307,7 @@ mod tests {
         }
     }
 
-    /// The value where a naive limb repack would be off: the modulus minus one
+    /// The value where a naive limb repack would be wrong: the modulus minus one
     /// uses every limb.
     #[test]
     fn the_largest_field_element_round_trips() {
@@ -318,7 +317,7 @@ mod tests {
         assert_eq!(fr_from_words(&words.unwrap()), Some(max));
     }
 
-    /// A negative or over-wide input must be refused, not truncated into a
+    /// A negative or over-wide input must be refused rather than truncated into a
     /// different signal value.
     #[test]
     fn out_of_range_inputs_are_rejected() {

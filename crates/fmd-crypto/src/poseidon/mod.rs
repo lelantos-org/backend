@@ -1,9 +1,8 @@
 //! Poseidon hashing, circomlib-compatible.
 //!
-//! The permutation is ours (see [`circom`]); the constants are circomlib's.
-//! Every hasher is built once per arity per thread and reused — construction
-//! parses the round constants and the MDS matrix, which is not something to
-//! repeat once per hash.
+//! The permutation is implemented here (see [`circom`]) over circomlib's
+//! constants. Every hasher is built once per arity per thread and reused, since
+//! construction parses the round constants and the MDS matrix.
 
 mod circom;
 mod sparse;
@@ -55,9 +54,9 @@ pub fn hash(inputs: &[Fq]) -> Result<Fq, PoseidonError> {
 
 /// Big-endian bytes in, big-endian digest out.
 ///
-/// Each input must be a canonical field element; one that is not smaller than
-/// the modulus is rejected rather than silently reduced, so two distinct byte
-/// strings can never collide by wrapping.
+/// Each input must be a canonical field element. One that is not smaller than
+/// the modulus is rejected rather than reduced, so two distinct byte strings
+/// cannot collide by wrapping.
 pub fn hash_bytes_be(inputs: &[&[u8]]) -> Result<[u8; 32], PoseidonError> {
     if inputs.len() + 1 > MAX_WIDTH {
         return Err(PoseidonError::UnsupportedArity(inputs.len()));

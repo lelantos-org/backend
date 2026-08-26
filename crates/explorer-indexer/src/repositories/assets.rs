@@ -14,13 +14,10 @@ pub struct UpsertAsset {
     pub scale: BigDecimal,
 }
 
-/// `UpsertAsset` deliberately omits `decimals` and `symbol`, so replaying an
+/// `UpsertAsset` omits `decimals` and `symbol`, so replaying an
 /// `AssetRegistered` never clears a value the backfill already fetched.
 pub async fn upsert(pool: &DbPool, row: UpsertAsset) -> Result<(), ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     diesel::insert_into(assets::table)
         .values(&row)
         .on_conflict((assets::chain_id, assets::asset_id_u64))
@@ -41,9 +38,9 @@ pub struct PendingMetadata {
     pub symbol: Option<String>,
 }
 
-/// Values to write back. `None` means "not fetched this round" and is skipped
-/// by `AsChangeset`, so a failed `symbol()` never clears a stored `decimals`
-/// and vice versa.
+/// Values to write back. `None` means not fetched this round and is skipped by
+/// `AsChangeset`, so a failed `symbol()` never clears a stored `decimals`, and
+/// the reverse.
 #[derive(Debug, Default, AsChangeset)]
 #[diesel(table_name = assets)]
 pub struct AssetMetadata {
@@ -52,7 +49,7 @@ pub struct AssetMetadata {
 }
 
 impl AssetMetadata {
-    /// Nothing was resolved, so there is no update worth issuing.
+    /// Nothing was resolved, so no update is issued.
     pub fn is_empty(&self) -> bool {
         self.decimals.is_none() && self.symbol.is_none()
     }
@@ -64,10 +61,7 @@ pub async fn missing_metadata(
     chain_id: i64,
     limit: i64,
 ) -> Result<Vec<PendingMetadata>, ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     assets::table
         .filter(assets::chain_id.eq(chain_id))
         .filter(assets::decimals.is_null().or(assets::symbol.is_null()))
@@ -90,10 +84,7 @@ pub async fn set_metadata(
     asset_id_u64: i64,
     meta: AssetMetadata,
 ) -> Result<(), ExplorerIndexerError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| ExplorerIndexerError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     diesel::update(
         assets::table
             .filter(assets::chain_id.eq(chain_id))

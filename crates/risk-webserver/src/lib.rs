@@ -1,14 +1,13 @@
 //! Internal address screening API.
 //!
-//! Answers "is this address banned / high risk?" from the
-//! `screened_addresses` table. Read-only by design: there is no write
-//! endpoint, so network reach to this service cannot be used to *remove* a
-//! sanctioned address, which is what makes running it unauthenticated behind
-//! the gateway acceptable. The list is populated out-of-band by SQL.
+//! Answers whether an address is banned or high risk from the
+//! `screened_addresses` table. Read-only by design: there is no write endpoint,
+//! so network reach to this service cannot remove a sanctioned address, which is
+//! what makes running it unauthenticated behind the gateway acceptable. The list
+//! is populated out-of-band by SQL.
 //!
-//! Screening is **fail-closed**: if the table cannot be read the request
-//! fails with 500 rather than reporting the address as clean. Callers choose
-//! their own posture from there.
+//! Screening is fail-closed: if the table cannot be read the request fails with
+//! 500 rather than reporting the address as clean.
 
 pub mod app;
 pub mod domain;

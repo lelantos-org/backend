@@ -32,6 +32,23 @@ x-profiles-mq:        &profiles-mq        [metaquoter, all, prod]
 x-profiles-risk:      &profiles-risk      [risk, all, prod]
 x-profiles-deploy:    &profiles-deploy    [all]
 
+# Shielded fee identity for the dev chain (31337).
+#
+# DEV ONLY, and committed on purpose: it is the same identity the e2e suite
+# pays (`e2e/src/protocol/shielded-fee.ts`), so a wallet built against either
+# stack pays an address the other also recognises. Pinning it is what makes
+# that true — three derivations agreeing at runtime would not be.
+#
+# `ivk` is decrypt-only: it recognises payments and reads their value, and
+# cannot spend them. The spending key is neither here nor needed. A real
+# deployment overrides both from the environment and commits neither.
+#
+# Lifted out of the service body because the address is ~180 characters and
+# reading the relayer's env should not mean scrolling past it.
+x-dev-shielded-fee: &dev-shielded-fee
+    RELAYER_CHAIN_31337_SHIELDED_FEE_ADDRESS: "${RELAYER_CHAIN_31337_SHIELDED_FEE_ADDRESS:-lelantos1pt5x36h9te4nhc5k5dx7he4m55p9l6gl6u8t3wxkhxvx4d89c6q2qpxmsqj0ha34jkaupskyemvmpwempecmjjpcd0kswwe62phz2qcj7kh0q02j4akatg9xchazr4td8eht8ul4lzdr6k346fzsaxtf3ccnr3c9}"
+    RELAYER_CHAIN_31337_SHIELDED_FEE_IVK: "${RELAYER_CHAIN_31337_SHIELDED_FEE_IVK:-0x2a60ff35984e4c2013a03867a433d5d5272df218436cc27557fddc5231fcd99d}"
+
 # Build config for every Rust backend that uses backend/Dockerfile.
 x-rust-build: &rust-build
     context: ..
@@ -232,6 +249,27 @@ services:
             <<: *tcp-healthcheck
             test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3004' >/dev/null 2>&1"]
 
+    # ── price oracle stub (dev) ────────────────────────────────────────
+    # `CoinbaseOracle` fetches `{base_url}/prices/{BASE}-{QUOTE}/spot`; nginx
+    # over config/oracle serves exactly that tree. Without it the relayer would
+    # resolve fee-token pairs against the live Coinbase API at boot — an
+    # internet dependency, and a price that moves between runs.
+    oracle:
+        restart: unless-stopped
+        profiles: *profiles-relayer
+        image: nginx:alpine
+        volumes:
+            - ./config/oracle:/usr/share/nginx/html:ro
+        # `nginx:alpine` has no bash, so the /dev/tcp probe the Rust services
+        # use is unavailable here. wget is (busybox), and fetching the pair the
+        # relayer will ask for checks the file tree too, not just the port.
+        healthcheck:
+            test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/prices/ETH-USD/spot"]
+            interval: 5s
+            timeout: 3s
+            retries: 10
+        networks: [backend]
+
     # ── relayer (dedicated Dockerfile; circuits mounted from ./circuits) ─
     relayer:
         <<: *backend-base
@@ -239,12 +277,16 @@ services:
         depends_on:
             postgres: { condition: service_healthy }
             deploy:   { condition: service_completed_successfully, required: false }
+            # The relayer resolves every accepted fee token's oracle pair at
+            # boot and refuses to start if one is unreachable — so wait for the
+            # stub to actually serve, not merely to have been started.
+            oracle:   { condition: service_healthy }
         build:
             context: ../..
             dockerfile: backend/crates/relayer/Dockerfile
         image: lelantos/relayer:dev
         environment:
-            <<: *backend-env
+            <<: [*backend-env, *dev-shielded-fee]
             BIN_PATH: /usr/local/bin/relayer
             RELAYER_CONFIG: /etc/relayer.toml
             # 42161 signer required only for prod-style runs; empty in dev is fine.

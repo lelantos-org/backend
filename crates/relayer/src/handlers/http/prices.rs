@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn nothing_priced_yields_an_empty_body_not_an_error() {
         // What a wallet sees on the local anvil stack, and whenever the provider
-        // is unreachable. It has to be a normal, empty answer.
+        // is unreachable: a normal, empty answer.
         let rows = to_rows(&[key(31337, "a0b8")], &HashMap::new());
         assert!(rows.is_empty());
     }
@@ -129,10 +129,9 @@ mod tests {
 
     /// End-to-end over the real provider: keys in, `PriceOut` rows out.
     ///
-    /// The local anvil stack can never exercise this — `llama_chain` maps 31337
-    /// to nothing, so `/v1/prices` is correctly empty there and a deployment is
-    /// the first place the priced path ever runs. Ignored by default since it
-    /// needs the network.
+    /// The local anvil stack cannot exercise this: `llama_chain` maps 31337 to
+    /// nothing, so `/v1/prices` is empty there and a deployment is the first place
+    /// the priced path runs. Ignored by default since it needs the network.
     ///
     /// Run with `cargo test -p relayer -- --ignored --nocapture`.
     #[tokio::test]

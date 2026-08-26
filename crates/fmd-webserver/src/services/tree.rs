@@ -1,10 +1,10 @@
-// Tree-mirror service for `/v1/tree-state`.
-//
-// The canonical merkle tree mirrors the `notes` table (ordered by leaf_index)
-// and is held per chain in `AppState.cache.tree`. Notes are append-only, so
-// the mirror is advanced in place: each request hashes only the leaves added
-// since the last one. A reorg is the sole case that can invalidate what is
-// already there, and it is detected by the tip going backwards.
+//! Tree-mirror service for `/v1/tree-state`.
+//!
+//! The canonical merkle tree mirrors the `notes` table ordered by `leaf_index`
+//! and is held per chain in `AppState.cache.tree`. Notes are append-only, so the
+//! mirror advances in place and each request hashes only the leaves added since
+//! the last one. Only a reorg can invalidate what is already there, and it is
+//! detected by the tip moving backwards.
 
 use crate::app::AppState;
 use crate::app::cache::TreeMirror;
@@ -21,22 +21,14 @@ use tokio::sync::Mutex;
 const DEPTH: usize = 10;
 
 fn vec_to_field(v: &[u8]) -> AppResult<Field> {
-    if v.len() != 32 {
-        return Err(AppError::Internal(format!(
-            "expected 32-byte field, got {}",
-            v.len()
-        )));
-    }
-    let mut f = [0u8; 32];
-    f.copy_from_slice(v);
-    Ok(f)
+    fmd_crypto::tree::field_from_bytes(v).map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// Hash `rows` into leaves and append them to `tree`.
 ///
-/// `rows` must start exactly at the current leaf count and be contiguous —
-/// the tree is positional, so a gap would silently shift every later leaf and
-/// produce a root no wallet could verify.
+/// `rows` must start exactly at the current leaf count and be contiguous. The
+/// tree is positional, so a gap would shift every later leaf and produce a root
+/// no wallet could verify.
 fn append_leaves(tree: &mut MerkleTree, rows: &[notes::LeafInputsRow]) -> AppResult<()> {
     let base = tree.leaf_count() as i64;
     let mut leaves = Vec::with_capacity(rows.len());
@@ -59,10 +51,9 @@ fn append_leaves(tree: &mut MerkleTree, rows: &[notes::LeafInputsRow]) -> AppRes
 
 /// Count a rebuild from leaf 0 under the cause that forced it.
 ///
-/// The `reason` dimension is the whole value of this counter: `tip_backwards`
-/// is a reorg the mirror survived, while `cold` is a full re-hash that a warm
-/// mirror should never pay again. Distinguishing them after the fact is
-/// impossible from a bare total.
+/// The `reason` dimension carries the signal: `tip_backwards` is a reorg the
+/// mirror survived, while `cold` is a full re-hash a warm mirror should not pay
+/// again. A bare total cannot distinguish them.
 fn record_rebuild(chain_id: i64, reason: &'static str) {
     metrics::counter!(
         shared::metrics::name::TREE_MIRROR_REBUILDS,
@@ -79,8 +70,8 @@ async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> A
     let db_leaves = tip.map_or(0, |t| t + 1);
     let have = mirror.tree.leaf_count() as i64;
 
-    // Only a reorg can remove leaves. The mirror cannot be repaired by
-    // appending in that case, so drop it and rebuild from leaf 0.
+    // Only a reorg can remove leaves, and appending cannot repair the mirror in
+    // that case, so it is dropped and rebuilt from leaf 0.
     if db_leaves < have {
         tracing::warn!(
             chain_id,
@@ -91,17 +82,16 @@ async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> A
         record_rebuild(chain_id, "tip_backwards");
         mirror.tree = MerkleTree::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
     } else if have == 0 && db_leaves > 0 {
-        // An empty mirror with leaves to fold is the cold build: every leaf
-        // hashed, holding the chain's mutex. This is the one the boot warm-up
-        // exists to move off the request path.
+        // An empty mirror with leaves to fold is the cold build: every leaf is
+        // hashed while holding the chain's mutex. The boot warm-up exists to move
+        // this off the request path.
         record_rebuild(chain_id, "cold");
     }
 
     let from = mirror.tree.leaf_count() as i64;
-    // Published before the early return: this is a state gauge, and the
-    // steady state *is* "nothing to append". Setting it only on the work path
-    // makes the series vanish from a caught-up chain — missing precisely when
-    // it would be read.
+    // Published before the early return. This is a state gauge and the steady
+    // state is having nothing to append, so setting it only on the work path
+    // would make the series vanish for a caught-up chain.
     metrics::gauge!(
         shared::metrics::name::TREE_MIRROR_LEAVES,
         "chain_id" => chain_id.to_string(),
@@ -111,7 +101,7 @@ async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> A
         return Ok(());
     }
 
-    let rows = notes::list_leaf_inputs_from(pool, chain_id, from).await?;
+    let rows = notes::list_leaf_inputs(pool, chain_id, from, None).await?;
     append_leaves(&mut mirror.tree, &rows)?;
     tracing::debug!(
         chain_id,
@@ -120,9 +110,9 @@ async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> A
         "tree mirror advanced"
     );
 
-    // Timed only on a path that did work: recording the no-op return above
-    // would bury the multi-second cold builds under a flood of zeros. The
-    // gauge, unlike the histogram, is re-set here to the post-append count.
+    // Timed only on a path that did work: recording the no-op return above would
+    // bury the multi-second cold builds under a flood of zeros. Unlike the
+    // histogram, the gauge is re-set here to the post-append count.
     let chain = chain_id.to_string();
     metrics::histogram!(
         shared::metrics::name::TREE_MIRROR_SYNC_DURATION,
@@ -200,8 +190,8 @@ mod tests {
         t
     }
 
-    /// The whole point of the mirror: appending in slices must land on the
-    /// same root as hashing every leaf in one pass.
+    /// Appending in slices must land on the same root as hashing every leaf in
+    /// one pass.
     #[test]
     fn incremental_append_matches_a_full_build() {
         let all: Vec<_> = (0..40).map(row).collect();
@@ -222,8 +212,8 @@ mod tests {
         let mut t = MerkleTree::new(DEPTH).unwrap();
         append_leaves(&mut t, &[row(0), row(1)]).unwrap();
 
-        // leaf_index 3 while the tree holds 2 leaves: a missing note would
-        // shift every later leaf, so this must fail loudly.
+        // leaf_index 3 while the tree holds 2 leaves: a missing note would shift
+        // every later leaf, so this must fail.
         let err = append_leaves(&mut t, &[row(3)]).unwrap_err();
         assert!(matches!(err, AppError::Internal(_)), "got {err:?}");
         assert_eq!(t.leaf_count(), 2);

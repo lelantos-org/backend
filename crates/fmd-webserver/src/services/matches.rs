@@ -8,14 +8,14 @@ use std::sync::Arc;
 
 /// One request for a page of matches.
 ///
-/// Grouped rather than passed as five positional `i64`s, which no compiler
-/// check distinguishes: swapping `after` with `limit`, or `chain_id` with
-/// `backfilled_through`, would type-check and quietly serve wrong data.
+/// Grouped rather than passed as five positional `i64`s, which the compiler
+/// cannot distinguish: swapping `after` with `limit`, or `chain_id` with
+/// `backfilled_through`, would type-check and serve wrong data.
 #[derive(Debug, Clone, Copy)]
 pub struct ListRequest {
     pub subscription_id: i64,
-    /// Scopes the feed. A subscription is not chain-scoped, so without this
-    /// the caller receives notes from every chain it matched on.
+    /// Scopes the feed. A subscription is not chain-scoped, so without this the
+    /// caller receives notes from every chain it matched on.
     pub chain_id: i64,
     /// Highest note id known to be backfilled for this subscription.
     pub backfilled_through: i64,
@@ -34,9 +34,8 @@ impl ListRequest {
     }
 }
 
-/// `backfilled_through` rides in the cached value, so it can be up to the
-/// cache TTL behind the row. That staleness is safe in the only direction
-/// that matters: clients clamp their cursor to it, and a value that is too
+/// `backfilled_through` rides in the cached value, so it can trail the row by up
+/// to the cache TTL. Clients clamp their cursor to it, and a value that is too
 /// low re-delivers rows rather than skipping them.
 #[tracing::instrument(skip(st))]
 pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>> {
@@ -78,8 +77,8 @@ pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>
         })
         .await
         .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
-    // After the await, and on the error path too: a load that failed still
-    // missed, and counting it as a hit would flatter the cache.
+    // Recorded after the await and on the error path: a failed load is still a
+    // miss.
     probe.record();
     out
 }

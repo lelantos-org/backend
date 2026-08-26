@@ -1,9 +1,8 @@
 //! Shared backoff policy for transient RPC and database failures.
 //!
-//! Before this existed, a single 429 propagated all the way out of the worker
-//! task and that chain simply stopped ingesting until the process was
-//! restarted — the error taxonomy in [`crate::domain::error`] was classified
-//! and then never acted on.
+//! Acts on the error taxonomy in [`crate::domain::error`]: without it a single
+//! 429 would propagate out of the worker task and stop that chain from ingesting
+//! until the process restarted.
 
 use crate::domain::error::IngesterError;
 use rand::Rng;
@@ -14,9 +13,9 @@ use tracing::warn;
 /// How hard to try, and how long to wait between attempts.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
-    /// Total attempts, including the first. Exhausting them returns the last
-    /// error rather than looping forever, which is what lets a wedged chain
-    /// release its advisory lock so a standby can take over.
+    /// Total attempts, including the first. Exhausting them returns the last error
+    /// rather than looping forever, so a wedged chain releases its advisory lock
+    /// and a standby can take over.
     pub max_attempts: u32,
     pub base: Duration,
     pub max: Duration,
@@ -26,7 +25,7 @@ impl Policy {
     const BASE: Duration = Duration::from_millis(500);
     const MAX: Duration = Duration::from_secs(60);
 
-    /// One live tick. Short-lived, so a handful of attempts is plenty.
+    /// One live tick. Short-lived, so a few attempts suffice.
     pub const LIVE_TICK: Self = Self {
         max_attempts: 8,
         base: Self::BASE,
@@ -50,8 +49,8 @@ impl Policy {
 
     /// Exponential backoff with full jitter, capped at [`Policy::max`].
     ///
-    /// The jitter matters with replicas: without it every standby wakes on the
-    /// same schedule and they retry the failing provider in lockstep.
+    /// Jitter matters with replicas: without it every standby wakes on the same
+    /// schedule and retries the failing provider in lockstep.
     pub fn delay(&self, attempt: u32) -> Duration {
         let exp = self.base.saturating_mul(1u32 << attempt.min(16));
         exp.min(self.max)
@@ -61,8 +60,8 @@ impl Policy {
 
 /// Is this worth trying again?
 ///
-/// Config errors are not: the input will not change by retrying, and spinning
-/// on one hides a typo behind a wall of identical log lines.
+/// Config errors are not: retrying cannot change the input, and spinning on one
+/// buries the cause under identical log lines.
 pub fn is_retryable(e: &IngesterError) -> bool {
     !matches!(e, IngesterError::Config(_))
 }
@@ -70,7 +69,7 @@ pub fn is_retryable(e: &IngesterError) -> bool {
 /// Run `op` until it succeeds, hits an unretryable error, or exhausts
 /// `policy.max_attempts`.
 ///
-/// `what` and `chain_id` only shape the log line; they carry no behaviour.
+/// `what` and `chain_id` shape the log line only; they carry no behaviour.
 pub async fn retrying<T, F, Fut>(
     policy: Policy,
     what: &str,
@@ -123,7 +122,7 @@ mod tests {
         }
     }
 
-    /// A huge attempt count must not overflow the shift or the multiply.
+    /// A large attempt count must not overflow the shift or the multiply.
     #[test]
     fn backoff_saturates_instead_of_overflowing() {
         assert!(Policy::LIVE_TICK.delay(u32::MAX) <= Policy::LIVE_TICK.max);
@@ -160,7 +159,7 @@ mod tests {
         assert_eq!(got, 3);
     }
 
-    /// Giving up is the point: it releases the chain so a standby can try.
+    /// Giving up releases the chain so a standby can take it.
     #[tokio::test]
     async fn gives_up_after_max_attempts() {
         let calls = Cell::new(0);
@@ -174,7 +173,7 @@ mod tests {
         assert_eq!(calls.get(), 4, "exactly max_attempts calls");
     }
 
-    /// A bad address will not fix itself, so it must not burn the budget.
+    /// A bad address will not resolve itself, so it must not consume the budget.
     #[tokio::test]
     async fn does_not_retry_config_errors() {
         let calls = Cell::new(0);

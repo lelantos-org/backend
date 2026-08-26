@@ -2,9 +2,8 @@ use crate::domain::error::AppError;
 use crate::domain::models::{Quote, QuoteRequest, Venue};
 use async_trait::async_trait;
 
-/// One impl per venue (UniV3, Curve, 1inch). Service layer races every
-/// quoter that returns true from `supports_chain` and picks the highest
-/// `expected_out`.
+/// One implementation per venue. The service layer races every quoter whose
+/// `supports_chain` returns true and picks the highest `expected_out`.
 #[async_trait]
 #[cfg_attr(test, mockall::automock)]
 pub trait Quoter: Send + Sync {

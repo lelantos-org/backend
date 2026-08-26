@@ -1,63 +1,24 @@
 //! DB-backed tests for the pending-deposit query the flush worker runs every
 //! tick.
 //!
-//! Both behaviours here are load-bearing for liveness: quarantined deposits
-//! have to be excluded in SQL (they are the oldest rows, so post-filtering
-//! would let them eat the whole `LIMIT` window), and one unreadable row must
-//! not fail the query — the worker re-runs it forever, so an error there stops
-//! the chain flushing for good.
+//! Both behaviours matter for liveness. Quarantined deposits must be excluded in
+//! SQL, since they are the oldest rows and post-filtering would let them consume
+//! the whole `LIMIT` window. One unreadable row must not fail the query, since
+//! the worker re-runs it every tick and an error there stops the chain flushing.
 
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use relayer::services::deposit_mempool::DepositMempool;
-use std::sync::{Arc, OnceLock};
-use testcontainers::{ContainerAsync, runners::AsyncRunner};
-use testcontainers_modules::postgres::Postgres;
 
 const CHAIN: i64 = 1;
 
-struct ContainerHandle {
-    _container: ContainerAsync<Postgres>,
-    url: String,
-}
-
-async fn shared_container() -> &'static ContainerHandle {
-    static CELL: OnceLock<tokio::sync::OnceCell<ContainerHandle>> = OnceLock::new();
-    let cell = CELL.get_or_init(tokio::sync::OnceCell::new);
-    cell.get_or_init(|| async {
-        let c = Postgres::default().start().await.unwrap();
-        let host = c.get_host().await.unwrap();
-        let port = c.get_host_port_ipv4(5432).await.unwrap();
-        let url = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
-        let migrate_url = url.clone();
-        tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
-            .await
-            .unwrap()
-            .unwrap();
-        ContainerHandle { _container: c, url }
-    })
-    .await
-}
+/// Cleared between tests. This binary only exercises the deposit mempool query.
+const TABLES: &[&str] = &["deposit_escrowed_events"];
 
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
-    static SERIAL: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
-    let mu = SERIAL
-        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let guard = mu.lock_owned().await;
-    let h = shared_container().await;
-    let pool = database::build_pool(&h.url, database::PoolCfg::indexer())
-        .await
-        .unwrap();
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("TRUNCATE deposit_escrowed_events RESTART IDENTITY CASCADE")
-        .execute(&mut conn)
-        .await
-        .unwrap();
-    drop(conn);
-    (pool, guard)
+    test_support::fresh_pool(database::PoolCfg::indexer(), TABLES).await
 }
 
 #[derive(Insertable)]
@@ -139,8 +100,8 @@ async fn excluded_deposits_do_not_consume_the_limit_window() {
     };
 
     assert_eq!(ids(mempool.pop_pending(2, &[]).await.unwrap()), vec![1, 2]);
-    // The two oldest are quarantined. Excluding them after the query would
-    // return an empty batch and starve deposits 3 and 4 forever.
+    // The two oldest are quarantined. Excluding them after the query would return
+    // an empty batch and starve the newer deposits.
     assert_eq!(
         ids(mempool.pop_pending(2, &[1, 2]).await.unwrap()),
         vec![3, 4]
@@ -151,8 +112,8 @@ async fn excluded_deposits_do_not_consume_the_limit_window() {
 async fn one_unreadable_row_does_not_fail_the_query() {
     let (pool, _guard) = fresh_pool().await;
     let mut rows: Vec<NewDeposit> = (1..=3).map(deposit).collect();
-    // `submitted_at_block` past `uint32`: the contract hashed a `uint32`, so
-    // this row can never produce a matching digest and cannot be parsed.
+    // `submitted_at_block` beyond `uint32`: the contract hashed a `uint32`, so this
+    // row can never produce a matching digest and cannot be parsed.
     rows[1].submitted_at_block = i64::from(u32::MAX) + 1;
     insert(&pool, rows).await;
     let mempool = DepositMempool::new(pool, CHAIN);

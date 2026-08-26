@@ -1,9 +1,8 @@
 //! Multi-table writes that must land together.
 //!
-//! Rows and the cursor that describes them are two tables, so committing them
-//! on two pooled connections leaves a window where one is written and the
-//! other is not. Both composites here run inside a single transaction on a
-//! single connection.
+//! Rows and the cursor describing them live in two tables, so committing them on
+//! two pooled connections would leave a window where one is written and the other
+//! is not. Both composites here run in a single transaction on one connection.
 
 use crate::domain::error::IngesterError;
 use crate::domain::models::{BlockCursor, RawEvent};
@@ -17,30 +16,29 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 
 /// Rows per `INSERT` statement.
 ///
-/// Postgres caps a statement at 65535 bind parameters and each row binds 10,
-/// so the hard ceiling is 6553 rows. A single backfill chunk of the default
-/// 50k blocks can exceed that on a busy pool, which used to surface as an
-/// opaque runtime error that killed the worker.
+/// Postgres caps a statement at 65535 bind parameters and each row binds 10, so
+/// the hard ceiling is 6553 rows. A single backfill chunk over the default 50k
+/// blocks can exceed that on a busy pool.
 const INSERT_CHUNK_ROWS: usize = 1_000;
 
 #[async_trait]
 pub trait AtomicWriteRepo: Send + Sync {
     /// Insert `rows` and move the cursor to `cursor`, atomically.
     ///
-    /// Returns the number of rows actually inserted; duplicates absorbed by
-    /// the unique index do not count.
+    /// Returns the number of rows inserted; duplicates absorbed by the unique
+    /// index do not count.
     async fn commit_batch(
         &self,
         rows: &[RawEvent],
         cursor: &BlockCursor,
     ) -> Result<usize, IngesterError>;
 
-    /// Delete every row at or above `from_block`, reset the cursor, and
-    /// record the rewind in the reorg log — all in one transaction.
+    /// Delete every row at or above `from_block`, reset the cursor and record the
+    /// rewind in the reorg log, all in one transaction.
     ///
-    /// The log entry has to be atomic with the delete: consumers use it to
-    /// retract state they derived from the rows being removed, and a marker
-    /// that can go missing is worse than no marker at all.
+    /// The log entry must be atomic with the delete: consumers use it to retract
+    /// state derived from the removed rows, so the marker and the delete have to
+    /// commit together.
     async fn rewind(
         &self,
         chain_id: i64,

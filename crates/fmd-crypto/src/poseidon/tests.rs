@@ -1,10 +1,9 @@
 //! Parity against `light-poseidon`.
 //!
-//! `light-poseidon` is the oracle: it is the implementation this crate shipped
-//! with, and it is what the FMD test vectors were generated against. Our
-//! permutation is only allowed to be faster, never different — a single
-//! differing bit would change every note commitment and Merkle root, and the
-//! circuits would stop verifying.
+//! `light-poseidon` is the oracle: the FMD test vectors were generated against
+//! it. This crate's permutation may differ only in speed; a single differing bit
+//! would change every note commitment and Merkle root and stop the circuits from
+//! verifying.
 
 use super::*;
 use ark_ff::{Field, PrimeField, UniformRand};
@@ -36,8 +35,8 @@ fn matches_light_poseidon_on_random_inputs() {
     }
 }
 
-/// Edge values exercise the reduction paths that random inputs almost never
-/// hit: zero, one, and the largest element in the field.
+/// Edge values exercise the reduction paths random inputs rarely hit: zero, one,
+/// and the largest element in the field.
 #[test]
 fn matches_light_poseidon_on_edge_values() {
     let edges = [Fq::ZERO, Fq::ONE, -Fq::ONE, Fq::from(2u64)];
@@ -57,11 +56,10 @@ fn matches_light_poseidon_on_edge_values() {
 
 /// Absolute anchor, as opposed to every other test in this file.
 ///
-/// Parity with `light-poseidon` is *relative*: if that crate's constants ever
-/// changed under a version bump, both sides would move together and every
-/// parity assertion would still pass while every commitment and Merkle root in
-/// the system silently changed. These digests are fixed, so that cannot happen
-/// quietly.
+/// Parity with `light-poseidon` is relative: if that crate's constants changed
+/// under a version bump, both sides would move together and every parity
+/// assertion would still pass while every commitment and Merkle root changed.
+/// These digests are fixed, so such a change fails a test.
 ///
 /// The first two are the values circomlibjs publishes for `poseidon([1])` and
 /// `poseidon([1, 2])`, which ties this implementation to circomlib itself
@@ -153,8 +151,8 @@ fn hash_bytes_be_matches_light_poseidon() {
     }
 }
 
-/// Over-modulus input must be rejected, not silently reduced — otherwise two
-/// distinct byte strings could hash the same.
+/// Over-modulus input must be rejected rather than reduced, or two distinct byte
+/// strings could hash to the same value.
 #[test]
 fn hash_bytes_be_rejects_non_canonical_input() {
     let too_big = [0xffu8; 32];

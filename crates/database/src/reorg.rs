@@ -1,20 +1,17 @@
 //! Reorg retraction shared by every consumer of `raw_events`.
 //!
-//! # The gap this closes
-//!
 //! The ingester deletes `raw_events` rows for blocks a fork took away and
 //! re-ingests the canonical replacements. Consumers stream `raw_events` by
-//! ascending `id`, and the replacements get fresh, higher `BIGSERIAL` ids, so
-//! they *are* re-read — the replay side takes care of itself.
+//! ascending `id` and the replacements receive fresh, higher `BIGSERIAL` ids,
+//! so replay is automatic.
 //!
-//! What does not take care of itself is state already derived from the rows
-//! that were deleted. Those rows sit below the consumer's cursor, so nothing
-//! ever revisits them, and the notes / nullifiers / flows they produced stay
-//! in the database describing a branch that no longer exists.
+//! State already derived from the deleted rows is not. Those rows sit below the
+//! consumer's cursor, so nothing revisits them, and the notes, nullifiers and
+//! flows they produced continue to describe an abandoned branch.
 //!
-//! [`apply_pending`] is the other half: given the block a fork started at,
-//! drop everything derived at or above it and rewind the consumer so the
-//! replay rebuilds it cleanly.
+//! [`apply_pending`] covers that case: given the block a fork started at, it
+//! drops everything derived at or above it and rewinds the consumer so replay
+//! rebuilds the state.
 
 use crate::DbPool;
 use crate::schema::{chain_reorgs, consumer_cursors};
@@ -38,15 +35,15 @@ pub type ReorgResult<T> = Result<T, ReorgError>;
 pub struct ReorgRecord {
     pub id: i64,
     pub chain_id: i64,
-    /// First block discarded; everything from here up was re-derived.
+    /// First discarded block. Everything at or above it is re-derived.
     pub rewind_to: i64,
 }
 
 /// Record a rewind.
 ///
 /// Takes a connection rather than the pool because the caller must run this
-/// inside the transaction that deletes the rows: a marker that can go missing
-/// while the deletion lands is worse than no marker at all.
+/// inside the transaction that deletes the rows; the marker and the deletion
+/// have to commit together.
 pub async fn record(
     conn: &mut AsyncPgConnection,
     chain_id: i64,
@@ -93,13 +90,13 @@ pub async fn consumer_position(pool: &DbPool, name: &str, chain_id: i64) -> Reor
 
 /// Apply every unprocessed reorg for one consumer.
 ///
-/// Returns the number applied; `0` means there was nothing to do, which is the
-/// overwhelmingly common case and costs one indexed lookup.
+/// Returns the number applied; `0` means nothing was pending, the common case,
+/// and costs one indexed lookup.
 ///
-/// Retracts from the *lowest* `rewind_to` across the batch: several forks can
-/// be pending at once and the deepest one bounds what has to be rebuilt.
-/// Retraction and the cursor rewind share a transaction, so no reader ever
-/// sees derived rows removed while the cursor still claims to be past them.
+/// Retracts from the lowest `rewind_to` across the batch: several forks can be
+/// pending at once and the deepest bounds what must be rebuilt. Retraction and
+/// the cursor rewind share a transaction, so no reader sees derived rows
+/// removed while the cursor still reports being past them.
 pub async fn apply_pending(pool: &DbPool, name: &str, chain_id: i64) -> ReorgResult<usize> {
     let after = consumer_position(pool, name, chain_id).await?;
     let pending = pending(pool, chain_id, after).await?;
@@ -136,7 +133,7 @@ pub async fn apply_pending(pool: &DbPool, name: &str, chain_id: i64) -> ReorgRes
 /// `DELETE FROM <table> WHERE chain_id = $1 AND block_number >= $2`.
 ///
 /// A macro rather than a generic function: each table is a distinct diesel
-/// type, so the only thing they can share is the shape of the statement.
+/// type, so only the statement shape can be shared.
 macro_rules! delete_at_or_above {
     ($conn:expr, $table:ident, $chain_id:expr, $from_block:expr) => {{
         use crate::schema::$table as t;
@@ -152,11 +149,11 @@ macro_rules! delete_at_or_above {
 
 /// Delete every derived row for `chain_id` at or above `from_block`.
 ///
-/// Idempotent: re-running it deletes nothing the second time, so a consumer
-/// that crashes mid-retraction can simply repeat it.
+/// Idempotent: a re-run deletes nothing, so a consumer that crashes
+/// mid-retraction can repeat it.
 ///
-/// `matches` is absent on purpose — it has
-/// `note_id REFERENCES notes(id) ON DELETE CASCADE`, so it goes with the notes.
+/// `matches` is omitted deliberately: `note_id REFERENCES notes(id) ON DELETE
+/// CASCADE` removes it together with the notes.
 async fn retract_derived(
     conn: &mut AsyncPgConnection,
     chain_id: i64,
@@ -170,24 +167,20 @@ async fn retract_derived(
     Ok(notes + spent + tree + flows + escrow)
 }
 
-/// Rewind one consumer's cursor and mark the reorg log processed to `reorg_id`.
+/// Rewind `name`'s cursor to the start and mark the reorg log processed to
+/// `reorg_id`.
 ///
-/// The cursor goes to id 0 rather than to a computed id: `raw_events.id` is not
-/// ordered by block once rows have been re-inserted, so no id cleanly means
+/// The cursor goes to id 0 rather than a computed id: once rows have been
+/// re-inserted, `raw_events.id` is no longer ordered by block, so no id means
 /// "just before this block". Replaying from the start is slower but correct,
 /// and every consumer write is idempotent.
-/// Rewind `name`'s cursor to the start and mark `reorg_id` as accounted for.
 ///
-/// An upsert, not an update. A consumer that has not committed yet has no row
-/// here, and a bare `UPDATE` matched nothing — so `last_reorg_id` never stuck,
-/// [`apply_pending`] found the same reorg on the next call, and the caller
-/// (which reports "work queued" whenever it retracts, and so does not sleep)
-/// re-ticked at full speed forever. The cycle was self-sustaining: the tick
-/// returned before reaching the commit that would have created the row.
-///
-/// Inserting `(0, 0, reorg_id)` is the correct initial state for that
-/// consumer, and it is what a rewind means anyway: replay from the beginning,
-/// with this reorg already applied.
+/// An upsert rather than an update: a consumer that has not committed yet has
+/// no row, and an `UPDATE` matching nothing would leave `last_reorg_id`
+/// unwritten, so [`apply_pending`] would rediscover the same reorg on every
+/// call and spin the caller's tick loop. `(0, 0, reorg_id)` is both the correct
+/// initial state and the meaning of a rewind: replay from the beginning with
+/// this reorg applied.
 async fn rewind_consumer(
     conn: &mut AsyncPgConnection,
     name: &str,

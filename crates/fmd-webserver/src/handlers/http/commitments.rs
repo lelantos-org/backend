@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 pub struct CommitmentEntry {
     pub leaf_index: i64,
     /// `Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)` as a `0x`-prefixed 32-byte
-    /// field element — the Merkle leaf, ready to insert.
+    /// field element: the Merkle leaf, ready to insert.
     pub leaf_hash: String,
 }
 

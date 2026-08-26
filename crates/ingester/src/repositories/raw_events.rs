@@ -7,14 +7,14 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
 // The channel names live in `database` so consumers can subscribe without
-// depending on this crate — the ingester is the only publisher, but nothing
-// downstream should have to link it to hear from it.
+// depending on this crate; the ingester is the only publisher, but nothing
+// downstream needs to link it.
 use database::listen::{self, CHANNEL_RAW_EVENTS_APPENDED, CHANNEL_RAW_EVENTS_REORG};
 
 #[async_trait]
 pub trait RawEventRepo: Send + Sync {
-    /// Distinct `(block_number, block_hash)` in `[from_block, to_block]`,
-    /// highest block first. Drives the reorg anchor walk.
+    /// Distinct `(block_number, block_hash)` in `[from_block, to_block]`, highest
+    /// block first. Drives the reorg anchor walk.
     async fn block_hashes_desc(
         &self,
         chain_id: i64,

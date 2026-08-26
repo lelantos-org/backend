@@ -4,13 +4,13 @@ use utoipa::ToSchema;
 
 /// Risk verdict for one address.
 ///
-/// `None` is not a stored value — it is what an address with no rows screens
-/// as. The stored levels are constrained by `screened_addresses_risk_check`
-/// in the migration, so `from_db` only fails if that constraint is bypassed.
+/// `None` is not a stored value; it is the verdict for an address with no rows.
+/// The stored levels are constrained by `screened_addresses_risk_check` in the
+/// migration, so `from_db` fails only if that constraint is bypassed.
 ///
-/// Declaration order is the ranking, ascending: `Ord` derives from it, and
-/// the screen result is `max()` over every matching row. `None` must stay
-/// first so an unlisted address ranks below every listed one.
+/// Declaration order is the ascending ranking that `Ord` derives from, and the
+/// screen result is `max()` over every matching row. `None` must stay first so
+/// an unlisted address ranks below every listed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
@@ -22,8 +22,8 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    /// The block policy, in one place. Callers are expected to key off
-    /// `blocked` rather than re-deriving it from `risk`.
+    /// The block policy. Callers key off `blocked` rather than re-deriving it
+    /// from `risk`.
     pub fn blocked(self) -> bool {
         matches!(self, RiskLevel::Banned | RiskLevel::High)
     }
@@ -38,8 +38,8 @@ impl RiskLevel {
         }
     }
 
-    /// Parse a `screened_addresses.risk` value. `none` is rejected: it is a
-    /// computed verdict, never a row.
+    /// Parse a `screened_addresses.risk` value. `none` is rejected because it is
+    /// a computed verdict rather than a stored row.
     pub fn from_db(s: &str) -> AppResult<Self> {
         match s {
             "banned" => Ok(RiskLevel::Banned),

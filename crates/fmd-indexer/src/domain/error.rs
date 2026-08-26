@@ -41,13 +41,12 @@ impl From<database::CursorError> for FmdIndexerError {
 /// Surface a unique violation that the statement's `ON CONFLICT` target did
 /// not cover.
 ///
-/// `notes` and `spent_nullifiers` each carry a second UNIQUE beyond the one
-/// the insert names (`notes_chain_leaf_idx`, `spent_nullifiers_chain_seq_idx`
-/// and `spent_nullifiers_chain_id_nf_key`). A collision there is not absorbed
-/// by `DO NOTHING` — it aborts the statement, the tick fails, and the driver
-/// logs a generic "tick error" while the cursor silently never advances
-/// again. Naming the constraint is the difference between a five-minute fix
-/// and an unexplained stall.
+/// `notes` and `spent_nullifiers` each carry a second UNIQUE beyond the one the
+/// insert names (`notes_chain_leaf_idx`, `spent_nullifiers_chain_seq_idx` and
+/// `spent_nullifiers_chain_id_nf_key`). A collision there is not absorbed by
+/// `DO NOTHING`: it aborts the statement, the tick fails, and the driver logs a
+/// generic tick error while the cursor stops advancing. Naming the constraint
+/// makes the cause visible.
 pub fn log_unique_violation(table: &str, e: &diesel::result::Error) {
     use diesel::result::{DatabaseErrorKind, Error as DieselError};
     if let DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, info) = e {

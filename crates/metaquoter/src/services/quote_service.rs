@@ -11,10 +11,9 @@ pub trait QuoteService: Send + Sync {
     async fn best_quote(&self, req: QuoteRequest) -> AppResult<Quote>;
 }
 
-/// Races every quoter that supports the requested chain, returns the
-/// route with the highest `expected_out`. Each quoter has an individual
-/// deadline; slow quoters are dropped from the race rather than failing
-/// the whole request.
+/// Races every quoter that supports the requested chain and returns the route
+/// with the highest `expected_out`. Each quoter has its own deadline; slow
+/// quoters are dropped from the race rather than failing the request.
 pub struct RacingQuoteService {
     quoters: Vec<Arc<dyn Quoter>>,
     deadline: Duration,

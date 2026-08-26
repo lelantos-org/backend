@@ -36,51 +36,51 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct AppState {
-    /// One spend pipeline per chain. HTTP `/v1/spend` looks up by `payload.chain_id`.
+    /// One spend pipeline per chain. `/v1/spend` looks one up by
+    /// `payload.chain_id`.
     pub spend_pipelines: Arc<HashMap<i64, Arc<SpendPipeline>>>,
-    /// Built only for chains where `swap_wrapper_address` is configured.
-    /// HTTP `/v1/swap` looks up by `payload.chain_id`.
+    /// Built only for chains with a configured `swap_wrapper_address`. `/v1/swap`
+    /// looks one up by `payload.chain_id`.
     pub swap_pipelines: Arc<HashMap<i64, Arc<SwapPipeline>>>,
-    /// One flush pipeline per chain. Held for `/v1/deposit/estimate`; the
-    /// flush worker owns its own clone.
+    /// One flush pipeline per chain, held for `/v1/deposit/estimate`. The flush
+    /// worker owns its own clone.
     pub flush_pipelines: Arc<HashMap<i64, Arc<FlushPipeline>>>,
-    /// Process-wide deposit lifecycle pub/sub. SSE handler subscribes;
+    /// Process-wide deposit lifecycle pub/sub. The SSE handler subscribes and
     /// `FlushPipeline` publishes after each successful `flushBatch`.
     pub events: Arc<EventBroadcaster>,
-    /// DB pool. Used by `nullifier_guard` for `spent_nullifiers` lookups
+    /// Database pool, used by `nullifier_guard` for `spent_nullifiers` lookups
     /// before SNARK generation.
     pub pool: DbPool,
     /// Nullifier admission control. See `services::nullifier_guard`.
     pub nullifiers: Arc<NullifierGuards>,
-    /// Replays a submission a caller has already made under the same
+    /// Replays a submission a caller already made under the same
     /// `Idempotency-Key`. See `services::idempotency`.
     pub idempotency: Arc<IdempotencyCache>,
-    /// Wallet-facing description of each chain, resolved once at boot and
-    /// served by `/chains`. Holds only what a client may see — never the
-    /// signer key or the relayer's internal RPC.
+    /// Wallet-facing description of each chain, resolved once at boot and served
+    /// by `/chains`. Holds only what a client may see, never the signer key or the
+    /// relayer's internal RPC.
     pub descriptors: Arc<HashMap<i64, ChainDescriptor>>,
     /// Upstream spot-price provider for `/v1/prices`.
     pub prices: Arc<PriceClient>,
-    /// Per-token price cache, including the negatives: a token the provider
-    /// cannot price is asked about once per TTL, not once per request.
+    /// Per-token price cache, negatives included: a token the provider cannot
+    /// price is asked about once per TTL rather than once per request.
     pub price_cache: PriceCache,
     /// The whole `/v1/prices` body, cached under the unit key.
     ///
-    /// Not redundant with `price_cache`. That one spares the *provider*; this
-    /// one spares the *database*: the handler reads the asset table once per
-    /// chain, exactly as `/chains` does, and the relayer's pool is
-    /// `PoolCfg::relayer()` — four connections. Without this, one poll from
-    /// every open wallet tab lands on those four.
+    /// Distinct from `price_cache`, which spares the provider; this spares the
+    /// database. The handler reads the asset table once per chain, as `/chains`
+    /// does, and the relayer's pool is `PoolCfg::relayer()` with four connections,
+    /// so without this every open wallet tab's poll lands on those four.
     pub prices_response: Cache<(), Arc<Vec<PriceOut>>>,
-    /// The `assets` table, cached. Shared by `/chains` and the shielded-fee
-    /// check so the two do not each read it per request.
+    /// The `assets` table, cached and shared by `/chains` and the shielded-fee
+    /// check so neither reads it per request.
     pub assets: Arc<AssetRegistry>,
 }
 
 /// The half of `ChainCfg` that is safe to publish.
 ///
-/// Built at boot rather than read per request so the handler cannot reach the
-/// rest of the config, and so a malformed address fails startup instead of a
+/// Built at boot rather than read per request, so the handler cannot reach the
+/// rest of the config and a malformed address fails startup rather than a
 /// wallet's first call.
 pub struct ChainDescriptor {
     pub native_adapter_address: Option<String>,
@@ -98,9 +98,9 @@ impl ChainDescriptor {
     }
 }
 
-/// Owned by the descriptor rather than assembled in the handler: it is the
-/// only place that knows which parts of a `ChainCfg` may be published, so
-/// adding a field to the config cannot leak into `/chains` by accident.
+/// Owned by the descriptor rather than assembled in the handler: it is the only
+/// place that knows which parts of a `ChainCfg` may be published, so adding a
+/// config field cannot leak into `/chains`.
 impl From<&ChainDescriptor> for ChainConfigOut {
     fn from(d: &ChainDescriptor) -> Self {
         Self {
@@ -118,9 +118,8 @@ impl From<&ChainDescriptor> for ChainConfigOut {
 impl AppState {
     /// The spend pipeline serving `chain_id`, or a 404.
     ///
-    /// Every endpoint dispatches on a chain id the caller supplied, so the
-    /// "unknown chain" answer belongs here rather than being restated at each
-    /// one.
+    /// Every endpoint dispatches on a caller-supplied chain id, so the unknown-
+    /// chain answer lives here rather than being restated at each one.
     pub fn spend_pipeline(&self, chain_id: i64) -> AppResult<Arc<SpendPipeline>> {
         self.spend_pipelines
             .get(&chain_id)
@@ -129,7 +128,7 @@ impl AppState {
     }
 
     /// The swap pipeline serving `chain_id`. Absent on chains with no
-    /// `swap_wrapper_address`, which is the same 404 to a caller.
+    /// `swap_wrapper_address`, which reads as the same 404 to a caller.
     pub fn swap_pipeline(&self, chain_id: i64) -> AppResult<Arc<SwapPipeline>> {
         self.swap_pipelines
             .get(&chain_id)
@@ -202,18 +201,18 @@ pub async fn build_state(
 }
 
 /// Room for every registered asset on every chain a deployment serves, with
-/// slack. The value is two `f64`s and an `i64`, so the ceiling costs nothing.
+/// slack. The value is two `f64`s and an `i64`, so the ceiling is cheap.
 const PRICE_CACHE_CAPACITY: u64 = 1_024;
 
 /// How long one `/v1/prices` body is reused.
 ///
-/// Shorter than the per-token TTL on purpose: this bounds how long a price that
-/// *has* refreshed upstream stays invisible, while `token_prices.ttl_s` bounds
-/// how often we ask upstream at all.
+/// Shorter than the per-token TTL: this bounds how long a price that has already
+/// refreshed upstream stays invisible, while `token_prices.ttl_s` bounds how
+/// often upstream is asked at all.
 const PRICES_RESPONSE_TTL: Duration = Duration::from_secs(30);
 
-/// Dependencies every chain's pipelines share. Built once so the per-chain
-/// code below reads as "what this chain adds", not as a list of clones.
+/// Dependencies every chain's pipelines share. Built once so the per-chain code
+/// below states what each chain adds rather than repeating a list of clones.
 struct Shared {
     pool: DbPool,
     assets: Arc<AssetRegistry>,
@@ -240,7 +239,7 @@ impl Shared {
             prover,
             oracle,
             events: Arc::new(EventBroadcaster::new()),
-            // The key describes the circuit, not the deployment, so it is
+            // The key describes the circuit rather than the deployment, so it is
             // loaded once rather than per chain.
             transact_verifier: load_transact_verifier(cfg)?,
         })
@@ -338,7 +337,7 @@ async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
     Ok(ChainRuntime { spend, swap, flush })
 }
 
-/// Replay the chain's tree from the indexer's tables, then prove the result
+/// Replay the chain's tree from the indexer's tables, then check the result
 /// against the pool itself. Both must agree before this chain serves anything.
 async fn bootstrap_mirror(
     c: &ChainCfg,
@@ -371,9 +370,9 @@ async fn bootstrap_mirror(
     Ok(mirror)
 }
 
-/// Optional native route. The adapter is the pool's caller for a native
-/// unshield, so it needs its own submitter target; the tree mirror and prover
-/// stay shared with every other entry point.
+/// Optional native route. The adapter is the pool's caller for a native unshield,
+/// so it needs its own submitter target; the tree mirror and prover stay shared
+/// with every other entry point.
 fn build_native_route(c: &ChainCfg, rpc: &RpcEndpoint) -> AppResult<Option<Arc<NativeRoute>>> {
     let Some(hex) = &c.native_adapter_address else {
         return Ok(None);
@@ -385,7 +384,7 @@ fn build_native_route(c: &ChainCfg, rpc: &RpcEndpoint) -> AppResult<Option<Arc<N
 }
 
 /// Optional swap pipeline. Shares the chain's `TreeMirror` and prover with the
-/// spend pipeline so the per-chain mutex serialises across both; its dedicated
+/// spend pipeline so the per-chain mutex serialises across both, while its own
 /// submitter targets the wrapper rather than the pool.
 fn build_swap_pipeline(
     c: &ChainCfg,
@@ -419,10 +418,10 @@ fn build_swap_pipeline(
 
 /// Optional shielded fee collection.
 ///
-/// Refuses to boot on any combination that would look configured and behave
-/// otherwise: a key that does not match its address (checked inside
-/// [`ShieldedFeeChecker::new`]), a fee table that can price nothing, or a
-/// missing transact verification key.
+/// Refuses to boot on any combination that would appear configured and behave
+/// otherwise: a key that does not match its address, checked inside
+/// [`ShieldedFeeChecker::new`], a fee table that can price nothing, or a missing
+/// transact verification key.
 fn build_shielded_fee_checker(
     c: &ChainCfg,
     shared: &Shared,
@@ -433,10 +432,10 @@ fn build_shielded_fee_checker(
     };
     let fail = |why: &str| boot_err(c.chain_id, "shielded fee", why);
 
-    // Without a transact verification key, `out_cm` and `nullifier[0]` reach
-    // the fee check unverified — and those are exactly what binds a decrypted
-    // value to the proof. The fee would then rest on a caller's say-so. Rather
-    // than enforce something that does not hold, refuse to start.
+    // Without a transact verification key, `out_cm` and `nullifier[0]` reach the
+    // fee check unverified, and those are what bind a decrypted value to the
+    // proof. The fee would then rest on the caller's assertion, so boot fails
+    // instead.
     if shared.transact_verifier.is_none() {
         return Err(fail(
             "shielded fees require prover.transact_vkey_path: without it a wallet's proof is \
@@ -444,11 +443,11 @@ fn build_shielded_fee_checker(
              unverified",
         ));
     }
-    // An asset with no price cannot be quoted, so a fee in it would be refused
-    // at submit time and read to the payer as the relayer being broken. Whether
-    // each *individual* asset is priced cannot be settled here — the asset id to
-    // token-address mapping lives in a table the indexer may not have filled
-    // yet — but an empty fee table settles all of them at once.
+    // An asset with no price cannot be quoted, so a fee in it would be refused at
+    // submit time and appear to the payer as a broken relayer. Whether each
+    // individual asset is priced cannot be settled here, since the asset-id to
+    // token-address mapping lives in a table the indexer may not have filled, but
+    // an empty fee table settles all of them at once.
     if c.accepted_fee_tokens.is_empty() {
         return Err(fail(
             "no accepted_fee_tokens are configured, so no fee can be priced and every spend \
@@ -509,8 +508,8 @@ async fn build_fee_quoter(
     })
 }
 
-/// Every submitter on a chain shares its signer and receipt settings and
-/// differs only in the contract it targets.
+/// Every submitter on a chain shares its signer and receipt settings and differs
+/// only in the contract it targets.
 fn submitter_for(
     c: &ChainCfg,
     rpc: &RpcEndpoint,
@@ -533,8 +532,8 @@ fn parse_configured_address(chain_id: i64, field: &str, hex: &str) -> AppResult<
     Address::from_str(hex).map_err(|e| boot_err(chain_id, field, e))
 }
 
-/// Boot failures are all fatal and all want the same "which chain, which step"
-/// framing, so they share one constructor.
+/// Boot failures are all fatal and share the same chain-and-step framing, so they
+/// share one constructor.
 fn boot_err(chain_id: i64, step: &str, e: impl std::fmt::Display) -> AppError {
     AppError::Internal(format!("chain {chain_id}: {step}: {e}"))
 }
@@ -542,8 +541,8 @@ fn boot_err(chain_id: i64, step: &str, e: impl std::fmt::Display) -> AppError {
 /// Drive one chain's flush pipeline on a fixed interval.
 ///
 /// Ticks are skipped rather than queued when one runs long, and a parked mirror
-/// stops the worker outright: it never un-parks without a restart, so retrying
-/// would only spam the log.
+/// stops the worker outright: it does not un-park without a restart, so retrying
+/// would only fill the log.
 fn spawn_flush_worker(flush: Arc<FlushPipeline>, interval: Duration) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
@@ -556,8 +555,8 @@ fn spawn_flush_worker(flush: Arc<FlushPipeline>, interval: Duration) {
                     error!(chain_id = flush.chain_id, error = %e, "flush worker stopping");
                     return;
                 }
-                // The prover was busy with another chain's proof. Expected
-                // under load, and the next tick is seconds away.
+                // The prover was busy with another chain's proof, which is normal
+                // under load; the next tick is seconds away.
                 Err(AppError::ProverBusy) => {
                     debug!(chain_id = flush.chain_id, "flush deferred; prover busy")
                 }
@@ -567,9 +566,9 @@ fn spawn_flush_worker(flush: Arc<FlushPipeline>, interval: Duration) {
     });
 }
 
-/// Boot-time check: every accepted fee token must resolve a price via the
-/// configured oracle. Fail-fast prevents discovering a misconfigured
-/// `quote_symbol` at first `/estimate` call.
+/// Boot-time check that every accepted fee token resolves a price through the
+/// configured oracle, so a misconfigured `quote_symbol` fails at startup rather
+/// than at the first `/estimate` call.
 async fn validate_fee_token_pairs(
     oracle: &dyn PriceOracle,
     native_symbol: &str,
@@ -604,9 +603,8 @@ async fn validate_fee_token_pairs(
 mod tests {
     use super::{ChainConfigOut, ChainDescriptor, ChainPublicCfg};
 
-    /// The conversion hand-copies seven fields, which is exactly the shape of
-    /// change where one gets dropped and a wallet silently falls back to its
-    /// own default instead of the deployment's value.
+    /// The conversion hand-copies seven fields, so a dropped one would leave a
+    /// wallet falling back to its own default instead of the deployment's value.
     #[test]
     fn test_chain_config_out_carries_every_described_field() {
         let d = ChainDescriptor {
@@ -632,8 +630,8 @@ mod tests {
         assert_eq!(out.explorer_url.as_deref(), Some("http://explorer"));
     }
 
-    /// An operator who has not filled the block in yields an empty record, not
-    /// a partly-invented one.
+    /// An unfilled block yields an empty record rather than a partly synthesised
+    /// one.
     #[test]
     fn test_chain_config_out_is_empty_when_nothing_is_described() {
         let out = ChainConfigOut::from(&ChainDescriptor {

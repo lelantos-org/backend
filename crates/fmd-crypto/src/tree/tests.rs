@@ -109,8 +109,8 @@ fn filled(depth: usize, n: usize) -> MerkleTree {
     t
 }
 
-/// Bulk `extend` (parallel bottom-up rebuild) must land on the same state as
-/// N incremental `insert`s.
+/// Bulk `extend`, a parallel bottom-up rebuild, must land on the same state as N
+/// incremental `insert`s.
 #[test]
 fn extend_matches_incremental_insert() {
     for n in [0usize, 1, 3, 4, 5, 16, 17, 63, 64] {
@@ -132,10 +132,9 @@ fn extend_matches_incremental_insert() {
     }
 }
 
-/// `truncate_leaves` must leave the tree indistinguishable from one that was
-/// only ever filled to the surviving leaf count — this is the relayer's
-/// rollback path, where a stale internal node means a permanently divergent
-/// mirror.
+/// `truncate_leaves` must leave the tree indistinguishable from one filled only
+/// to the surviving leaf count. This is the relayer's rollback path, where a
+/// stale internal node means a permanently divergent mirror.
 #[test]
 fn truncate_matches_tree_built_without_the_dropped_leaves() {
     for n in [1usize, 4, 5, 17, 33, 64] {
@@ -165,7 +164,7 @@ fn truncate_matches_tree_built_without_the_dropped_leaves() {
     }
 }
 
-/// Insert-after-rollback is the exact sequence a failed submit produces.
+/// Insert after rollback is the sequence a failed submit produces.
 #[test]
 fn reinsert_after_truncate_matches_direct_fill() {
     let mut t = filled(3, 10);

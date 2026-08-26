@@ -1,25 +1,25 @@
 //! DefiLlama spot-price adapter.
 //!
-//! `GET {base_url}/prices/current/{chain}:{address},…` prices a batch of
-//! tokens in one request, keyed by the coin string that was sent. Tokens the
-//! provider does not know are simply *absent* from the response — no error,
-//! no null entry — so a missing key means "no price", never "request failed".
+//! `GET {base_url}/prices/current/{chain}:{address},…` prices a batch of tokens
+//! in one request, keyed by the coin string sent. Tokens the provider does not
+//! know are absent from the response rather than reported as an error or a null
+//! entry, so a missing key means "no price" and never "request failed".
 //!
-//! The payload carries `decimals` alongside the price, which is what lets the
-//! flow endpoints convert base units into USD without an ERC20 metadata index
-//! of our own.
+//! The payload carries `decimals` alongside the price, letting the flow
+//! endpoints convert base units into USD without a separate ERC20 metadata
+//! index.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// A token as the rest of the crate identifies it: chain id plus lowercase
-/// hex address, no `0x` — exactly what `hex::encode` yields for `assets.token`.
+/// A token as the rest of the crate identifies it: chain id plus lowercase hex
+/// address without a `0x` prefix, matching `hex::encode` of `assets.token`.
 pub type TokenKey = (i64, String);
 
-/// Chains DefiLlama can price, by EVM chain id. Anything absent — local anvil
-/// included — is never sent upstream and simply has no price.
+/// Chains DefiLlama can price, by EVM chain id. Anything absent, local anvil
+/// included, is never sent upstream and has no price.
 fn llama_chain(chain_id: i64) -> Option<&'static str> {
     Some(match chain_id {
         1 => "ethereum",
@@ -32,16 +32,15 @@ fn llama_chain(chain_id: i64) -> Option<&'static str> {
     })
 }
 
-/// DefiLlama grades every quote; anything this weak is a thin-liquidity guess
-/// rather than a price, and reporting it as dollars would be worse than
-/// reporting nothing.
+/// DefiLlama grades every quote. Below this threshold a quote reflects thin
+/// liquidity rather than a price and is discarded.
 const MIN_CONFIDENCE: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TokenPrice {
     pub price_usd: f64,
-    /// `None` when the provider priced the token but did not report decimals.
-    /// Enough for a spot price, not enough to convert an amount.
+    /// `None` when the provider priced the token but reported no decimals:
+    /// sufficient for a spot price, insufficient to convert an amount.
     pub decimals: Option<u32>,
     /// Provider's own timestamp for the quote, not our fetch time.
     pub quoted_at: i64,
@@ -78,13 +77,13 @@ impl PriceClient {
         })
     }
 
-    /// Price whatever of `tokens` the provider knows. Tokens on unsupported
-    /// chains never leave the process, and an all-unsupported batch makes no
-    /// request at all — which is why the local anvil stack stays offline.
+    /// Price whichever of `tokens` the provider knows. Tokens on unsupported
+    /// chains never leave the process, and an all-unsupported batch issues no
+    /// request, keeping the local anvil stack offline.
     pub async fn fetch(&self, tokens: &[TokenKey]) -> Result<HashMap<TokenKey, TokenPrice>> {
-        // Coin string back to the key that asked for it: the response echoes
-        // the request verbatim, so this avoids a reverse chain-slug map and
-        // any casing assumption about what comes back.
+        // Maps the coin string back to the key that requested it. The response
+        // echoes the request verbatim, avoiding a reverse chain-slug map and any
+        // assumption about the casing returned.
         let by_coin: HashMap<String, TokenKey> = tokens
             .iter()
             .filter_map(|k| Some((coin_id(llama_chain(k.0)?, &k.1), k.clone())))
@@ -94,8 +93,8 @@ impl PriceClient {
         }
 
         let mut coins: Vec<&str> = by_coin.keys().map(String::as_str).collect();
-        // Stable request URL so an upstream cache (and our own logs) see one
-        // shape per token set rather than one per HashMap iteration order.
+        // Stable request URL so upstream caches and logs see one shape per token
+        // set rather than one per HashMap iteration order.
         coins.sort_unstable();
         let url = format!("{}/prices/current/{}", self.base_url, coins.join(","));
 
@@ -162,7 +161,7 @@ mod tests {
 
     #[test]
     fn local_chains_have_no_provider_slug() {
-        // The whole reason the anvil stack never calls out.
+        // Keeps the anvil stack from calling out.
         assert_eq!(llama_chain(31337), None);
         assert_eq!(llama_chain(1337), None);
         assert_eq!(llama_chain(1), Some("ethereum"));
@@ -189,7 +188,7 @@ mod tests {
 
     #[test]
     fn absent_tokens_yield_no_entry() {
-        // Provider omits unknown tokens instead of erroring, so an empty
+        // The provider omits unknown tokens rather than erroring, so an empty
         // `coins` map is a valid "nothing is priced" answer.
         let k = key(1, "dead");
         assert!(collect(parse(r#"{"coins":{}}"#), &by_coin(&[k])).is_empty());
@@ -221,10 +220,10 @@ mod tests {
         assert_eq!(got.get(&k).unwrap().price_usd, 1.5);
     }
 
-    /// Contract check against the live provider. Ignored by default — it needs
-    /// the network — but this is the one thing no fixture can catch: DefiLlama
-    /// renaming a field or dropping `confidence` would leave every test above
-    /// green while every price silently vanished in production.
+    /// Contract check against the live provider. Ignored by default because it
+    /// needs the network. No fixture can catch this case: DefiLlama renaming a
+    /// field or dropping `confidence` would leave every test above green while
+    /// prices vanished in production.
     ///
     /// Run with `cargo test -p prices -- --ignored --nocapture`.
     #[tokio::test]

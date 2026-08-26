@@ -2,8 +2,8 @@
 //!
 //! Two passes per tick: `forward` scans notes that arrived since this chain's
 //! cursor against every active subscription, and `backfill` walks one lagging
-//! subscription over history. Deliberately unlocked, unlike consume —
-//! `matches` inserts are idempotent and both pointers only move forward.
+//! subscription over history. Unlocked, unlike consume, because `matches`
+//! inserts are idempotent and both pointers only move forward.
 
 use crate::domain::convert::{bigdec_to_fq, clue_bits_be};
 use crate::domain::error::{FmdIndexerError, Result};
@@ -28,17 +28,16 @@ pub const NAME: &str = "fmd-filter";
 /// How long a `notes.id` must have been observable before the backfill pages
 /// past it.
 ///
-/// `notes.id` comes from a sequence, so it is allocated *before* commit and
-/// ids do not become visible in id order. That is harmless for the per-chain
-/// forward pass — the consume lock gives each chain one writer, so a chain's
-/// own rows always appear in order — but the backfill walks a single *global*
-/// pointer, and two replicas leading two chains do interleave. Reading the
-/// head from `max(id)` therefore steps over a row that commits a moment later,
-/// and the pointer never goes back: a note silently never scanned for that
+/// `notes.id` comes from a sequence, so it is allocated before commit and ids do
+/// not become visible in id order. That is harmless for the per-chain forward
+/// pass, where the consume lock gives each chain one writer, but the backfill
+/// walks a single global pointer and two replicas leading two chains interleave.
+/// Reading the head from `max(id)` would step over a row that commits a moment
+/// later, and the pointer never goes back, leaving that note unscanned for the
 /// subscription.
 ///
 /// Lagging the head bounds the hazard by how long a single `INSERT` can stay
-/// uncommitted instead of by id ordering. Five seconds against a sub-second
+/// uncommitted rather than by id ordering: five seconds against a sub-second
 /// statement.
 const BACKFILL_LAG: Duration = Duration::from_secs(5);
 
@@ -99,9 +98,9 @@ impl FilterServiceImpl {
         self.advance_cursor(chain_id, last_id, last_block).await?;
 
         outcome.stats.warn_unusable();
-        // Unconditional, and at debug: emitting only when hits > 0 turned the
-        // log stream into a receive-timing side channel for anyone who could
-        // read it. The skip counts are unconditional for the same reason.
+        // Emitted unconditionally and at debug. Logging only when hits > 0 would
+        // make the log stream a receive-timing side channel; the skip counts are
+        // unconditional for the same reason.
         debug!(
             chain_id,
             candidates = new_notes.len(),
@@ -118,12 +117,12 @@ impl FilterServiceImpl {
 
     /// Walk one lagging subscription forward over history by a single batch.
     ///
-    /// Registering a subscription does not rewind the shared cursor, so a
-    /// burst of registrations costs one batch per tick instead of a rescan of
-    /// all history against every subscriber. The pointer is a global
-    /// `notes.id`, so this pass is chain-agnostic; running it from several
-    /// per-chain ticks only makes it converge faster, and re-scanning an
-    /// overlapping range is absorbed by `ON CONFLICT DO NOTHING`.
+    /// Registering a subscription does not rewind the shared cursor, so a burst
+    /// of registrations costs one batch per tick rather than a rescan of all
+    /// history against every subscriber. The pointer is a global `notes.id`, so
+    /// this pass is chain-agnostic; running it from several per-chain ticks only
+    /// converges faster, and re-scanning an overlapping range is absorbed by
+    /// `ON CONFLICT DO NOTHING`.
     async fn backfill_tick(&self, batch: i64) -> Result<TickProgress> {
         let max_id = self.notes.max_id().await?;
         record_notes_head(max_id);
@@ -137,21 +136,21 @@ impl FilterServiceImpl {
             .notes
             .fetch_after_any_chain(sub.backfilled_through_note_id, batch)
             .await?;
-        // `fetch_after_any_chain` has no upper bound, so a batch can reach
-        // past the safe head into ids that may still be interleaved with an
+        // `fetch_after_any_chain` has no upper bound, so a batch can reach past
+        // the safe head into ids that may still be interleaved with an
         // uncommitted one.
         notes.retain(|n| n.id <= head);
         let Some(through) = notes.last().map(|n| n.id) else {
-            // Nothing left below `head` for this subscription: mark it caught
-            // up so it stops being picked. That retires one subscription, so
-            // the next tick may still find another — report progress, not idle.
+            // Nothing left below `head` for this subscription: mark it caught up
+            // so it stops being picked. That retires one subscription and the
+            // next tick may find another, so report progress rather than idle.
             self.subscriptions.advance_backfill(sub_id, head).await?;
             return Ok(TickProgress::Partial);
         };
 
         let candidates = notes.len();
-        // `retain` above may have trimmed the batch below `head`, so measure
-        // saturation on what is actually being scanned.
+        // `retain` above may have trimmed the batch below `head`, so saturation
+        // is measured on what is actually scanned.
         let progress = TickProgress::from_batch(candidates, batch);
         let subs = [sub];
         let mut hits: Vec<NewMatch> = Vec::new();
@@ -179,16 +178,15 @@ impl FilterServiceImpl {
         Ok(progress)
     }
 
-    /// Monotonic, but not advisory-locked, unlike the consume loop. `matches`
-    /// inserts are idempotent (PK + `ON CONFLICT DO NOTHING`), and the one
-    /// real hazard here — a note slipping below the cursor because `notes.id`
-    /// is assigned before commit — needs concurrent writers *for this chain*,
-    /// which the consume lock already rules out. See [`BACKFILL_LAG`] for why
-    /// the global backfill pointer does not get the same guarantee for free.
+    /// Monotonic but not advisory-locked, unlike the consume loop. `matches`
+    /// inserts are idempotent (primary key plus `ON CONFLICT DO NOTHING`), and
+    /// the one hazard — a note slipping below the cursor because `notes.id` is
+    /// assigned before commit — requires concurrent writers for this chain, which
+    /// the consume lock rules out. See [`BACKFILL_LAG`] for why the global
+    /// backfill pointer lacks the same guarantee.
     async fn advance_cursor(&self, chain_id: i64, last_id: i64, last_block: i64) -> Result<()> {
-        // Discarded deliberately: this loop is unlocked by design and several
-        // per-chain ticks race to advance the same cursor, so losing the race
-        // is the normal path, not a fault. See the doc on this method.
+        // Discarded: this loop is unlocked and several per-chain ticks race to
+        // advance the same cursor, so losing the race is expected.
         let _ = self
             .cursors
             .upsert_monotonic(UpsertCursor {
@@ -202,11 +200,11 @@ impl FilterServiceImpl {
     }
 }
 
-/// Cursor half of the notes -> matches lag pair.
+/// Cursor half of the notes-to-matches lag pair.
 ///
-/// `notes` carries no `block_ts`, so this hop cannot report a wall-clock age
-/// the way ingest and consume do. The distance between this and
-/// [`record_notes_head`] is the closest signal available for free.
+/// `notes` carries no `block_ts`, so this hop cannot report a wall-clock age the
+/// way ingest and consume do. The distance between this and
+/// [`record_notes_head`] is the available signal.
 fn record_cursor(chain_id: i64, after_note_id: i64) {
     metrics::gauge!(
         shared::metrics::name::CONSUMER_CURSOR_NOTE_ID,
@@ -218,9 +216,9 @@ fn record_cursor(chain_id: i64, after_note_id: i64) {
 
 /// Head half of the pair; see [`record_cursor`].
 ///
-/// Unlabelled by chain because `max_id` is global, which makes the difference
-/// an upper bound on any one chain's lag rather than that chain's lag. Emitted
-/// from the backfill pass because that pass already pays for the query.
+/// Unlabelled by chain because `max_id` is global, making the difference an upper
+/// bound on any one chain's lag rather than that chain's lag. Emitted from the
+/// backfill pass, which already runs the query.
 fn record_notes_head(max_id: i64) {
     metrics::gauge!(shared::metrics::name::NOTES_MAX_ID).set(max_id as f64);
 }
@@ -228,8 +226,8 @@ fn record_notes_head(max_id: i64) {
 #[async_trait]
 impl FilterService for FilterServiceImpl {
     async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
-        // Both passes run every tick; the driver must not sleep while either
-        // still has queued work, so take the higher of the two.
+        // Both passes run every tick, and the driver must not sleep while either
+        // has queued work, so take the higher of the two.
         let forward = self.forward_tick(chain_id, batch).await?;
         let backfill = self.backfill_tick(batch).await?;
         Ok(forward.max(backfill))
@@ -239,8 +237,8 @@ impl FilterService for FilterServiceImpl {
         match self.cursors.list_chain_ids().await {
             Ok(ids) => ids,
             Err(e) => {
-                // An empty list is indistinguishable from "no chains
-                // configured", so the loop would idle silently.
+                // An empty list is indistinguishable from no chains being
+                // configured, so the failure is logged rather than idled through.
                 warn!(error = %e, "list_chain_ids failed; skipping this round");
                 Vec::new()
             }
@@ -265,10 +263,10 @@ impl shared::tick::TickService for FilterServiceImpl {
 
 /// A `notes.id` head held back by [`BACKFILL_LAG`].
 ///
-/// Keeps two observations: `safe` is old enough to page over, `pending` is
-/// waiting out the lag. The clock is only reset on promotion, so calling this
-/// many times per tick — the backfill runs once per chain — does not keep
-/// pushing the promotion into the future.
+/// Keeps two observations: `safe` is old enough to page over and `pending` is
+/// waiting out the lag. The clock resets only on promotion, so calling this
+/// several times per tick, as the per-chain backfill does, does not push the
+/// promotion further out.
 struct LaggedHead {
     safe: i64,
     pending: i64,
@@ -296,14 +294,13 @@ impl LaggedHead {
 
 /// Notes and subscriptions `scan` could not use.
 ///
-/// Counted rather than dropped silently: a subscription whose detection key
-/// does not parse matches nothing, forever, and nothing else in the system
-/// would ever say so.
+/// Counted rather than dropped: a subscription whose detection key does not parse
+/// matches nothing permanently, and nothing else reports it.
 #[derive(Default)]
 struct ScanStats {
     off_curve_notes: usize,
-    /// A set, so folding per-chain scans of the same subscriber list together
-    /// reports each id once.
+    /// A set, so folding per-chain scans of the same subscriber list reports each
+    /// id once.
     invalid_subs: BTreeSet<i64>,
 }
 
@@ -313,7 +310,7 @@ impl ScanStats {
         self.invalid_subs.extend(other.invalid_subs);
     }
 
-    /// Ids only — never the key.
+    /// Reports ids only, never the key.
     fn warn_unusable(&self) {
         if !self.invalid_subs.is_empty() {
             warn!(
@@ -338,8 +335,9 @@ fn group_by_chain(notes: Vec<NoteRow>) -> BTreeMap<i64, Vec<NoteRow>> {
     by_chain
 }
 
-/// Cartesian product of (note × subscription), evaluated in parallel via
-/// rayon on a blocking task. clueBits = first 2 bytes (BE) of ciphertext.
+/// Cartesian product of note by subscription, evaluated in parallel through rayon
+/// on a blocking task. `clueBits` is the first two big-endian bytes of the
+/// ciphertext.
 async fn scan(notes: &[NoteRow], subs: &[SubscriptionRow], chain_id: i64) -> Result<ScanOutcome> {
     let mut stats = ScanStats::default();
 
@@ -352,8 +350,8 @@ async fn scan(notes: &[NoteRow], subs: &[SubscriptionRow], chain_id: i64) -> Res
                 stats.off_curve_notes += 1;
                 return None;
             }
-            // `plan_commit` refuses to store a note whose ciphertext cannot
-            // carry the prefix, so the fallback is unreachable for stored rows.
+            // `plan_commit` refuses to store a note whose ciphertext cannot carry
+            // the prefix, so the fallback is unreachable for stored rows.
             let bits = clue_bits_be(&n.ciphertext).unwrap_or(0);
             Some((n.id, rx, ry, bits))
         })
@@ -376,8 +374,8 @@ async fn scan(notes: &[NoteRow], subs: &[SubscriptionRow], chain_id: i64) -> Res
 
     let hits = tokio::task::spawn_blocking(move || {
         let subs = &*sub_inputs;
-        // Group by gamma so each group can run as a single batch per note:
-        // one fixed-base table per (note, gamma) amortizes scalar muls
+        // Group by gamma so each group runs as a single batch per note: one
+        // fixed-base table per (note, gamma) amortizes the scalar multiplications
         // across the whole subscriber set.
         let mut by_gamma: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (idx, (_, _, g)) in subs.iter().enumerate() {
@@ -385,10 +383,9 @@ async fn scan(notes: &[NoteRow], subs: &[SubscriptionRow], chain_id: i64) -> Res
         }
 
         // The key slices handed to `test_clue_batch_parsed` depend only on the
-        // subscriber set, so build them once for the whole batch rather than
-        // once per note — otherwise every note re-materialises a Vec as long
-        // as the subscriber list.
-        // (gamma, subscriber indices, their detection keys)
+        // subscriber set, so they are built once for the whole batch; per-note
+        // construction would re-materialise a Vec as long as the subscriber list
+        // for every note. Each group is (gamma, subscriber indices, keys).
         type GammaGroup<'a> = (usize, Vec<usize>, Vec<&'a [Fr]>);
         let groups: Vec<GammaGroup> = by_gamma
             .into_iter()
@@ -460,7 +457,7 @@ mod tests {
     #[test]
     fn group_by_chain_partitions_a_straddling_batch() {
         // The backfill pointer is a global note id, so a batch can interleave
-        // chains; every note must land in exactly one group, order preserved.
+        // chains. Every note must land in exactly one group, order preserved.
         let batch = vec![note(1, 10), note(2, 20), note(3, 10), note(4, 30)];
 
         let grouped = group_by_chain(batch);

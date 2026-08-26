@@ -11,14 +11,12 @@ pub struct ChunkEntry {
     pub leaf_index: i64,
     /// `Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`, precomputed.
     ///
-    /// This feed used to carry `cm` and the two `cv_dep` coordinates, and the
-    /// only thing any client did with them was hash them into this. Sending
-    /// the result is one field element instead of three: it saves each client
-    /// 1,048,576 pure-JS Poseidon-4 calls over a full tree and cuts the feed
-    /// roughly threefold.
+    /// Sending the hash rather than `cm` and the two `cv_dep` coordinates is one
+    /// field element instead of three: it saves each client 1,048,576 pure-JS
+    /// Poseidon-4 calls over a full tree and cuts the feed roughly threefold.
     ///
-    /// Clients can no longer derive the leaf themselves, so they are expected
-    /// to verify the root they build against the on-chain root.
+    /// Clients cannot derive the leaf themselves, so they are expected to verify
+    /// the root they build against the on-chain root.
     pub leaf_hash: String,
 }
 
@@ -30,14 +28,13 @@ pub struct ChunkResponse {
 
 /// Reject a chunk whose `leaf_index` values are not `from, from+1, ...`.
 ///
-/// The tree is positional: a hole shifts every later leaf by one, so the
-/// client builds a root no wallet can verify — and the failure surfaces far
-/// away, as a rejected proof, with nothing pointing back here.
+/// The tree is positional: a hole shifts every later leaf by one, so the client
+/// builds a root no wallet can verify and the failure surfaces later as a
+/// rejected proof.
 ///
-/// `services::tree` makes the same check for the mirror it serves
-/// `/v1/tree-state` from, but nothing checked this feed, which is the one
-/// clients actually build their tree out of.
-fn ensure_dense(rows: &[notes::CommitmentChunkEntry], from: i64) -> AppResult<()> {
+/// `services::tree` makes the same check for the mirror behind `/v1/tree-state`;
+/// this check covers the feed clients build their tree from.
+fn ensure_dense(rows: &[notes::LeafInputsRow], from: i64) -> AppResult<()> {
     for (i, row) in rows.iter().enumerate() {
         let expected = from + i as i64;
         if row.leaf_index != expected {
@@ -64,13 +61,13 @@ pub async fn get_chunk(
 
     let from = (chunk_id * CHUNK_SIZE) as i64;
     let to = from + CHUNK_SIZE as i64;
-    let rows = notes::list_chunk(&st.pool, chain_id, from, to).await?;
+    let rows = notes::list_leaf_inputs(&st.pool, chain_id, from, Some(to)).await?;
     let is_complete = rows.len() as u64 == CHUNK_SIZE;
     ensure_dense(&rows, from)?;
     let entries = rows
         .into_iter()
         .map(|r| {
-            // `cm` is BYTEA, the coordinates are NUMERIC; both become the same
+            // `cm` is BYTEA and the coordinates are NUMERIC; both convert to the
             // 32-byte big-endian form the leaf hash takes.
             let cm = bytes_to_field(&r.cm)?;
             let x = bigdec_to_field(&r.cv_dep_x)?;
@@ -102,8 +99,8 @@ mod tests {
     use super::*;
     use bigdecimal::BigDecimal;
 
-    fn row(leaf_index: i64) -> notes::CommitmentChunkEntry {
-        notes::CommitmentChunkEntry {
+    fn row(leaf_index: i64) -> notes::LeafInputsRow {
+        notes::LeafInputsRow {
             leaf_index,
             cm: vec![0u8; 32],
             cv_dep_x: BigDecimal::from(1),
@@ -119,7 +116,7 @@ mod tests {
 
     #[test]
     fn accepts_an_empty_chunk() {
-        // Past the end of the tree: not a gap, just nothing there.
+        // Past the end of the tree: not a gap, simply empty.
         assert!(ensure_dense(&[], 4096).is_ok());
     }
 

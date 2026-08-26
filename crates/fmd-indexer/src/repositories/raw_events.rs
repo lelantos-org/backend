@@ -1,24 +1,10 @@
 use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
+pub use database::models::RawEventRow;
 use database::schema::raw_events;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-
-#[derive(Debug, Clone, Queryable, Selectable, QueryableByName)]
-#[diesel(table_name = raw_events)]
-pub struct RawEventRow {
-    pub id: i64,
-    pub chain_id: i64,
-    pub block_number: i64,
-    pub block_hash: Vec<u8>,
-    pub block_ts: i64,
-    pub tx_hash: Vec<u8>,
-    pub log_index: i32,
-    pub event_kind: i16,
-    pub topics: Vec<Vec<u8>>,
-    pub data: Vec<u8>,
-}
 
 #[async_trait]
 pub trait RawEventsRepo: Send + Sync {
@@ -30,9 +16,9 @@ pub trait RawEventsRepo: Send + Sync {
         limit: i64,
     ) -> Result<Vec<RawEventRow>>;
     async fn max_id(&self, chain_id: i64) -> Result<i64>;
-    /// Look up `DepositEscrowed` events by their `deposit_id` (encoded as
-    /// the second topic of the log). Used by the consume pipeline to
-    /// resolve cm + aux when processing `DepositFlushed` events.
+    /// Look up `DepositEscrowed` events by `deposit_id`, encoded as the second
+    /// topic of the log. The consume pipeline uses this to resolve cm and aux
+    /// when processing `DepositFlushed` events.
     async fn fetch_escrowed_by_ids(
         &self,
         chain_id: i64,
@@ -91,9 +77,10 @@ impl RawEventsRepo for PostgresRawEventsRepo {
             return Ok(Vec::new());
         }
         let mut conn = super::conn(&self.pool).await?;
-        // Postgres arrays are 1-based: topics[2] is the second topic (indexed deposit id, 32B big-endian).
-        // Ordered by id so a re-used deposit id resolves to the same escrow on
-        // every replica; served by `raw_events_escrowed_id_idx`.
+        // Postgres arrays are 1-based, so topics[2] is the second topic: the
+        // indexed deposit id, 32 bytes big-endian. Ordered by id so a re-used
+        // deposit id resolves to the same escrow on every replica; served by
+        // `raw_events_escrowed_id_idx`.
         let kind = shared::entities::EventKind::DepositEscrowed.as_i16();
         let q = diesel::sql_query(
             "SELECT id, chain_id, block_number, block_hash, block_ts, tx_hash, log_index, event_kind, topics, data \

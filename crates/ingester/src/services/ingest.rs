@@ -23,24 +23,23 @@ impl IngestService {
         }
     }
 
-    /// Insert rows, advance the cursor, fire notify. The single commit path
-    /// for both the live tick and the backfill. `last_scanned` is the upper
-    /// bound of what was just scanned, independent of whether any rows fell in
-    /// that range.
+    /// Insert rows, advance the cursor and fire the notify. The single commit
+    /// path for both the live tick and the backfill. `last_scanned` is the upper
+    /// bound of what was scanned, whether or not any rows fell in that range.
     ///
-    /// Returns the number of rows actually inserted — not the number decoded.
-    /// Replayed ranges hit the unique index and insert nothing, and reporting
-    /// the decoded count there makes every replay look like fresh ingest.
+    /// Returns the number of rows inserted rather than decoded. Replayed ranges
+    /// hit the unique index and insert nothing, so reporting the decoded count
+    /// would make every replay look like fresh ingest.
     pub async fn commit_batch(
         &self,
         chain_id: i64,
         rows: &[RawEvent],
         last_scanned: i64,
     ) -> Result<usize, IngesterError> {
-        // An empty batch contains no verified block, so it may move only the
-        // scan watermark. Writing `last_block = last_scanned` with an empty
-        // hash — as this used to — leaves the reorg anchor pointing at a
-        // height that was never checked, paired with a hash that is not one.
+        // An empty batch contains no verified block, so it may move only the scan
+        // watermark. Writing `last_block = last_scanned` with an empty hash would
+        // leave the reorg anchor at a height that was never checked, paired with
+        // bytes that are not a hash.
         let Some(cursor) = Self::cursor_for(chain_id, rows, last_scanned) else {
             self.advance_empty(chain_id, last_scanned).await?;
             return Ok(0);
@@ -49,8 +48,8 @@ impl IngestService {
         let inserted = self.writes.commit_batch(rows, &cursor).await?;
 
         // The rows are committed at this point. Failing the batch because the
-        // wake-up failed would roll nothing back and, under the retry policy,
-        // count against the chain's failure budget for no reason.
+        // wake-up failed would roll nothing back and would consume the chain's
+        // retry budget.
         if let Err(e) = self.raw_events.notify_appended(chain_id).await {
             warn!(chain_id, "notify failed after a successful commit: {}", e);
         }
@@ -63,9 +62,9 @@ impl IngestService {
 
     /// The cursor a batch justifies, or `None` when it verifies no block.
     ///
-    /// The anchor is the highest block *present in the rows*, never the top of
-    /// the scanned range: only a block we actually saw a log in has a hash we
-    /// can check later.
+    /// The anchor is the highest block present in the rows rather than the top of
+    /// the scanned range: only a block a log was observed in has a hash that can
+    /// be checked later.
     fn cursor_for(chain_id: i64, rows: &[RawEvent], last_scanned: i64) -> Option<BlockCursor> {
         let anchor = rows.iter().max_by_key(|r| r.block_number)?;
         Some(BlockCursor {
@@ -96,15 +95,15 @@ mod tests {
         }
     }
 
-    /// An empty batch has nothing to anchor to. Inventing one leaves the reorg
-    /// check walking back from a height it never verified.
+    /// An empty batch has nothing to anchor to. Synthesising one would leave the
+    /// reorg check walking back from an unverified height.
     #[test]
     fn an_empty_batch_justifies_no_cursor() {
         assert!(IngestService::cursor_for(1, &[], 500).is_none());
     }
 
-    /// The anchor is the highest block seen, with *that block's* hash — not
-    /// whichever row happened to come last.
+    /// The anchor is the highest block seen, with that block's hash rather than
+    /// the hash of whichever row came last.
     #[test]
     fn the_anchor_is_the_highest_block_in_the_batch() {
         let rows = [row(10, 0xaa), row(12, 0xcc), row(11, 0xbb)];

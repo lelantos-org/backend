@@ -11,11 +11,11 @@ pub struct ExplorerWebserverConfig {
     #[serde(default = "default_price_base_url")]
     pub price_base_url: String,
     /// How long a spot price is served without refetching. Longer than the
-    /// response cache: prices move far slower than chain data, and every miss
-    /// costs an upstream round-trip.
+    /// response cache, since prices move far slower than chain data and every
+    /// miss costs an upstream round-trip.
     #[serde(default = "default_price_ttl")]
     pub price_ttl_s: u64,
-    /// Upstream deadline. Prices are decoration — a slow provider must not
+    /// Upstream deadline. Prices are decoration, so a slow provider must not
     /// hold an endpoint open.
     #[serde(default = "default_price_timeout_ms")]
     pub price_timeout_ms: u64,

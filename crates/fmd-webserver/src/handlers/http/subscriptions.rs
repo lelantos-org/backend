@@ -14,7 +14,7 @@ use axum::extract::State;
     request_body = CreateSubscription,
     responses((status = 200, body = SubscriptionOut))
 )]
-// `body` is skipped wholesale: it carries both the detection key and the
+// `body` is skipped entirely: it carries both the detection key and the
 // capability token.
 #[tracing::instrument(skip(st, body), fields(gamma = body.gamma))]
 pub async fn create_subscription(

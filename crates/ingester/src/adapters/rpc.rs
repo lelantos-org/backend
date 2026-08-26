@@ -27,9 +27,8 @@ pub trait ChainRpc: Send + Sync {
     ) -> Result<HashMap<u64, BlockMeta>, IngesterError>;
     /// Canonical hash at `n`, or `None` when the chain has no such block.
     ///
-    /// This is the primitive reorg detection is built on: the stored cursor
-    /// anchor is only trustworthy while the chain still reports the same hash
-    /// at the same height.
+    /// The primitive reorg detection is built on: the stored cursor anchor is
+    /// trustworthy only while the chain reports the same hash at the same height.
     async fn block_hash_at(&self, n: u64) -> Result<Option<B256>, IngesterError>;
 }
 
@@ -40,10 +39,9 @@ pub struct BlockMeta {
     /// What Solidity's `block.number` returns inside this block.
     ///
     /// Equal to the block's own height on Ethereum and OP-stack chains. On
-    /// Arbitrum it is the *L1* height instead, which is what MASP hashes into
-    /// the deposit digest — replaying the L2 height there reverts
-    /// `DigestMismatch`. Taken from the block's non-standard `l1BlockNumber`
-    /// field when the node reports one.
+    /// Arbitrum it is the L1 height, which is what MASP hashes into the deposit
+    /// digest; replaying the L2 height there reverts `DigestMismatch`. Taken from
+    /// the block's non-standard `l1BlockNumber` field when the node reports one.
     pub evm_block_number: u64,
 }
 
@@ -58,9 +56,9 @@ pub struct HttpRpc {
 impl HttpRpc {
     /// Build a provider with explicit timeouts.
     ///
-    /// reqwest's default client has *no* request timeout, so a half-open
-    /// socket parks the worker indefinitely. It keeps its advisory lock while
-    /// stalled, so no standby takes over and the chain silently stops.
+    /// reqwest's default client has no request timeout, so a half-open socket
+    /// would park the worker indefinitely while it holds its advisory lock,
+    /// preventing any standby from taking over.
     pub fn build(
         rpc_url: &str,
         request_timeout: Duration,
@@ -87,10 +85,9 @@ impl HttpRpc {
 
 /// Substrings that mean "your query asked for too much".
 ///
-/// Providers disagree on both the code and the wording, and a miss here is not
-/// cosmetic: an unrecognised limit error skips the halving path entirely and
-/// fails the fetch instead of narrowing it. Kept lowercase; matched against a
-/// lowercased message.
+/// Providers disagree on both the code and the wording. An unrecognised limit
+/// error skips the halving path and fails the fetch instead of narrowing it.
+/// Kept lowercase and matched against a lowercased message.
 const RANGE_MARKERS: &[&str] = &[
     // Infura's limit-exceeded code.
     "-32005",
@@ -109,9 +106,9 @@ const RANGE_MARKERS: &[&str] = &[
 
 const RATE_LIMIT_MARKERS: &[&str] = &["429", "rate limit", "too many requests"];
 
-/// `-32602` is "invalid params" generically. Only read it as a range problem
-/// when the message also points at the range or the result set — otherwise a
-/// malformed filter would be halved forever instead of surfacing.
+/// `-32602` is a generic "invalid params". It is read as a range problem only
+/// when the message also mentions the range or the result set; otherwise a
+/// malformed filter would be halved indefinitely instead of surfacing.
 fn is_oversized_params(msg: &str) -> bool {
     msg.contains("-32602") && ["range", "results", "logs"].iter().any(|w| msg.contains(w))
 }
@@ -163,9 +160,9 @@ impl ChainRpc for HttpRpc {
     ) -> Result<HashMap<u64, BlockMeta>, IngesterError> {
         use futures::stream::{self, StreamExt, TryStreamExt};
 
-        // Bounded fan-out. A fat backfill chunk can touch thousands of
-        // distinct blocks, and firing one request per block at once is a
-        // reliable way to get rate limited or run the socket table dry.
+        // Bounded fan-out. A large backfill chunk can touch thousands of distinct
+        // blocks, and issuing one request per block at once invites rate limiting
+        // and socket exhaustion.
         stream::iter(block_numbers.iter().copied().map(|n| {
             let p = self.inner.clone();
             async move {
@@ -173,8 +170,8 @@ impl ChainRpc for HttpRpc {
                 let blk = blk.ok_or(IngesterError::Rpc(RpcError::BlockMissing(n)))?;
                 let timestamp = hex_u64(&blk, "timestamp")
                     .ok_or(IngesterError::Rpc(RpcError::BlockMissing(n)))?;
-                // Absent on every non-Arbitrum chain, where the block's own
-                // height is what the EVM reports.
+                // Absent on every non-Arbitrum chain, where the block's own height
+                // is what the EVM reports.
                 let evm_block_number = hex_u64(&blk, "l1BlockNumber").unwrap_or(n);
                 Ok::<(u64, BlockMeta), IngesterError>((
                     n,
@@ -205,8 +202,8 @@ impl ChainRpc for HttpRpc {
 
 /// Fetch a block header as raw JSON.
 ///
-/// Raw request rather than the typed getter: `l1BlockNumber` is an Arbitrum
-/// extension that alloy's `Header` drops.
+/// Raw request rather than the typed getter, because `l1BlockNumber` is an
+/// Arbitrum extension that alloy's `Header` drops.
 async fn raw_block(
     provider: &RootProvider<Http<Client>>,
     n: u64,
@@ -227,9 +224,9 @@ fn hex_u64(v: &serde_json::Value, key: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// Real error strings seen from the major providers. A miss on any of
-    /// these means `fetch_with_adaptive_range` never halves and the backfill
-    /// dies instead of narrowing its window.
+    /// Error strings observed from the major providers. A miss on any of these
+    /// means the adaptive fetch never halves and the backfill fails instead of
+    /// narrowing its window.
     #[test]
     fn classifies_provider_range_errors() {
         let range = [
@@ -262,8 +259,8 @@ mod tests {
         }
     }
 
-    /// A bare `-32602` is plain "invalid params" and must not be mistaken for
-    /// a range problem, or the fetcher halves forever over a malformed filter.
+    /// A bare `-32602` is a generic "invalid params" and must not be read as a
+    /// range problem, or the fetcher halves indefinitely over a malformed filter.
     #[test]
     fn leaves_unrelated_errors_alone() {
         for e in [

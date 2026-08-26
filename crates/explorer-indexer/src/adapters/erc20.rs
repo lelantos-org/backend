@@ -1,9 +1,9 @@
 //! ERC20 metadata reads.
 //!
-//! `AssetRegistered` carries `(assetId, token, scale)` and nothing else, but
-//! `scale` is a circuit capacity parameter, not a decimals normalizer — see
-//! `contracts/script/Deploy.s.sol`. Rendering a human amount therefore needs
-//! the token's own `decimals()`, which only the chain can answer.
+//! `AssetRegistered` carries only `(assetId, token, scale)`, and `scale` is a
+//! circuit capacity parameter rather than a decimals normalizer; see
+//! `contracts/script/Deploy.s.sol`. Rendering a human-readable amount therefore
+//! requires the token's own `decimals()`, which only the chain can answer.
 
 use crate::error::ExplorerIndexerError;
 use alloy::primitives::Address;
@@ -27,10 +27,9 @@ pub trait TokenMetadata: Send + Sync {
     async fn decimals(&self, token: Address) -> Result<u8, ExplorerIndexerError>;
     /// The token's own label.
     ///
-    /// Fallible for more than transport reasons: `symbol()` is optional in
-    /// ERC-20, and a handful of early tokens return `bytes32` rather than
-    /// `string`, which does not decode here. Either way the caller leaves the
-    /// column NULL and retries, rather than inventing a name.
+    /// Fallible beyond transport errors: `symbol()` is optional in ERC-20, and
+    /// some early tokens return `bytes32` rather than `string`, which does not
+    /// decode here. The caller leaves the column NULL and retries.
     async fn symbol(&self, token: Address) -> Result<String, ExplorerIndexerError>;
 }
 

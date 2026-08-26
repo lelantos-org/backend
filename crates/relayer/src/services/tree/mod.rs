@@ -1,11 +1,11 @@
-// Per-chain in-memory tree mirror. Bootstraps from the existing `notes` +
-// `tree_advances` rows on startup. The relayer is otherwise stateless across
-// restarts — no DB tables of its own.
-//
-// Concurrency: each chain owns one `Arc<Mutex<TreeMirror>>`. Pipeline holds
-// the mutex through {reserve(start_index, frontier) → prove → submit →
-// receipt}, so the next bundle pipelines optimistically against the post-
-// state. On revert, `rollback(2)` undoes the speculative inserts.
+//! Per-chain in-memory tree mirror, bootstrapped from the existing `notes` and
+//! `tree_advances` rows at startup. The relayer is otherwise stateless across
+//! restarts and owns no tables.
+//!
+//! Each chain owns one `Arc<Mutex<TreeMirror>>`. The pipeline holds the mutex
+//! through reserve, prove, submit and receipt, so the next bundle builds
+//! optimistically against the post-state. A revert unwinds the speculative
+//! inserts.
 
 use crate::adapters::abi::IMasp;
 use crate::adapters::numeric::bigdecimal_to_u256;
@@ -14,6 +14,7 @@ use crate::domain::error::{AppError, AppResult};
 use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
 use database::DbPool;
+use database::models::LeafInputsRow;
 use database::schema::{notes, tree_advances};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -30,16 +31,17 @@ use tracing::{error, info};
 pub const DEPTH: usize = 10;
 /// Quaternary tree, so `ARITY^DEPTH` leaves. Mirrors `MASP.MAX_LEAVES`.
 const MAX_LEAVES: usize = 4usize.pow(DEPTH as u32);
-/// Domain-separation tag for Merkle leaf hashing. Mirrors `TAG_LEAF` in
-/// `circuits/src/lib/tags.circom` — `leaf = Poseidon(TAG_LEAF, cm,
-/// cv_dep_x, cv_dep_y)` so the spender can rebuild the same leaf hash from
-/// (cm, cv_dep) without learning anything else about the deposit.
+/// Domain-separation tag for Merkle leaf hashing, mirroring `TAG_LEAF` in
+/// `circuits/src/lib/tags.circom`. `leaf = Poseidon(TAG_LEAF, cm, cv_dep_x,
+/// cv_dep_y)`, so a spender can rebuild the same leaf hash from `(cm, cv_dep)`
+/// without learning anything else about the deposit.
 const TAG_LEAF: u64 = 10;
 
 /// Compute the in-circuit Merkle leaf:
-///   leaf = Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)
-/// Must match `tree_update_batch.circom` section 5 byte-for-byte; any drift
-/// here desyncs the relayer's mirror from the on-chain tree.
+/// `leaf = Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`.
+///
+/// Must match `tree_update_batch.circom` byte for byte; drift here desyncs the
+/// relayer's mirror from the on-chain tree.
 fn leaf_hash(cm: &Field, cv_dep: &[U256; 2]) -> AppResult<Field> {
     let mut tag = [0u8; 32];
     tag[31] = TAG_LEAF as u8;
@@ -52,23 +54,23 @@ fn leaf_hash(cm: &Field, cv_dep: &[U256; 2]) -> AppResult<Field> {
 pub struct TreeMirror {
     pub chain_id: i64,
     tree: MerkleTree,
-    /// Why this mirror was parked, if it was (see [`TreeMirror::unwind`]).
-    /// Every reserve then fails fast rather than building on state that may
-    /// no longer match the chain.
+    /// Why this mirror was parked, if it was; see [`TreeMirror::unwind`]. Every
+    /// reserve then fails fast rather than building on state that may not match
+    /// the chain.
     desynced: Option<String>,
     /// Lock-free copy of what `/chains` reports, refreshed on every mutation.
     ///
-    /// The mirror mutex is held from reserve through prove and submit — tens
-    /// of seconds — and `/chains` is what every wallet calls at boot. Reading
-    /// it through the mutex made that endpoint queue behind whatever spend was
-    /// in flight, so the readings are published here instead.
+    /// The mirror mutex is held from reserve through prove and submit, tens of
+    /// seconds, and `/chains` is what every wallet calls at boot. Reading through
+    /// the mutex would queue that endpoint behind whatever spend is in flight, so
+    /// the readings are published here.
     snapshot: Arc<MirrorSnapshot>,
     /// Roots this mirror has held, newest last, bounded to [`ROOT_HISTORY`].
     ///
-    /// The pool accepts a proof against any root in its own recent window, so
-    /// a payload naming an older one is legitimate. What is *not* legitimate is
-    /// a root the relayer has never held: that proof cannot land, and catching
-    /// it here saves a Groth16 and a revert.
+    /// The pool accepts a proof against any root in its own recent window, so a
+    /// payload naming an older one is valid. A root the relayer has never held is
+    /// not: that proof cannot land, and catching it here saves a Groth16 and a
+    /// revert.
     recent_roots: VecDeque<Field>,
 }
 
@@ -115,9 +117,8 @@ impl TreeMirror {
 
     /// Whether `root` is one this mirror has held recently.
     ///
-    /// Unknown roots are the common cause of a `StaleOldRoot` revert, and the
-    /// caller can act on being told so — unlike the opaque 502 the revert
-    /// produces.
+    /// Unknown roots are the common cause of a `StaleOldRoot` revert, and a caller
+    /// told so can act on it, unlike the opaque 502 the revert produces.
     pub fn knows_root(&self, root: &Field) -> bool {
         self.recent_roots.contains(root)
     }
@@ -135,9 +136,9 @@ impl TreeMirror {
 
     /// Drop `root` from the accepted window, if it is still the newest entry.
     ///
-    /// The inverse of [`Self::remember_root`], for an advance that is being
-    /// undone. Only the newest entry is eligible: an identical root deeper in
-    /// the window was reached by a path that did land, and is still valid.
+    /// The inverse of [`Self::remember_root`], for an advance being undone. Only
+    /// the newest entry is eligible: an identical root deeper in the window was
+    /// reached by a path that landed and is still valid.
     fn forget_newest_root(&mut self, root: &Field) {
         if self.recent_roots.back() == Some(root) {
             self.recent_roots.pop_back();
@@ -160,13 +161,13 @@ impl TreeMirror {
     /// Undo `leaves` speculative inserts after a failed pipeline stage, and
     /// return the error to propagate.
     ///
-    /// Rollback is only sound when the transaction provably did not land. On
-    /// [`AppError::SubmitUnknown`] the mirror is parked instead: truncating
-    /// would permanently diverge it if the tx mines later, and keeping the
+    /// Rollback is sound only when the transaction provably did not land. On
+    /// [`AppError::SubmitUnknown`] the mirror is parked instead: truncating would
+    /// diverge it permanently if the transaction mines later, and keeping the
     /// leaves would diverge it if it never does.
     ///
     /// A rollback that itself fails is also a desync. Either way the original
-    /// error wins — it is what actually explains the failure.
+    /// error is returned, since it explains the failure.
     #[must_use = "the returned error must be propagated"]
     pub fn unwind(&mut self, leaves: usize, cause: AppError) -> AppError {
         if let AppError::SubmitUnknown(reason) = &cause {
@@ -203,40 +204,35 @@ impl TreeMirror {
         }
     }
 
-    /// Replay all confirmed cms from `notes` ordered by leaf_index. Validate
-    /// that the post-replay root matches the latest `tree_advances.new_root`.
+    /// Replay every confirmed commitment from `notes` ordered by `leaf_index`, and
+    /// check that the resulting root matches the latest `tree_advances.new_root`.
     pub async fn bootstrap(&mut self, pool: &DbPool) -> AppResult<()> {
         info!(chain_id = self.chain_id, "tree mirror bootstrap start");
-        let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
-        let cms: Vec<(i64, Vec<u8>, bigdecimal::BigDecimal, bigdecimal::BigDecimal)> = notes::table
+        let mut conn = crate::repositories::conn(pool).await?;
+        let rows: Vec<LeafInputsRow> = notes::table
             .filter(notes::chain_id.eq(self.chain_id))
             .order(notes::leaf_index.asc())
-            .select((
-                notes::leaf_index,
-                notes::cm,
-                notes::cv_dep_x,
-                notes::cv_dep_y,
-            ))
+            .select(LeafInputsRow::as_select())
             .load(&mut conn)
             .await
             .map_err(|e| AppError::Db(e.to_string()))?;
 
-        // Validate row contiguity sequentially (cheap), then hash leaves in
-        // parallel — leaf_hash is a pure Poseidon call, independent per row.
-        for (i, (leaf_index, _, _, _)) in cms.iter().enumerate() {
-            if *leaf_index != i as i64 {
+        // Check row contiguity sequentially, which is cheap, then hash leaves in
+        // parallel: `leaf_hash` is a pure Poseidon call, independent per row.
+        for (i, row) in rows.iter().enumerate() {
+            if row.leaf_index != i as i64 {
                 return Err(AppError::Internal(format!(
                     "tree desync chain {}: notes row {} has leaf_index {}",
-                    self.chain_id, i, leaf_index
+                    self.chain_id, i, row.leaf_index
                 )));
             }
         }
-        let leaves: Vec<Field> = cms
+        let leaves: Vec<Field> = rows
             .par_iter()
-            .map(|(_, cm, cv_dep_x, cv_dep_y)| {
-                let cm_f = vec_to_field(cm)?;
-                let cv_x = bigdecimal_to_u256(cv_dep_x)?;
-                let cv_y = bigdecimal_to_u256(cv_dep_y)?;
+            .map(|row| {
+                let cm_f = vec_to_field(&row.cm)?;
+                let cv_x = bigdecimal_to_u256(&row.cv_dep_x)?;
+                let cv_y = bigdecimal_to_u256(&row.cv_dep_y)?;
                 leaf_hash(&cm_f, &[cv_x, cv_y])
             })
             .collect::<AppResult<Vec<Field>>>()?;
@@ -245,7 +241,7 @@ impl TreeMirror {
             .map_err(|e| AppError::Internal(e.to_string()))?;
         self.publish();
 
-        // Sanity: latest tree_advances.new_root must match local root.
+        // The latest `tree_advances.new_root` must match the local root.
         let latest: Option<(Vec<u8>, i64)> = tree_advances::table
             .filter(tree_advances::chain_id.eq(self.chain_id))
             .order(tree_advances::start_index.desc())
@@ -255,9 +251,9 @@ impl TreeMirror {
             .optional()
             .map_err(|e| AppError::Db(e.to_string()))?;
         // Seed the accepted-root window from the chain's own advance history.
-        // Without this a relayer restart narrows the window to the single
-        // current root, and a wallet holding a proof against the previous one
-        // gets a 400 for a payload the pool would still have accepted.
+        // Without it a restart narrows the window to the current root, and a
+        // wallet holding a proof against the previous one receives a 400 for a
+        // payload the pool would have accepted.
         let history: Vec<Vec<u8>> = tree_advances::table
             .filter(tree_advances::chain_id.eq(self.chain_id))
             .order(tree_advances::start_index.desc())
@@ -274,7 +270,7 @@ impl TreeMirror {
 
         info!(
             chain_id = self.chain_id,
-            leaves = cms.len(),
+            leaves = rows.len(),
             roots = self.recent_roots.len(),
             "tree mirror replayed notes"
         );
@@ -303,9 +299,9 @@ impl TreeMirror {
             .map_err(|e| AppError::Internal(e.to_string()))
     }
 
-    /// Insert N `(cm, cv_dep)` pairs. The mirror hashes each pair into a
-    /// leaf before insertion to stay in sync with the on-chain tree, which
-    /// advances via SNARK-verified leaf roots.
+    /// Insert `(cm, cv_dep)` pairs. The mirror hashes each pair into a leaf before
+    /// insertion to stay in sync with the on-chain tree, which advances through
+    /// SNARK-verified leaf roots.
     pub fn reserve_and_advance_batch(
         &mut self,
         cms: &[(Field, [U256; 2])],
@@ -313,8 +309,8 @@ impl TreeMirror {
         self.check_usable()?;
         let start_index = self.tree.leaf_count() as u64;
 
-        // Capacity first: it is a length check, so an oversized batch is
-        // refused without paying for a single Poseidon.
+        // Capacity first: a length check, so an oversized batch is refused without
+        // computing a single Poseidon.
         if start_index as usize + cms.len() > MAX_LEAVES {
             return Err(AppError::BadRequest(format!(
                 "chain {}: tree is full ({} leaves, {} more requested, capacity {})",
@@ -325,13 +321,12 @@ impl TreeMirror {
             )));
         }
 
-        // Then hash every leaf up front. `leaf_hash` is Poseidon, which rejects
-        // a non-canonical input — and `cm` / `cv_dep` are wallet-supplied on
-        // the spend and swap paths. Hashing inside the insert loop meant such a
-        // value failed *after* earlier leaves had already gone in, leaving the
-        // mirror one leaf ahead of the chain with no rollback and no park:
-        // a permanent, silent desync from a single request. Nothing mutates
-        // until all of them are known good.
+        // Then hash every leaf up front. `leaf_hash` is Poseidon, which rejects a
+        // non-canonical input, and `cm` and `cv_dep` are wallet-supplied on the
+        // spend and swap paths. Hashing inside the insert loop would fail after
+        // earlier leaves had gone in, leaving the mirror one leaf ahead of the
+        // chain with no rollback and no park. Nothing mutates until every leaf is
+        // known good.
         let leaves = cms
             .iter()
             .map(|(cm, cv_dep)| leaf_hash(cm, cv_dep))
@@ -346,8 +341,8 @@ impl TreeMirror {
             .frontier()
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // Past this point the tree is being mutated, so any failure has to be
-        // unwound rather than propagated bare — see `insert_all`.
+        // Past this point the tree is mutated, so any failure must be unwound
+        // rather than propagated directly; see `insert_all`.
         let inserted = self.insert_all(leaves)?;
         debug_assert_eq!(inserted, cms.len());
 
@@ -366,11 +361,10 @@ impl TreeMirror {
         ))
     }
 
-    /// Insert pre-hashed leaves, leaving the tree untouched if any insert
-    /// fails. `MerkleTree::insert` should not fail once capacity is checked,
-    /// but a partial batch is precisely the state that desyncs a mirror
-    /// permanently, so it is undone here and the mirror parked if even that
-    /// does not work.
+    /// Insert pre-hashed leaves, leaving the tree untouched if any insert fails.
+    /// `MerkleTree::insert` should not fail once capacity is checked, but a partial
+    /// batch is the state that desyncs a mirror permanently, so it is undone here
+    /// and the mirror parked if that also fails.
     fn insert_all(&mut self, leaves: Vec<Field>) -> AppResult<usize> {
         let n = leaves.len();
         for (i, leaf) in leaves.into_iter().enumerate() {
@@ -389,9 +383,9 @@ impl TreeMirror {
         Ok(n)
     }
 
-    /// Cross-check the in-memory mirror against the on-chain `currentRoot()`.
-    /// Catches DB / chain divergence (e.g. anvil redeploy without DB reset)
-    /// before the first `transact` reverts with `StaleOldRoot()`.
+    /// Cross-check the in-memory mirror against the on-chain `currentRoot()`,
+    /// catching database and chain divergence, such as an anvil redeploy without a
+    /// database reset, before the first submission reverts `StaleOldRoot()`.
     pub async fn verify_chain_root(
         &self,
         rpc: &RpcEndpoint,
@@ -424,9 +418,9 @@ impl TreeMirror {
         Ok(())
     }
 
-    /// Undo `n` speculative leaves after a submission that provably never
-    /// landed (RPC rejected the broadcast, or the tx reverted on-chain). An
-    /// *ambiguous* failure must go to `mark_desynced` instead — see there.
+    /// Undo `n` speculative leaves after a submission that provably never landed,
+    /// where the node rejected the broadcast or the transaction reverted on chain.
+    /// An ambiguous failure goes to `mark_desynced` instead.
     pub fn rollback(&mut self, n: usize) -> AppResult<()> {
         let before = self.tree.leaf_count();
         if n > before {
@@ -435,11 +429,10 @@ impl TreeMirror {
                 n, before, self.chain_id
             )));
         }
-        // Captured before the truncation, and retracted after it: the advance
-        // being undone published a root the chain never held. Left in the
-        // accepted window it would let a wallet that read it from `/chains`
-        // pass `check_known_root` and then revert `StaleOldRoot` on-chain —
-        // the exact failure that check exists to prevent.
+        // Captured before the truncation and retracted after it: the advance being
+        // undone published a root the chain never held. Left in the accepted
+        // window, a wallet that read it from `/chains` would pass
+        // `check_known_root` and then revert `StaleOldRoot` on chain.
         let speculative = self.tree.root().ok();
         self.tree
             .truncate_leaves(n)
@@ -460,15 +453,7 @@ impl TreeMirror {
 }
 
 pub fn vec_to_field(v: &[u8]) -> AppResult<Field> {
-    if v.len() != 32 {
-        return Err(AppError::Internal(format!(
-            "expected 32-byte field, got {}",
-            v.len()
-        )));
-    }
-    let mut f = [0u8; 32];
-    f.copy_from_slice(v);
-    Ok(f)
+    fmd_crypto::tree::field_from_bytes(v).map_err(|e| AppError::Internal(e.to_string()))
 }
 
 pub fn field_to_hex(f: &Field) -> String {

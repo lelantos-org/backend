@@ -46,14 +46,14 @@ pub fn build(state: AppState) -> Router {
             "/v1/asset-flows",
             get(handlers::asset_flows).layer(cc_layer(analytic.clone())),
         )
-        // Classified feed tracks the head of the chain, like tree-advances.
+        // The classified feed tracks the head of the chain, like tree-advances.
         .route(
             "/v1/transactions",
             get(handlers::recent_transactions).layer(cc_layer(head)),
         )
         .route(
             "/v1/tx-kinds",
-            get(handlers::tx_kinds).layer(cc_layer(analytic.clone())),
+            get(handlers::tx_kinds).layer(cc_layer(analytic)),
         )
         .layer(request_span::trace_layer())
         .with_state(state)

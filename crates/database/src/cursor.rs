@@ -1,8 +1,8 @@
 //! Shared cursor repository.
 //!
-//! All indexers (and webserver tools that read cursors) consume the same
-//! `consumer_cursors` table. Trait + Postgres impl live here so each crate
-//! depends on a single source of truth.
+//! All indexers, and the webserver tools that read cursors, share the
+//! `consumer_cursors` table. The trait and its Postgres impl live here so every
+//! crate depends on a single source of truth.
 
 use crate::DbPool;
 use crate::schema::{chain_state, consumer_cursors};
@@ -33,23 +33,22 @@ pub struct UpsertCursor {
 #[async_trait]
 pub trait CursorRepo: Send + Sync {
     async fn fetch(&self, name: &str, chain_id: i64) -> CursorResult<(i64, i64)>;
-    /// Unconditional write. Last writer wins, including backwards — use only
-    /// where a rewind is the intent (cursor reset). Prefer
+    /// Unconditional write; the last writer wins, including backwards. Use
+    /// only where a rewind is intended, such as a cursor reset. Prefer
     /// [`CursorRepo::upsert_monotonic`] for normal batch advances.
     async fn upsert(&self, row: UpsertCursor) -> CursorResult<()>;
     /// Advance only. A write whose `last_event_id` is not greater than the
     /// stored one is a no-op.
     ///
-    /// Guards the read-modify-write in every consume/filter tick: two
-    /// processes that fetched the same cursor can otherwise have the slower
-    /// one overwrite the faster one's watermark, dragging the cursor backwards
-    /// and re-processing an unbounded range.
+    /// Guards the read-modify-write in every consume and filter tick: without
+    /// it, two processes that fetched the same cursor can have the slower one
+    /// overwrite the faster one's watermark, dragging the cursor backwards and
+    /// re-processing an unbounded range.
     ///
-    /// Returns whether the row was written. `false` means a peer's watermark
-    /// was already at or past this one — benign where concurrent writers are
-    /// expected (the filter loop), and a split brain where they are not (the
-    /// consume loop holds a per-chain advisory lock precisely so that one
-    /// writer exists).
+    /// Returns whether the row was written. `false` means a peer's watermark is
+    /// already at or past this one: expected in the filter loop, which has
+    /// concurrent writers, and a split brain in the consume loop, which holds a
+    /// per-chain advisory lock to guarantee a single writer.
     async fn upsert_monotonic(&self, row: UpsertCursor) -> CursorResult<bool>;
     async fn list_chain_ids(&self) -> CursorResult<Vec<i64>>;
 }
@@ -66,9 +65,8 @@ impl PostgresCursorRepo {
 
 /// `INSERT … ON CONFLICT … DO UPDATE SET … WHERE last_event_id < $new`.
 ///
-/// Split out so the emitted SQL can be asserted in a unit test — diesel puts
-/// the predicate in the `DO UPDATE` clause rather than on the conflict target,
-/// and that distinction is the whole point of the method.
+/// Split out so the emitted SQL can be asserted in a unit test: the predicate
+/// must land in the `DO UPDATE` clause rather than on the conflict target.
 fn monotonic_stmt(
     row: &UpsertCursor,
 ) -> impl diesel::query_builder::QueryFragment<diesel::pg::Pg> + diesel::query_builder::QueryId + use<'_>
@@ -128,8 +126,8 @@ impl CursorRepo for PostgresCursorRepo {
             .await
             .map_err(|e| CursorError::Pool(e.to_string()))?;
         // The `WHERE last_event_id < $new` predicate lives in the `DO UPDATE`
-        // clause, so a rejected advance is reported as zero affected rows
-        // rather than an error.
+        // clause, so a rejected advance reports zero affected rows rather than
+        // an error.
         Ok(monotonic_stmt(&row).execute(&mut conn).await? > 0)
     }
 
@@ -151,8 +149,8 @@ mod tests {
     use super::*;
 
     /// Pins the clause the predicate lands in. Diesel can attach a `filter` to
-    /// the conflict *target* (a partial-index predicate) instead of the
-    /// `DO UPDATE`; that would silently make the guard a no-op.
+    /// the conflict target as a partial-index predicate instead of to the
+    /// `DO UPDATE`, which would make the guard a no-op.
     #[test]
     fn monotonic_guard_is_on_do_update() {
         let row = UpsertCursor {

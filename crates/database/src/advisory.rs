@@ -1,19 +1,18 @@
 //! Cross-process per-chain mutual exclusion via Postgres advisory locks.
 //!
-//! Lets a service be deployed as N replicas where exactly one is active per
-//! chain and the rest are hot standby: losers skip their tick and retry, so a
-//! dead leader is taken over automatically once its lock releases.
+//! Lets a service run as N replicas with exactly one active per chain and the
+//! rest on hot standby: losers skip their tick and retry, so a dead leader is
+//! taken over once its lock releases.
 //!
-//! The lock is **session-level** (`pg_try_advisory_lock`), not transaction
-//! scoped — it has to outlive individual statements, and the indexers issue
-//! standalone autocommit statements rather than transactions.
+//! The lock is session-level (`pg_try_advisory_lock`) rather than transaction
+//! scoped, because it must outlive individual statements and the indexers
+//! issue standalone autocommit statements.
 //!
-//! Because the lock lives on the session, it is held on a **dedicated
-//! connection that never enters the bb8 pool**. A pooled connection would be
-//! returned after the query and eventually reaped by `idle_timeout`
-//! (`PoolCfg::indexer` uses 10 min), silently releasing the lock while the
-//! process keeps working — two writers, no error. Owning the connection ties
-//! the lock's lifetime to the `ChainLock` value instead.
+//! Since the lock lives on the session, it is held on a dedicated connection
+//! that never enters the bb8 pool. A pooled connection would be returned after
+//! the query and eventually reaped by `idle_timeout` (`PoolCfg::indexer` uses
+//! 10 min), releasing the lock while the process keeps working. Owning the
+//! connection ties the lock's lifetime to the `ChainLock` value.
 
 use diesel::QueryableByName;
 use diesel::sql_types::{BigInt, Bool};
@@ -35,8 +34,8 @@ pub const NS_INGESTER: i64 = 0x1A95_0000_0000_0000_u64 as i64;
 /// Namespace for the schema-migration lock.
 ///
 /// Every replica runs `migrate::run` at startup and `diesel_migrations` takes
-/// no lock of its own, so N replicas booting together can apply the same
-/// migration concurrently. Serialising them here makes the losers wait and
+/// no lock of its own, so replicas booting together would otherwise apply the
+/// same migration concurrently. Serialising here makes the losers wait and
 /// then find nothing pending.
 pub const NS_MIGRATE: i64 = 0x1A95_0002_0000_0000_u64 as i64;
 /// Key for the single, chain-independent migration lock.
@@ -44,9 +43,8 @@ pub const MIGRATE_KEY: i64 = NS_MIGRATE;
 
 /// Namespace for `fmd-indexer`'s per-chain consume locks.
 ///
-/// Distinct from [`NS_INGESTER`] so the two services can each hold their own
-/// lock for the same chain — they guard different tables and must not exclude
-/// one another.
+/// Distinct from [`NS_INGESTER`] so both services can hold a lock for the same
+/// chain: they guard different tables and must not exclude one another.
 pub const NS_FMD_CONSUME: i64 = 0x1A95_0001_0000_0000_u64 as i64;
 
 /// Advisory-lock key for one (namespace, chain) pair.
@@ -66,8 +64,8 @@ struct Alive {
     one: i64,
 }
 
-/// A held per-chain advisory lock. Dropping it closes the connection, which
-/// releases the lock — so graceful shutdown hands over to a standby promptly.
+/// A held per-chain advisory lock. Dropping it closes the connection and
+/// releases the lock, so graceful shutdown hands over to a standby promptly.
 pub struct ChainLock {
     conn: AsyncPgConnection,
     key: i64,
@@ -75,7 +73,7 @@ pub struct ChainLock {
 
 impl ChainLock {
     /// Try to take the lock for `key`. `Ok(None)` means another process holds
-    /// it; that is the normal standby path, not an error.
+    /// it, which is the standby path rather than an error.
     pub async fn try_acquire(database_url: &str, key: i64) -> AdvisoryResult<Option<Self>> {
         let mut conn = AsyncPgConnection::establish(database_url)
             .await
@@ -92,19 +90,17 @@ impl ChainLock {
         self.key
     }
 
-    /// Round-trip the lock connection to confirm the session — and therefore
-    /// the lock — is still alive.
+    /// Round-trip the lock connection to confirm the session, and therefore
+    /// the lock, is still alive.
     ///
-    /// Without this a dropped connection leaves the holder believing it is
-    /// still the leader while a standby acquires the freed lock: split brain,
-    /// which is the exact failure the lock exists to prevent. Callers must
-    /// check this before each unit of work and drop the `ChainLock` on false.
+    /// A dropped connection would otherwise leave the holder acting as leader
+    /// while a standby acquires the freed lock. Callers must check this before
+    /// each unit of work and drop the `ChainLock` on `false`.
     pub async fn is_alive(&mut self) -> bool {
-        // The cast is load-bearing: a bare `1` is `integer` in Postgres, and
-        // deserializing a 4-byte int4 into the `BigInt`/i64 below fails. That
-        // error is indistinguishable here from a dead connection, so an
-        // uncast literal makes this return false on a perfectly healthy
-        // session — every holder demotes itself on its first check.
+        // The cast is required: a bare `1` is `integer` in Postgres and
+        // deserializing int4 into `BigInt`/i64 fails. Such an error is
+        // indistinguishable from a dead connection, so an uncast literal would
+        // make a healthy session report as dead.
         diesel::sql_query("SELECT 1::bigint AS one")
             .get_result::<Alive>(&mut self.conn)
             .await

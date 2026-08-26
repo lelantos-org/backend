@@ -1,12 +1,12 @@
 //! Baby-Jubjub coordinate ops (circomlib frame).
 //!
-//! Coordinate frame: circomlib BabyJubJub (a=168700, d=168696). ark_ed_on_bn254
-//! uses an isomorphic a=1 form; we apply `x_ark = x_circom · √168700` to bridge
-//! into ark for scalar mul, and bring results back. Compression and bit hashing
-//! happen in circomlib coords.
+//! Coordinate frame: circomlib BabyJubJub (a=168700, d=168696). `ark_ed_on_bn254`
+//! uses an isomorphic a=1 form, so `x_ark = x_circom · √168700` bridges into ark
+//! for scalar multiplication and results are converted back. Compression and bit
+//! hashing happen in circomlib coordinates.
 //!
-//! Compression (circomlibjs): y as 32-byte LE, sign-of-x in top bit of byte 31.
-//! Sign = (x integer > (p-1)/2).
+//! Compression follows circomlibjs: y as 32-byte little-endian, with the sign of
+//! x in the top bit of byte 31, where sign is `x > (p-1)/2` as an integer.
 
 use ark_ec::CurveGroup;
 use ark_ec::scalar_mul::fixed_base::FixedBase;
@@ -72,12 +72,11 @@ impl CircomPoint {
 
     /// Full order-`n` subgroup test, delegated to ark.
     ///
-    /// Baby-Jubjub's group is `Z_8 x Z_n`, so being on the curve does not put a
-    /// point in the prime-order subgroup. Callers that then multiply by a secret
-    /// need this: an 8-torsion component turns the product into one of eight
-    /// values, which is a channel out of the secret. Note the weaker `[8]P == O`
-    /// test does NOT do this job — it accepts `T + [t]B`, which is exactly the
-    /// shape of that attack.
+    /// Baby-Jubjub's group is `Z_8 x Z_n`, so a point on the curve is not
+    /// necessarily in the prime-order subgroup. Callers that multiply by a secret
+    /// require this check: an 8-torsion component reduces the product to one of
+    /// eight values, leaking the secret. The weaker `[8]P == O` test is not
+    /// sufficient, since it accepts `T + [t]B`.
     pub fn is_in_prime_subgroup(&self) -> bool {
         self.to_ark().is_in_correct_subgroup_assuming_on_curve()
     }
@@ -100,10 +99,10 @@ pub fn scalar_mul(p: CircomPoint, k: Fr) -> CircomPoint {
     CircomPoint::from_ark((proj * k).into_affine())
 }
 
-/// Precomputed window table for repeated scalar muls against a fixed base
-/// `p`. Building the table is amortized across many scalars: the cost of
-/// `n` scalar muls drops from `n * ~256` doublings to `n * ~32` additions
-/// once the table is built.
+/// Precomputed window table for repeated scalar multiplications against a fixed
+/// base `p`. Building the table is amortized across many scalars: once built, `n`
+/// scalar multiplications cost roughly `n * 32` additions instead of `n * 256`
+/// doublings.
 pub struct FixedBaseTable {
     table: Vec<Vec<EdwardsAffine>>,
     window: usize,
@@ -165,13 +164,12 @@ pub fn unpack(bytes: &[u8]) -> Result<CircomPoint, ClueError> {
     Ok(p)
 }
 
-/// [`unpack`], plus the two checks a point that will be multiplied by a secret
-/// needs: prime-order subgroup membership, and non-identity.
+/// [`unpack`], plus the two checks required of a point that will be multiplied by
+/// a secret: prime-order subgroup membership and non-identity.
 ///
-/// The identity is rejected because it absorbs any scalar — a shared secret
-/// derived from it is the same for every key, so it carries no secrecy at all.
-/// `unpack` alone accepts it (it satisfies the curve equation), which is why
-/// this is a separate entry point rather than a tightening of that one.
+/// The identity absorbs any scalar, so a shared secret derived from it is the
+/// same for every key. `unpack` accepts it because it satisfies the curve
+/// equation, so this is a separate entry point.
 pub fn unpack_subgroup(bytes: &[u8]) -> Result<CircomPoint, ClueError> {
     let p = unpack(bytes)?;
     if p.is_identity() || !p.is_in_prime_subgroup() {

@@ -1,8 +1,8 @@
 //! Standard config-loading helper.
 //!
-//! Every binary follows the same shape: env var holds a path, default path
-//! used when unset, file is TOML deserialized into the binary's config
-//! struct. Use [`load_toml`] to avoid reinventing it.
+//! Every binary follows the same shape: an env var holds a path, a default path
+//! applies when it is unset, and the file is TOML deserialized into the binary's
+//! config struct. [`load_toml`] implements it.
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;

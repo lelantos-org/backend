@@ -1,7 +1,7 @@
 //! Assemble a batch of raw events into the rows one consume tick may commit.
 //!
-//! Pure and sync: everything the plan needs is passed in, so the whole
-//! decision is testable without a database.
+//! Pure and synchronous: everything the plan needs is passed in, so the decision
+//! is testable without a database.
 
 use crate::domain::convert::u256_to_bigdecimal;
 use crate::domain::error::FmdIndexerError;
@@ -22,8 +22,8 @@ const CLUE_BITS_PREFIX: usize = 2;
 /// The FMD payload one tree leaf carries.
 ///
 /// `NoteCreated` supplies it inline; a `DepositFlushed` sources it from the
-/// `DepositEscrowed` event that opened the deposit. Same columns either way,
-/// so both paths build the note through [`LeafPayload::into_note`].
+/// `DepositEscrowed` event that opened the deposit. The columns are the same
+/// either way, so both paths build the note through [`LeafPayload::into_note`].
 #[derive(Clone)]
 pub struct LeafPayload {
     pub cm: Vec<u8>,
@@ -41,9 +41,8 @@ impl LeafPayload {
         self.ciphertext.len() >= CLUE_BITS_PREFIX
     }
 
-    /// Block coordinates only: a tx hash in the log is a direct pointer from
-    /// an operator's log stream into the note -> deposit -> payer/recipient
-    /// join, so nothing beyond them is carried over.
+    /// Carries block coordinates only. A tx hash in the log would point from an
+    /// operator's log stream straight into the note-to-deposit-to-payer join.
     fn into_note(self, chain_id: i64, row: &RawEventRow, leaf_index: i64) -> NewNote {
         NewNote {
             chain_id,
@@ -66,20 +65,19 @@ impl LeafPayload {
 /// The two leaves one deposit mints, in the order `flushBatch` inserts them:
 /// the depositor's note, then the note paying whoever flushed it.
 ///
-/// The order is not cosmetic — it is the leaf order the tree commits, so
-/// swapping them assigns both notes the wrong `leaf_index` and every Merkle
-/// proof built against them fails.
+/// The order is the leaf order the tree commits, so swapping them assigns both
+/// notes the wrong `leaf_index` and every Merkle proof built against them fails.
 #[derive(Clone)]
 pub struct EscrowedLeaves {
     pub principal: LeafPayload,
     pub fee: LeafPayload,
 }
 
-/// Map from deposit_id (decimal string) → that deposit's two leaves.
+/// Maps a deposit id, as a decimal string, to that deposit's two leaves.
 pub type EscrowedMap = HashMap<String, EscrowedLeaves>;
 
-/// Debug-printable: these are public chain values, and a plan is the first
-/// thing worth dumping when a tick commits something unexpected.
+/// Debug-printable: these are public chain values, and a plan is the first thing
+/// to dump when a tick commits something unexpected.
 #[derive(Debug)]
 pub struct CommitPlan {
     pub notes: Vec<NewNote>,
@@ -100,24 +98,25 @@ struct Root {
 enum TxState {
     /// Fully observed. Everything up to and including it can be committed.
     Ready,
-    /// Still waiting on data outside this batch. The commit walk stops here —
-    /// committing a later tx would advance the cursor past this one.
+    /// Still waiting on data outside this batch. The commit walk stops here,
+    /// since committing a later transaction would advance the cursor past this
+    /// one.
     Pending,
 }
 
 /// Per-tx accumulator linking a single `RootAdvanced` to its trailing leaf
 /// events.
 ///
-/// The contract emits `RootAdvanced` first (lower log_index) then
-/// `NoteCreated × inserted`; `flushBatch` inverts that, emitting
-/// `DepositFlushed × n` before its root. So a leaf may arrive before its base
-/// index is known: it is stored holding its ordinal, and [`Self::set_root`]
+/// The contract emits `RootAdvanced` first, at a lower log index, followed by one
+/// `NoteCreated` per inserted leaf. `flushBatch` inverts that, emitting one
+/// `DepositFlushed` per deposit before its root, so a leaf may arrive before its
+/// base index is known. It is stored holding its ordinal and [`Self::set_root`]
 /// rebases it once the root lands.
 ///
-/// Completion is measured in *leaf events observed*, not notes produced. A
-/// leaf that cannot be turned into a note — undecodable, or a ciphertext too
-/// short to carry clueBits — still counts, so one bad leaf leaves a hole in
-/// `leaf_index` instead of parking the cursor on a tx that can never satisfy
+/// Completion counts leaf events observed rather than notes produced. A leaf that
+/// cannot become a note, whether undecodable or carrying a ciphertext too short
+/// for clueBits, still counts, so one bad leaf leaves a hole in `leaf_index`
+/// rather than parking the cursor on a transaction that can never satisfy
 /// `notes.len() == inserted`.
 struct PendingTx {
     root: Option<Root>,
@@ -125,13 +124,13 @@ struct PendingTx {
     skipped: u64,
     notes: Vec<NewNote>,
     spent_nfs: Vec<NewSpentNullifier>,
-    /// Highest row of this tx seen so far. The cursor commits through these,
-    /// so they advance for every row — including ones this batch could not
-    /// use, which decoding will reject identically on every replay.
+    /// Highest row of this transaction seen so far. The cursor commits through
+    /// these, so they advance for every row, including ones this batch could not
+    /// use, which decoding rejects identically on every replay.
     last_id: i64,
     last_block: i64,
-    /// Set when a `DepositFlushed` references an escrow that is not ingested
-    /// yet. Unlike an unusable leaf this may still resolve, so the tx waits.
+    /// Set when a `DepositFlushed` references an escrow that is not yet ingested.
+    /// Unlike an unusable leaf this may still resolve, so the transaction waits.
     deferred: bool,
 }
 
@@ -154,13 +153,13 @@ impl PendingTx {
         self.last_block = row.block_number;
     }
 
-    /// Record the tx's leaf range and rebase leaves that arrived before it.
+    /// Record the transaction's leaf range and rebase leaves that arrived before
+    /// it.
     ///
     /// Errors on a second root: overwriting the range would renumber the first
-    /// root's leaves onto the second one's, writing indices that belong to
-    /// another range and colliding on `notes_chain_leaf_idx`. Deferring
-    /// forever would wedge the chain just as silently, so the tick fails
-    /// loudly instead.
+    /// root's leaves onto the second one's, writing indices belonging to another
+    /// range and colliding on `notes_chain_leaf_idx`. Deferring instead would
+    /// wedge the chain, so the tick fails.
     fn set_root(&mut self, root: Root) -> Result<(), FmdIndexerError> {
         if self.root.is_some() {
             return Err(FmdIndexerError::Decode(
@@ -175,9 +174,9 @@ impl PendingTx {
         Ok(())
     }
 
-    /// Reserve the next leaf ordinal, or `None` if the root already accounted
-    /// for every leaf it announced. A surplus leaf must not be counted, or the
-    /// tx could never reach `inserted` again.
+    /// Reserve the next leaf ordinal, or `None` if the root already accounted for
+    /// every leaf it announced. A surplus leaf must not be counted, or the
+    /// transaction could never reach `inserted` again.
     fn claim_leaf(&mut self) -> Option<u64> {
         if self.root.is_some_and(|r| self.leaf_seen >= r.inserted) {
             return None;
@@ -187,8 +186,8 @@ impl PendingTx {
         Some(ordinal)
     }
 
-    /// Absolute leaf index for a claimed ordinal — or the bare ordinal while
-    /// the root is still unknown, for [`Self::set_root`] to rebase.
+    /// Absolute leaf index for a claimed ordinal, or the bare ordinal while the
+    /// root is unknown, for [`Self::set_root`] to rebase.
     fn leaf_index(&self, ordinal: u64) -> i64 {
         self.root.map_or(ordinal, |r| r.start_index + ordinal) as i64
     }
@@ -200,8 +199,8 @@ impl PendingTx {
         match self.root {
             // Every leaf the root announced is accounted for, usable or not.
             Some(root) if self.leaf_seen == root.inserted => TxState::Ready,
-            // No root: committable only if the tx produced no leaf either,
-            // else its root is on the far side of the batch boundary.
+            // No root: committable only if the transaction produced no leaf
+            // either, otherwise its root is beyond the batch boundary.
             None if self.leaf_seen == 0 => TxState::Ready,
             _ => TxState::Pending,
         }
@@ -210,10 +209,9 @@ impl PendingTx {
 
 /// Whether a leaf source may arrive before its `RootAdvanced`.
 ///
-/// `flushBatch` emits `DepositFlushed × n` and *then* its root, so a deposit
-/// legitimately precedes the base index it will be numbered from. A
-/// `NoteCreated` always trails its root, so one that does not is an ordering
-/// the pipeline has no way to index.
+/// `flushBatch` emits one `DepositFlushed` per deposit and then its root, so a
+/// deposit legitimately precedes the base index it will be numbered from. A
+/// `NoteCreated` always trails its root, so one that does not cannot be indexed.
 #[derive(Clone, Copy)]
 enum LeafOrder {
     /// Root first, leaves after. A leaf seen before the root is unusable.
@@ -241,11 +239,12 @@ impl RowCtx<'_> {
     }
 }
 
-/// Group raw events by tx_hash, decode, and produce a commit plan up to
-/// the first tx that is not fully observed. `None` when nothing is ready.
+/// Group raw events by `tx_hash`, decode them, and produce a commit plan up to
+/// the first transaction that is not fully observed. `None` when nothing is
+/// ready.
 ///
-/// `escrowed` holds pre-resolved `DepositEscrowed` payloads keyed by deposit
-/// id; a `DepositFlushed` referencing one that is missing defers its whole tx
+/// `escrowed` holds pre-resolved `DepositEscrowed` payloads keyed by deposit id.
+/// A `DepositFlushed` referencing a missing one defers its whole transaction
 /// until the escrow event has been ingested.
 pub fn plan_commit(
     rows: &[RawEventRow],
@@ -256,7 +255,7 @@ pub fn plan_commit(
     Batch::assemble(rows, chain_id, escrowed).map(|batch| batch.commit_through(chain_id, after))
 }
 
-/// Decoded rows grouped by tx, in first-seen (and therefore id) order.
+/// Decoded rows grouped by transaction, in first-seen and therefore id order.
 struct Batch {
     by_tx: HashMap<Vec<u8>, PendingTx>,
     order: Vec<Vec<u8>>,
@@ -278,8 +277,8 @@ impl Batch {
             tx.observe(row);
 
             let Some(kind) = EventKind::from_i16(row.event_kind) else {
-                // Not a leaf kind by construction: every leaf kind is known,
-                // so this row cannot be one the tx is still waiting on.
+                // Not a leaf kind by construction: every leaf kind is known, so
+                // this row cannot be one the transaction is waiting on.
                 warn!(
                     chain_id,
                     event_kind = row.event_kind,
@@ -298,8 +297,8 @@ impl Batch {
             let decoded = match decode::decode(kind, &row.topics, &row.data) {
                 Ok(decoded) => decoded,
                 Err(e) => {
-                    // A leaf that will not decode never will. Count it so the
-                    // tx can still complete, minus one leaf.
+                    // A leaf that will not decode never will, so count it and let
+                    // the transaction complete one leaf short.
                     if matches!(kind, EventKind::NoteCreated | EventKind::DepositFlushed) {
                         tx.claim_leaf();
                         tx.skipped += 1;
@@ -328,7 +327,7 @@ impl Batch {
         }
     }
 
-    /// Drain txs in order until one is not [`TxState::Ready`].
+    /// Drain transactions in order until one is not [`TxState::Ready`].
     fn commit_through(mut self, chain_id: i64, after: i64) -> Option<CommitPlan> {
         let mut plan = CommitPlan {
             notes: Vec::new(),
@@ -409,10 +408,10 @@ impl PendingTx {
             DecodedEvent::DepositFlushed { id, .. } => {
                 let deposit_id = id.to_string();
                 let Some(payload) = cx.escrowed.get(&deposit_id) else {
-                    // The escrow event may simply not be ingested yet, so this
-                    // is a wait rather than a drop. Logged because the wait is
-                    // unbounded: if the escrow log predates the ingester's
-                    // start block it never arrives and the chain stops here.
+                    // The escrow event may not be ingested yet, so this is a wait
+                    // rather than a drop. Logged because the wait is unbounded: if
+                    // the escrow log predates the ingester's start block it never
+                    // arrives and the chain stops here.
                     warn!(
                         chain_id = cx.chain_id,
                         deposit_id,
@@ -423,10 +422,10 @@ impl PendingTx {
                     self.deferred = true;
                     return Ok(());
                 };
-                // Two leaves, and `DepositFlushed` announces only the first:
-                // the contract emits once per deposit while inserting both, so
-                // the fee leaf has no event of its own and would otherwise
-                // leave the tx's leaf count short of `inserted`.
+                // Two leaves, of which `DepositFlushed` announces only the first:
+                // the contract emits once per deposit while inserting both, so the
+                // fee leaf has no event of its own and would otherwise leave the
+                // transaction's leaf count short of `inserted`.
                 let leaves = payload.clone();
                 self.push_leaf(cx, leaves.principal, LeafOrder::LeafLeads);
                 self.push_leaf(cx, leaves.fee, LeafOrder::LeafLeads);
@@ -437,9 +436,9 @@ impl PendingTx {
         Ok(())
     }
 
-    /// Claim a leaf ordinal and store the note — or account for the leaf as a
-    /// hole, which still consumes the ordinal so the tx's leaf count stays
-    /// reconcilable against `inserted` either way.
+    /// Claim a leaf ordinal and store the note, or account for the leaf as a
+    /// hole. Either way the ordinal is consumed, so the transaction's leaf count
+    /// stays reconcilable against `inserted`.
     fn push_leaf(&mut self, cx: &RowCtx<'_>, payload: LeafPayload, order: LeafOrder) {
         let Some(ordinal) = self.claim_leaf() else {
             warn!(
@@ -476,12 +475,12 @@ mod tests {
     use chain_types::abi::{DepositFlushed, NotePayload, NullifierConsumed, RootAdvanced};
 
     const CHAIN: i64 = 1;
-    /// Cursor position the batch starts from; `plan_commit` reports `None`
-    /// while nothing has moved past it.
+    /// Cursor position the batch starts from. `plan_commit` reports `None` while
+    /// nothing has moved past it.
     const AFTER: i64 = 100;
 
     /// Builds the row stream `plan_commit` reads, with ids and log indices
-    /// assigned in emission order the way the ingester writes them.
+    /// assigned in emission order as the ingester writes them.
     #[derive(Default)]
     struct Rows(Vec<RawEventRow>);
 
@@ -613,8 +612,8 @@ mod tests {
     #[test]
     fn an_unusable_leaf_leaves_a_hole_and_still_commits() {
         // A ciphertext too short to carry clueBits can never become a note.
-        // Completion counts leaf *events*, so the tx still clears — the hole
-        // is at index 1, and leaf 2 keeps the index the contract gave it.
+        // Completion counts leaf events, so the transaction still clears: the
+        // hole is at index 1 and leaf 2 keeps the index the contract gave it.
         let mut rows = Rows::default();
         rows.root(0x01, 10, 0, 3)
             .note(0x01, 10, 0xa0, usable_ciphertext())
@@ -628,7 +627,7 @@ mod tests {
 
     #[test]
     fn a_leaf_beyond_the_root_count_is_ignored_without_blocking_the_tx() {
-        // A surplus leaf must not be counted, or the tx could never match
+        // A surplus leaf must not be counted, or the transaction could never match
         // `inserted` again and the chain would park on it.
         let mut rows = Rows::default();
         rows.root(0x01, 10, 0, 1)
@@ -642,8 +641,8 @@ mod tests {
 
     #[test]
     fn a_spend_only_tx_commits_and_reports_its_own_block() {
-        // No leaves, so no RootAdvanced. Requiring one would wedge the chain,
-        // and sourcing the block from the last note would report 0.
+        // No leaves, so no RootAdvanced. Requiring one would wedge the chain, and
+        // sourcing the block from the last note would report 0.
         let mut rows = Rows::default();
         rows.nullifier(0x01, 500, 0xb0).nullifier(0x01, 500, 0xb1);
 
@@ -656,11 +655,11 @@ mod tests {
 
     #[test]
     fn deposits_emitted_before_their_root_are_rebased_onto_it() {
-        // `flushBatch` inverts the usual order: leaves first, root after. Each
+        // `flushBatch` inverts the usual order: leaves first, root after, so each
         // deposit holds its ordinal until the root supplies the base.
         //
-        // Two deposits, four leaves: each mints its own note and the note
-        // paying whoever flushed it, so `inserted` is twice the deposit count.
+        // Two deposits, four leaves: each mints its own note plus the note paying
+        // whoever flushed it, so `inserted` is twice the deposit count.
         let mut rows = Rows::default();
         rows.flushed(0x01, 10, 7)
             .flushed(0x01, 10, 8)
@@ -681,8 +680,8 @@ mod tests {
 
         assert!(rows.plan_bare().is_none(), "waits for the escrow event");
 
-        // ...and resolves once the escrow lands, without any other change.
-        // One `DepositFlushed`, two leaves: the escrow event carries both.
+        // Resolves once the escrow lands, with no other change. One
+        // `DepositFlushed`, two leaves: the escrow event carries both.
         let plan = rows
             .plan(&escrow(7, usable_ciphertext()))
             .expect("resolved");
@@ -692,7 +691,7 @@ mod tests {
     #[test]
     fn a_deferred_tx_holds_back_the_complete_ones_behind_it() {
         // Committing tx 2 would advance the cursor past tx 1, which is still
-        // waiting — tx 1's events would never be read again.
+        // waiting, so tx 1's events would never be read again.
         let mut rows = Rows::default();
         rows.flushed(0x01, 10, 7)
             .root(0x01, 10, 0, 2)
@@ -705,8 +704,8 @@ mod tests {
     #[test]
     fn a_second_root_in_one_tx_is_an_error_rather_than_a_wrong_index() {
         // Overwriting the range would renumber the first root's leaf onto the
-        // second one's, writing an index that belongs elsewhere and colliding
-        // on `notes_chain_leaf_idx`.
+        // second one's, writing an index that belongs elsewhere and colliding on
+        // `notes_chain_leaf_idx`.
         let mut rows = Rows::default();
         rows.root(0x01, 10, 0, 1)
             .note(0x01, 10, 0xa0, usable_ciphertext())

@@ -1,9 +1,10 @@
 use alloy::sol;
 
 sol! {
-    /// UniV3 QuoterV2 — `quoteExactInputSingle` is non-view (state-mutating
-    /// in the EVM trace) but used as a `staticcall`/`eth_call` by clients.
-    /// Returns amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate.
+    /// UniV3 QuoterV2. `quoteExactInputSingle` is non-view (state-mutating in
+    /// the EVM trace) but is invoked by clients as a `staticcall`/`eth_call`.
+    /// Returns amountOut, sqrtPriceX96After, initializedTicksCrossed and
+    /// gasEstimate.
     #[sol(rpc)]
     #[allow(missing_docs)]
     interface IQuoterV2 {
@@ -26,5 +27,5 @@ sol! {
     }
 }
 
-/// All four canonical UniV3 fee tiers (in 1e-6 units): 0.01%, 0.05%, 0.3%, 1%.
+/// The four canonical UniV3 fee tiers, in 1e-6 units: 0.01%, 0.05%, 0.3%, 1%.
 pub const FEE_TIERS: [u32; 4] = [100, 500, 3000, 10000];

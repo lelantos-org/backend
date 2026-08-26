@@ -1,13 +1,14 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// What a transaction did. Mutually exclusive and exact — see
-/// `repositories::transactions` for the contract-level derivation.
+/// What a transaction did. Mutually exclusive; see `repositories::transactions`
+/// for the contract-level derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TxKind {
     /// Escrowed deposit whose note has landed in the tree, counted at flush
-    /// time. `DepositFlushed` is per deposit, so a batch of eight is eight.
+    /// time. `DepositFlushed` is emitted per deposit, so a batch of eight counts
+    /// as eight.
     Deposit,
     /// Escrowed deposit still waiting for a flush. Becomes `deposit` once the
     /// relayer batches it, so a bucket's composition can change until then.
@@ -19,13 +20,13 @@ pub enum TxKind {
 }
 
 impl TxKind {
-    /// Every kind, in wire order. The exhaustive `match` in `as_str` is what
-    /// makes a new variant a compile error rather than a silent gap; this array
-    /// is what makes it show up in the parser and the error message too.
+    /// Every kind, in wire order. The exhaustive `match` in `as_str` turns a new
+    /// variant into a compile error, and this array carries it into the parser
+    /// and the error message.
     pub const ALL: [Self; 4] = [Self::Deposit, Self::Pending, Self::Transfer, Self::Withdraw];
 
-    /// The wire spelling, and the literal the classification SQL emits — the
-    /// two are the same string, which is what lets a kind be matched in SQL.
+    /// The wire spelling, identical to the literal the classification SQL emits,
+    /// so a kind can be matched in SQL.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Deposit => "deposit",
@@ -35,7 +36,7 @@ impl TxKind {
         }
     }
 
-    /// Inverse of `as_str`, so the two cannot drift apart.
+    /// Inverse of `as_str`, derived from it so the two cannot drift.
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == s)
     }
@@ -52,8 +53,8 @@ pub struct TxOut {
     pub kind: TxKind,
     /// `null` for transfers, which move no public value.
     pub asset_id_u64: Option<i64>,
-    /// Whole tokens as a decimal string. `null` for transfers, and for any
-    /// asset whose decimals the indexer has not resolved yet.
+    /// Whole tokens as a decimal string. `null` for transfers and for any asset
+    /// whose decimals the indexer has not resolved.
     pub amount: Option<String>,
 }
 

@@ -2,26 +2,25 @@ use bigdecimal::BigDecimal;
 
 /// Whole tokens for a base-unit amount.
 ///
-/// `None` when the indexer has not resolved the token's decimals — unknown, so
-/// no amount is reported rather than a wrong one. Never use `assets.scale` for
-/// this: `scale` sizes a value for the circuit (`baseUnits / scale` must fit
-/// `uint48`), so circuit units per whole token is `10^decimals / scale` and
-/// varies per asset.
+/// `None` when the indexer has not resolved the token's decimals, so no amount
+/// is reported rather than a wrong one. `assets.scale` is not a substitute: it
+/// sizes a value for the circuit (`baseUnits / scale` must fit `uint48`), so
+/// circuit units per whole token is `10^decimals / scale` and varies per asset.
 pub fn whole_tokens(base: &BigDecimal, decimals: Option<i16>) -> Option<BigDecimal> {
     let decimals = decimals.filter(|d| *d >= 0)?;
-    // BigDecimal carries its own scale, so this is exact: 14e18 base at 18
-    // decimals is exactly 14, with no rounding.
+    // BigDecimal carries its own scale, so this is exact: 14e18 base units at
+    // 18 decimals is exactly 14, without rounding.
     Some(base / BigDecimal::new(1.into(), -i64::from(decimals)))
 }
 
-/// The wire form of `whole_tokens`: trailing zeros trimmed, and always plain
+/// The wire form of `whole_tokens`: trailing zeros trimmed, always plain
 /// decimal.
 ///
-/// `to_string()` alone switches to scientific notation for small magnitudes — a
-/// single wei of an 18-decimal token prints as `2E-18` — and an amount field
-/// that changes syntax with its magnitude breaks any client that does more than
-/// `Number()` on it. Every endpoint that speaks token amounts uses this, so they
-/// cannot disagree about the format.
+/// `to_string()` switches to scientific notation for small magnitudes — a single
+/// wei of an 18-decimal token prints as `2E-18` — and an amount field whose
+/// syntax varies with its magnitude breaks clients that do more than `Number()`
+/// on it. Every endpoint that reports token amounts uses this, so the format is
+/// uniform.
 pub fn whole_tokens_str(base: &BigDecimal, decimals: Option<i16>) -> Option<String> {
     whole_tokens(base, decimals).as_ref().map(plain_amount)
 }
@@ -83,8 +82,8 @@ mod tests {
 
     #[test]
     fn the_wire_form_stays_decimal_for_a_single_wei() {
-        // `to_string()` would emit "2E-18" here, changing the field's syntax
-        // with its magnitude.
+        // `to_string()` would emit "2E-18" here, varying the field's syntax with
+        // its magnitude.
         assert_eq!(
             whole_tokens_str(&bd("2"), Some(18)).as_deref(),
             Some("0.000000000000000002")
@@ -92,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wire_form_has_nothing_to_say_without_decimals() {
+    fn the_wire_form_reports_nothing_without_decimals() {
         assert_eq!(whole_tokens_str(&bd("1"), None), None);
     }
 }

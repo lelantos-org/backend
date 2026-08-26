@@ -1,5 +1,5 @@
-//! Fixture-replay tests for explorer-indexer against the current ABI:
-//! `AssetRegistered` + `RootAdvanced`.
+//! Fixture-replay tests for explorer-indexer against the `AssetRegistered` and
+//! `RootAdvanced` events.
 
 use alloy::primitives::{Address, B256, LogData, U256};
 use alloy::rpc::types::eth::Log;
@@ -12,58 +12,28 @@ use explorer_indexer::config::ExplorerIndexerConfig;
 use explorer_indexer::services::consume::{ConsumeCtx, tick_chain};
 use shared::entities::EventKind;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
-use testcontainers::{ContainerAsync, runners::AsyncRunner};
-use testcontainers_modules::postgres::Postgres;
+use std::sync::Arc;
 
 const POOL_ADDR: &str = "0x0000000000000000000000000000000000000abc";
 const CHAIN_A: i64 = 1;
 const ASSET_ID: u64 = 7;
 
-struct ContainerHandle {
-    _container: ContainerAsync<Postgres>,
-    url: String,
-}
-
-async fn shared_container() -> &'static ContainerHandle {
-    static CELL: OnceLock<tokio::sync::OnceCell<ContainerHandle>> = OnceLock::new();
-    let cell = CELL.get_or_init(tokio::sync::OnceCell::new);
-    cell.get_or_init(|| async {
-        let c = Postgres::default().start().await.unwrap();
-        let host = c.get_host().await.unwrap();
-        let port = c.get_host_port_ipv4(5432).await.unwrap();
-        let url = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
-        let migrate_url = url.clone();
-        tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
-            .await
-            .unwrap()
-            .unwrap();
-        ContainerHandle { _container: c, url }
-    })
-    .await
-}
+/// Cleared between tests. Every table this binary writes, directly or through a
+/// foreign key.
+const TABLES: &[&str] = &[
+    "raw_events",
+    "chain_state",
+    "chain_reorgs",
+    "consumer_cursors",
+    "notes",
+    "subscriptions",
+    "matches",
+    "assets",
+    "tree_advances",
+];
 
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
-    static SERIAL: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
-    let mu = SERIAL
-        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let guard = mu.lock_owned().await;
-    let h = shared_container().await;
-    let pool = database::build_pool(&h.url, database::PoolCfg::indexer())
-        .await
-        .unwrap();
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query(
-        "TRUNCATE raw_events, chain_state, chain_reorgs, consumer_cursors, notes, \
-         subscriptions, matches, assets, tree_advances \
-         RESTART IDENTITY CASCADE",
-    )
-    .execute(&mut conn)
-    .await
-    .unwrap();
-    drop(conn);
-    (pool, guard)
+    test_support::fresh_pool(database::PoolCfg::indexer(), TABLES).await
 }
 
 async fn insert_chain_state(pool: &database::DbPool, chain_id: i64) {
@@ -170,8 +140,8 @@ async fn insert_log(pool: &database::DbPool, chain_id: i64, log: &Log, kind: Eve
         .unwrap();
 }
 
-/// No chains and no metadata RPC: the decimals sweep is a no-op here, so
-/// these tests exercise event consumption alone.
+/// No chains and no metadata RPC, so the decimals sweep is a no-op and these
+/// tests exercise event consumption alone.
 fn empty_ctx(pool: database::DbPool) -> ConsumeCtx {
     ConsumeCtx {
         pool,

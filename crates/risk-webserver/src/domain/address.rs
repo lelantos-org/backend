@@ -1,10 +1,10 @@
-//! Address normalization — the boundary that makes an exact `=` lookup on
+//! Address normalization, the boundary that makes an exact `=` lookup on
 //! `screened_addresses.address` correct.
 //!
 //! Every address entering the service passes through [`normalize`] before it
-//! reaches SQL, and the table is expected to hold the same normalized form.
-//! Getting this wrong is a false negative on a sanctioned address, so the
-//! rules are strict and the failure mode is `BadRequest`, never a silent pass.
+//! reaches SQL, and the table holds the same normalized form. An error here is a
+//! false negative on a sanctioned address, so the rules are strict and the
+//! failure mode is `BadRequest` rather than a silent pass.
 
 use crate::domain::error::{AppError, AppResult};
 
@@ -15,7 +15,7 @@ pub struct NormalizedAddress {
     pub address: String,
 }
 
-/// Address family for which we can validate the exact wire format.
+/// Address family whose exact wire format can be validated.
 const CHAIN_EVM: &str = "evm";
 
 const MAX_CHAIN_LEN: usize = 16;
@@ -25,14 +25,13 @@ const EVM_HEX_LEN: usize = 40;
 /// Normalize `(chain, raw)` into its canonical stored form.
 ///
 /// - `chain`: trimmed and lowercased; must be `[a-z0-9-]{1,16}`.
-/// - `chain == "evm"`: `0x` + exactly 40 hex digits, lowercased. Accepting
-///   EIP-55 checksummed input and folding the case away is the point — a
-///   checksummed and a lowercase spelling of the same address must never
-///   screen differently.
+/// - `chain == "evm"`: `0x` followed by exactly 40 hex digits, lowercased.
+///   EIP-55 checksummed input is accepted and case-folded so a checksummed and a
+///   lowercase spelling of the same address screen identically.
 /// - any other chain: trimmed, non-empty, at most 128 alphanumeric ASCII
-///   characters, **case preserved**. This covers base58 and bech32 without
-///   pretending to verify their checksums; case matters in base58, so folding
-///   it here would merge distinct addresses.
+///   characters, with case preserved. This covers base58 and bech32 without
+///   verifying their checksums; case is significant in base58, so folding it
+///   would merge distinct addresses.
 pub fn normalize(chain: &str, raw: &str) -> AppResult<NormalizedAddress> {
     let chain = normalize_chain(chain)?;
     let address = if chain == CHAIN_EVM {

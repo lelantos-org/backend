@@ -18,15 +18,15 @@ pub fn build(state: AppState) -> Router {
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/health", get(handlers::health).layer(cc("no-store")))
         // The gate in front of every expensive sync read. `no-store` because a
-        // cached watermark is a stale one, and staleness here is precisely the
-        // latency this endpoint exists to remove.
+        // cached watermark is stale, and staleness is the latency this endpoint
+        // exists to remove.
         .route("/v1/head", get(handlers::get_head).layer(cc("no-store")))
         .route(
             "/v1/notes",
             get(handlers::list_notes).layer(cc("public, max-age=1")),
         )
-        // Per-caller data keyed on a capability token: never cacheable by a
-        // shared proxy, and not worth caching in the browser either.
+        // Per-caller data keyed on a capability token: not cacheable by a shared
+        // proxy, and not worth caching in the browser.
         .route(
             "/v1/matches",
             get(handlers::list_matches).layer(cc("no-store")),
@@ -52,9 +52,9 @@ pub fn build(state: AppState) -> Router {
         .layer(request_span::trace_layer())
         // Outside `trace_layer` so it observes the same responses the tracing
         // layer does. Must stay above `with_state` and below the routes: the
-        // `route` label comes from `MatchedPath`, which only exists once axum
-        // has matched, and a request that matched nothing is bucketed under a
-        // single label rather than by its path.
+        // `route` label comes from `MatchedPath`, which exists only once axum has
+        // matched, and an unmatched request is bucketed under a single label
+        // rather than by its path.
         .layer(axum::middleware::from_fn(shared::metrics::track_http))
         .with_state(state)
 }

@@ -16,8 +16,8 @@ pub enum AppError {
     #[error("prover: {0}")]
     Prover(String),
     /// The prover was busy and the caller declined to queue. Only the flush
-    /// worker yields like this — it retries on its next tick — so this never
-    /// reaches an HTTP caller.
+    /// worker yields this way, retrying on its next tick, so it never reaches an
+    /// HTTP caller.
     #[error("prover busy")]
     ProverBusy,
     #[error("submit reverted: {0}")]
@@ -32,26 +32,24 @@ pub enum AppError {
     NullifierAlreadySpent(String),
     #[error("nullifier in flight: {0}")]
     NullifierInFlight(String),
-    /// An `Idempotency-Key` that already answered a *different* submission.
-    /// Replaying it would report someone else's transaction as this caller's,
-    /// so the reuse is refused instead.
+    /// An `Idempotency-Key` that already answered a different submission.
+    /// Replaying it would report another caller's transaction as this one's, so
+    /// the reuse is refused.
     #[error("idempotency key reused: {0}")]
     IdempotencyKeyReused(String),
     #[error("oracle: {0}")]
     Oracle(String),
     /// No output of the submission decrypted to a note this relayer owns.
     ///
-    /// A payer who attached no fee at all and one who attached it to the wrong
-    /// address are indistinguishable from here, and both need the same thing:
-    /// the address to pay. It is public — `/chains` publishes it — so echoing
-    /// it costs nothing and saves a round trip.
+    /// A payer who attached no fee and one who attached it to the wrong address
+    /// are indistinguishable here, and both need the address to pay. It is public
+    /// through `/chains`, so echoing it saves a round trip.
     #[error("no shielded fee output addressed to {address}")]
     ShieldedFeeMissing { address: String },
     /// A fee was found, and it does not cover the relayer's own quote.
     ///
-    /// Both numbers are echoed. Without them the caller cannot tell a genuine
-    /// shortfall from price drift, and cannot decide whether to re-quote or to
-    /// give up.
+    /// Both numbers are echoed. Without them the caller cannot distinguish a
+    /// shortfall from price drift, or decide whether to re-quote.
     #[error(
         "shielded fee in asset {asset_id} pays {paid} but {required} is required \
          (grace {grace_bps} bps)"
@@ -65,48 +63,43 @@ pub enum AppError {
     },
     /// The fee was paid in an asset this relayer will not take.
     ///
-    /// A wallet builds one spend in one asset, so this also says the spend
-    /// itself cannot be relayed — not merely that the fee needs re-denominating.
+    /// A wallet builds one spend in one asset, so this also means the spend itself
+    /// cannot be relayed, not merely that the fee needs re-denominating.
     #[error("asset {asset_id} cannot pay a shielded fee: {reason}")]
     ShieldedFeeAssetRejected { asset_id: u64, reason: String },
     #[error("stale estimate: {0}")]
     StaleEstimate(String),
     #[error("internal: {0}")]
     Internal(String),
-    /// The outcome of a submission another caller made under the same
-    /// idempotency key. Carries only that caller's status and client message —
-    /// see [`AppError::mirrored`].
+    /// The outcome of a submission another caller made under the same idempotency
+    /// key. Carries only that caller's status and client message; see
+    /// [`AppError::mirrored`].
     #[error("{message}")]
     Mirrored { status: StatusCode, message: String },
-    /// A submission a contract guard rejected before it could be mined —
-    /// caught by the `eth_call` pre-flight, so nothing was broadcast and no
-    /// gas was spent.
+    /// A submission a contract guard rejected before it could be mined, caught by
+    /// the `eth_call` pre-flight, so nothing was broadcast and no gas was spent.
     ///
-    /// Distinct from [`AppError::Reverted`], which is a transaction that made
-    /// it on-chain and failed there. The difference matters to the caller:
-    /// this one is their payload to fix, and they cannot fix it without being
-    /// told which guard refused. It surfaces as a gas-estimation failure, so
-    /// without this variant it lands in [`AppError::Rpc`] — a 500 whose body
-    /// is deliberately scrubbed, leaving "your adapter is not allowlisted"
-    /// indistinguishable from "the relayer is broken".
+    /// Distinct from [`AppError::Reverted`], which is a transaction that reached
+    /// the chain and failed there. This one is the caller's payload to fix, and
+    /// they need to know which guard refused. It surfaces as a gas-estimation
+    /// failure, so without this variant it would land in [`AppError::Rpc`], a 500
+    /// whose body is scrubbed.
     #[error("rejected by contract: {detail}")]
     ContractRejected {
-        /// The contract's own revert text, safe to echo — see
-        /// [`revert_reason`].
+        /// The contract's own revert text, safe to echo; see [`revert_reason`].
         reason: String,
         /// Full node error, for logs only. May embed the RPC URL.
         detail: String,
     },
 }
 
-/// Turn a foreign error into an [`AppError`] with a bit of context in front of
-/// it, so a failure names the step it came from rather than only its cause.
+/// Turn a foreign error into an [`AppError`] with context in front of it, so a
+/// failure names the step it came from rather than only its cause.
 ///
-/// The context is a `&'static str` on purpose: this is used inside the
-/// prover's per-signal loops, where building a `String` per call would cost
-/// more than the operation it describes. Where an error genuinely needs
-/// runtime detail, use `map_err` with a closure so the formatting stays on the
-/// failure path.
+/// The context is a `&'static str`: this is used inside the prover's per-signal
+/// loops, where building a `String` per call would cost more than the operation
+/// it describes. Where an error needs runtime detail, use `map_err` with a
+/// closure so the formatting stays on the failure path.
 pub trait ErrorContext<T> {
     fn prover(self, step: &'static str) -> AppResult<T>;
 }
@@ -119,15 +112,15 @@ impl<T, E: std::fmt::Display> ErrorContext<T> for Result<T, E> {
 
 /// The chain's revert reason, if `err` carries one.
 ///
-/// Returns only the text from `execution reverted` onward. Everything before
-/// that marker is node and transport detail — which is exactly where an RPC
-/// URL, and with it an API key, would appear. What follows is the contract's
-/// own message and its ABI-encoded data. A transport failure has no marker at
-/// all and yields `None`, so it can never be mistaken for a revert.
+/// Returns only the text from `execution reverted` onward. Everything before that
+/// marker is node and transport detail, where an RPC URL and its API key would
+/// appear. What follows is the contract's own message and its ABI-encoded data. A
+/// transport failure has no marker and yields `None`, so it cannot be mistaken
+/// for a revert.
 pub fn revert_reason(err: &str) -> Option<String> {
     const MARKER: &str = "execution reverted";
-    /// Long enough for a revert string plus its selector, short enough that a
-    /// pathological node response cannot be used to flood a caller.
+    /// Long enough for a revert string plus its selector, short enough that an
+    /// oversized node response cannot flood a caller.
     const MAX: usize = 200;
 
     Some(err[err.find(MARKER)?..].trim().chars().take(MAX).collect())
@@ -137,10 +130,10 @@ impl AppError {
     /// Re-raise an error that another caller of the same idempotency key
     /// produced.
     ///
-    /// Only what the client is told survives — the status and the message it
-    /// would have been given. The original's internals stay with the caller
-    /// that owns them, and were already logged there, so a shared failure
-    /// cannot log the same node error twice or leak it to a second caller.
+    /// Only what the client is told survives: the status and the message it would
+    /// have been given. The original's internals stay with the caller that owns
+    /// them and were logged there, so a shared failure cannot log the same node
+    /// error twice or leak it to a second caller.
     pub fn mirrored(e: &AppError) -> Self {
         AppError::Mirrored {
             status: e.status(),
@@ -171,10 +164,10 @@ impl AppError {
         }
     }
 
-    /// What the caller is told. Errors describing *their* request carry their
-    /// own text; the rest get a fixed string, because infrastructure error
-    /// text is not safe to echo — alloy RPC errors embed the node URL, which
-    /// usually carries an API key. The full error is logged instead.
+    /// What the caller is told. Errors describing their request carry their own
+    /// text; the rest get a fixed string, because infrastructure error text is not
+    /// safe to echo: alloy RPC errors embed the node URL, which usually carries an
+    /// API key. The full error is logged instead.
     pub fn client_message(&self) -> String {
         match self {
             AppError::BadRequest(_)
@@ -188,7 +181,7 @@ impl AppError {
             | AppError::ShieldedFeeMissing { .. }
             | AppError::ShieldedFeeTooLow { .. }
             | AppError::ShieldedFeeAssetRejected { .. } => self.to_string(),
-            // Only `reason` — never `detail`, which is the raw node error.
+            // Only `reason`, never `detail`, which is the raw node error.
             AppError::ContractRejected { reason, .. } => format!("rejected by contract: {reason}"),
             AppError::Reverted(_) => "submit reverted".into(),
             AppError::SubmitUnknown(_) => {
@@ -248,8 +241,8 @@ mod tests {
         }
     }
 
-    /// Mirroring hands one caller's failure to another, so it must scrub at
-    /// least as hard as the original would have.
+    /// Mirroring hands one caller's failure to another, so it must scrub at least
+    /// as hard as the original.
     #[test]
     fn a_mirrored_error_says_no_more_than_the_original() {
         for err in infrastructure_errors() {
@@ -292,7 +285,8 @@ mod tests {
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
     }
 
-    /// A resubmit is a conflict, not a server fault — the client can act on it.
+    /// A resubmit is a conflict rather than a server fault, so the client can act
+    /// on it.
     #[test]
     fn nullifier_conflicts_are_client_errors() {
         for err in [
@@ -304,7 +298,7 @@ mod tests {
         }
     }
 
-    /// An ambiguous submit must not read as "safe to retry".
+    /// An ambiguous submit must not read as safe to retry.
     #[test]
     fn an_unknown_outcome_tells_the_caller_to_check_the_chain() {
         let err = AppError::SubmitUnknown("no receipt".into());

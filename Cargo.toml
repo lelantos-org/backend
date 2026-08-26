@@ -15,6 +15,7 @@ members = [
     "crates/metaquoter",
     "crates/risk-webserver",
     "crates/integration-tests",
+    "crates/test-support",
 ]
 
 [workspace.package]
@@ -56,9 +57,9 @@ alloy = { version = "0.5", default-features = false, features = [
     "contract",
     "signer-local",
     "network",
-    # `RpcError::ErrorResp(ErrorPayload)` is matched on in the relayer's
-    # submitter to tell a node that refused a broadcast from one that never
-    # answered; the payload type has to be nameable for that.
+    # The relayer's submitter matches on `RpcError::ErrorResp(ErrorPayload)` to
+    # distinguish a node that refused a broadcast from one that never answered,
+    # which requires the payload type to be nameable.
     "json-rpc",
     "transport-http",
     "reqwest-rustls-tls",
@@ -79,13 +80,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 
 # metrics
 #
-# The facade is unconditional in `shared`: with no recorder installed every
-# macro is a no-op, so the six binaries that expose no `/metrics` pay nothing
-# for the instrumentation sites they share (`shared::tick::run`).
+# The facade is unconditional in `shared`: with no recorder installed every macro
+# is a no-op, so binaries that expose no `/metrics` pay nothing for the shared
+# instrumentation sites such as `shared::tick::run`.
 metrics = "0.24"
 # `default-features = false` drops push-gateway, rustls and hyper-rustls. Only
-# `http-listener` is needed — the exporter serves the scrape endpoint itself,
-# which is why `fmd-indexer` needs no axum server of its own.
+# `http-listener` is needed: the exporter serves the scrape endpoint itself, so
+# `fmd-indexer` needs no axum server of its own.
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 # config
@@ -125,17 +126,19 @@ async-trait = "0.1"
 
 # testing
 mockall = "0.13"
+vergen-gix = { version = "9", features = ["build", "cargo", "rustc"] }
+
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
-# The FMD filter is field arithmetic through and through: arkworks generics
-# inlined across crate boundaries, so cross-crate optimisation is worth real
-# time. Measured on the `clue_breakdown` bench: batched scalar mul -10%,
-# Poseidon -3%, whole `test_clue_batch` path -3%.
+# The FMD filter is field arithmetic throughout, with arkworks generics inlined
+# across crate boundaries, so cross-crate optimisation pays off. Measured on the
+# `clue_breakdown` bench: batched scalar multiplication -10%, Poseidon -3%, the
+# whole `test_clue_batch` path -3%.
 #
-# `thin` rather than `fat` — it measured the same here and builds far faster.
-# `target-cpu=native` was also tried and is deliberately absent: it bought
-# ~0.5% and would tie the release binary to the machine that built it.
+# `thin` rather than `fat`: it measured the same here and builds far faster.
+# `target-cpu=native` gained about 0.5% and would tie the release binary to the
+# machine that built it, so it is not used.
 [profile.release]
 lto = "thin"
 codegen-units = 1

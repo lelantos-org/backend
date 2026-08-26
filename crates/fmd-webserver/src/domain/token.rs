@@ -4,26 +4,26 @@ use crate::domain::error::{AppError, AppResult};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-/// Required token width. Clients derive their own tokens from the wallet's
-/// `ivk`; the server cannot verify how one was generated, so width is the
-/// only property it enforces.
+/// Required token width. Clients derive their own tokens from the wallet's `ivk`
+/// and the server cannot verify how one was generated, so width is the only
+/// property it enforces.
 const TOKEN_BYTES: usize = 32;
 
 /// A capability token reduced to the form the database stores.
 ///
-/// The token is a bearer credential, so `subscriptions` holds its SHA-256
-/// rather than the token itself: a disclosure of the table then yields no
-/// usable capability. Equality lookup is the only operation the server
-/// performs on it. Constructing this type is the only way to address a
-/// subscription row, so a raw token cannot reach the repository layer.
+/// The token is a bearer credential, so `subscriptions` stores its SHA-256 rather
+/// than the token itself and a disclosure of the table yields no usable
+/// capability. Equality lookup is the only operation performed on it, and
+/// constructing this type is the only way to address a subscription row, so a raw
+/// token cannot reach the repository layer.
 ///
-/// Unsalted and unstretched: the input is 32 uniform secret bytes, not a
+/// Unsalted and unstretched: the input is 32 uniform secret bytes rather than a
 /// password, so there is no dictionary to precompute.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenHash(Vec<u8>);
 
-/// Omits the digest. It is a stable per-subscriber identifier and must not
-/// enter the log stream through a stray `{:?}`.
+/// Omits the digest, which is a stable per-subscriber identifier and must not
+/// reach the log stream through a stray `{:?}`.
 impl fmt::Debug for TokenHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("TokenHash").finish_non_exhaustive()
@@ -35,7 +35,7 @@ impl TokenHash {
     /// presents a token it claims to hold.
     ///
     /// A malformed token and an unknown one both surface as `NotFound`, so
-    /// neither endpoint becomes an existence oracle. Width is not checked: a
+    /// neither endpoint becomes an existence oracle. Width is not checked, since a
     /// wrong-length token hashes to a value no row carries.
     pub fn presented(token_hex: &str) -> AppResult<Self> {
         let token =
@@ -88,8 +88,8 @@ mod tests {
 
     #[test]
     fn both_constructors_agree_on_the_same_token() {
-        // Registration and lookup must agree, or a client locks itself out
-        // on its first request after registering.
+        // Registration and lookup must agree, or a client locks itself out on its
+        // first request after registering.
         assert_eq!(
             TokenHash::registered(TOKEN).unwrap(),
             TokenHash::presented(TOKEN).unwrap()

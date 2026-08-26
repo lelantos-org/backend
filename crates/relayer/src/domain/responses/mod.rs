@@ -32,69 +32,67 @@ pub struct ChainHealth {
     /// EIP-55 checksummed MASP pool address.
     pub masp_address: String,
     /// True once a submission's outcome could not be determined. The mirror is
-    /// parked: the relayer rejects work on this chain until it restarts, and
-    /// `current_root_hex` may no longer match the chain.
+    /// parked, so the relayer rejects work on this chain until it restarts and
+    /// `current_root_hex` may not match the chain.
     pub desynced: bool,
     /// EIP-55 checksummed relayer signer. Wallets bind this into the SNARK,
     /// and the pool rejects a proof naming anyone else.
     pub relayer_address: String,
-    /// Flattened into the same JSON object: a client sees one flat chain
-    /// record, while the split keeps the live mirror readings above separate
-    /// from the static configuration below.
+    /// Flattened into the same JSON object, so a client sees one chain record
+    /// while the split keeps the live mirror readings above separate from the
+    /// static configuration below.
     #[serde(flatten)]
     pub config: ChainConfigOut,
     /// Assets registered on this chain, lowest id first.
     ///
-    /// Empty when the indexer has not caught up, which a client must read as
-    /// "not known yet" rather than "this chain supports nothing".
+    /// Empty when the indexer has not caught up, which a client must read as not
+    /// yet known rather than as the chain supporting no assets.
     pub tokens: Vec<TokenOut>,
     /// Shielded fee terms, when this relayer charges one.
     ///
-    /// **Presence means required.** A client that sees this key must attach a
-    /// fee output to every spend and swap; one that does not must not. There is
-    /// deliberately no `required` flag to disagree with the key's own presence.
+    /// Presence means required: a client that sees this key must attach a fee
+    /// output to every spend and swap, and one that does not must not. There is no
+    /// separate `required` flag that could disagree with the key's presence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shielded_fee: Option<ShieldedFeeOut>,
 }
 
 /// What a client needs in order to pay this relayer privately.
 ///
-/// Terms only — no amount. An amount is a function of the gas price and an
-/// oracle rate, both of which move within the minute, and `/chains` is a boot
-/// registry a wallet reads once and holds behind a 60s edge cache. The live
-/// number belongs to `/v1/spend/estimate`, for the same reason `/v1/prices` is
-/// its own route rather than a field on [`TokenOut`].
+/// Terms only, no amount. An amount is a function of the gas price and an oracle
+/// rate, both of which move within the minute, while `/chains` is a boot registry
+/// a wallet reads once and holds behind a 60s edge cache. The live number belongs
+/// to `/v1/spend/estimate`, for the same reason `/v1/prices` is its own route
+/// rather than a field on [`TokenOut`].
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShieldedFeeOut {
     /// bech32m address to address the fee note to.
     pub address: String,
-    /// How far below the relayer's own submit-time quote a payment may fall
-    /// and still be accepted. A quote is not signed and is re-derived when the
-    /// spend arrives, so this is the drift a client is allowed between the two.
+    /// How far below the relayer's submit-time quote a payment may fall and still
+    /// be accepted. A quote is unsigned and re-derived when the spend arrives, so
+    /// this is the drift allowed between the two.
     pub grace_bps: u32,
     /// Markup over raw gas cost, already included in every quoted amount.
-    /// Published so a client can show what it is being charged, not so it can
-    /// recompute the amount itself.
+    /// Published so a client can display what it is charged rather than recompute
+    /// the amount.
     pub markup_bps: u32,
     /// Assets this relayer accepts as a fee.
     ///
-    /// A wallet builds one spend in one asset, so this doubles as the list of
-    /// assets it will relay at all: an asset absent from here cannot pay for
-    /// its own transfer.
+    /// A wallet builds one spend in one asset, so this is also the list of assets
+    /// the relayer will handle: an asset absent from here cannot pay for its own
+    /// transfer.
     ///
-    /// Repeated in full rather than named by id, so a client reading
-    /// `shieldedFee` has the `scale` it needs to size the note without joining
-    /// back to [`ChainHealth::tokens`].
+    /// Repeated in full rather than named by id, so a client reading `shieldedFee`
+    /// has the `scale` it needs to size the note without joining back to
+    /// [`ChainHealth::tokens`].
     pub tokens: Vec<TokenOut>,
 }
 
 /// One asset a wallet may hold on a chain.
 ///
 /// Carries the label and decimals so a client can render an amount without a
-/// per-token `symbol()` / `decimals()` round trip of its own — reads that used
-/// to happen once per asset on every load, and whose silent failure left the
-/// wrapped-native token unidentifiable.
+/// per-token `symbol()` and `decimals()` round trip of its own.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenOut {
@@ -102,10 +100,10 @@ pub struct TokenOut {
     pub asset_id: i64,
     /// 0x-prefixed ERC-20 address.
     pub token: String,
-    /// Circuit capacity parameter (`baseUnits / scale` must fit `uint48`), NOT
-    /// a decimals normalizer. Decimal string: it exceeds `u53`.
+    /// Circuit capacity parameter (`baseUnits / scale` must fit `uint48`), not a
+    /// decimals normalizer. A decimal string, since it exceeds `u53`.
     pub scale: String,
-    /// `null` until the indexer has read it. Unknown, never assume 18.
+    /// `null` until the indexer has read it: unknown, not 18.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decimals: Option<i16>,
     /// `null` until the indexer has read it, or when the token implements no
@@ -116,26 +114,24 @@ pub struct TokenOut {
 
 /// Spot USD prices for the registered assets, across every chain.
 ///
-/// A separate route rather than a field on [`TokenOut`] because the two have
-/// nothing in common but their key: `/chains` is a boot registry a client reads
-/// once and holds, while a price is stale within the minute. Bolting one onto
-/// the other would mean either refetching the registry to move a price or
+/// A separate route rather than a field on [`TokenOut`]: `/chains` is a boot
+/// registry a client reads once and holds, while a price is stale within the
+/// minute. Combining them would mean refetching the registry to move a price, or
 /// showing a price fixed at page load.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PricesResponse {
-    /// Shared with the response cache rather than copied out of it. `serde`'s
-    /// `rc` feature is on workspace-wide, which is what lets this serialize in
-    /// place — the same shape `explorer-webserver`'s handlers return.
+    /// Shared with the response cache rather than copied out of it. `serde`'s `rc`
+    /// feature is enabled workspace-wide, which lets this serialize in place, the
+    /// same shape `explorer-webserver`'s handlers return.
     pub prices: Arc<Vec<PriceOut>>,
 }
 
 /// One priced token.
 ///
-/// A token the provider does not know — a local test token, or any token on a
-/// chain it does not cover — is **absent** from `prices` rather than carried
-/// with a zero. Absence means "unknown", and a client must render nothing
-/// rather than `$0.00`, which would read as a measurement.
+/// A token the provider does not know, such as a local test token or one on an
+/// uncovered chain, is absent from `prices` rather than carried with a zero.
+/// Absence means unknown, so a client renders nothing rather than `$0.00`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceOut {
@@ -145,8 +141,8 @@ pub struct PriceOut {
     pub token: String,
     /// Spot USD price of one whole token.
     pub price_usd: f64,
-    /// Provider's own timestamp for the quote, not our fetch time, so a client
-    /// can age it rather than trusting it indefinitely.
+    /// The provider's own timestamp for the quote rather than the fetch time, so a
+    /// client can age it.
     pub price_at: i64,
 }
 
@@ -166,8 +162,8 @@ impl From<&crate::repositories::assets::AssetRow> for TokenOut {
 /// absent field by field until an operator fills it in.
 ///
 /// Every field is optional and omitted when unset rather than serialised as
-/// `null`, so a client can tell "this deployment does not describe it" from
-/// "it is described as empty" and fall back to its own defaults.
+/// `null`, so a client can distinguish an undescribed field from one described as
+/// empty and fall back to its own defaults.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainConfigOut {
@@ -201,22 +197,21 @@ pub struct FeeQuote {
     pub amount: String,
     /// MASP asset id, present once the indexer has registered this token.
     ///
-    /// `null` means the relayer cannot yet map this fee token to an asset, and
-    /// so a client cannot build a fee note for it — not that the token is
-    /// unpriced. [`Self::amount`] is still meaningful for display.
+    /// `null` means the relayer cannot yet map this fee token to an asset, so a
+    /// client cannot build a fee note for it. It does not mean the token is
+    /// unpriced; [`Self::amount`] is still meaningful for display.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<i64>,
     /// `baseUnits = circuitUnits * scale`, decimal string. Absent alongside
     /// [`Self::asset_id`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scale: Option<String>,
-    /// [`Self::amount`] rounded **up** to a whole circuit unit — the exact
-    /// `value` to put in the fee note.
+    /// [`Self::amount`] rounded up to a whole circuit unit: the exact `value` to
+    /// put in the fee note.
     ///
-    /// Rounded here rather than by the client because rounding down would
-    /// underpay by up to one whole unit and be refused, and because two
-    /// implementations of the same rounding drift. Absent alongside
-    /// [`Self::asset_id`].
+    /// Rounded here rather than by the client, since rounding down would underpay
+    /// by up to one whole unit and be refused, and two implementations of the same
+    /// rounding would drift. Absent alongside [`Self::asset_id`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub circuit_amount: Option<String>,
 }
@@ -234,8 +229,8 @@ pub struct EstimateResponse {
     pub fees: Vec<FeeQuote>,
     /// Where to send the fee note, when this chain collects a shielded fee.
     ///
-    /// Absent means the relayer is not charging on this chain, and a spend
-    /// carrying no fee output will still be relayed.
+    /// Absent means the relayer is not charging on this chain, and a spend with no
+    /// fee output is still relayed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shielded_fee_address: Option<String>,
 }
@@ -262,9 +257,9 @@ mod tests {
         }
     }
 
-    /// Presence of the key is the whole contract — it is what tells a client a
-    /// fee is required — so a relayer that charges nothing must not emit it at
-    /// all. A `null` here would read as "required, terms unknown".
+    /// Presence of the key is what tells a client a fee is required, so a relayer
+    /// that charges nothing must omit it entirely. A `null` would read as required
+    /// with unknown terms.
     #[test]
     fn a_chain_that_charges_no_shielded_fee_omits_the_key_entirely() {
         let json = serde_json::to_value(health(ChainConfigOut::default())).expect("serialize");
@@ -296,8 +291,8 @@ mod tests {
         assert_eq!(fee["tokens"][0]["scale"], "1000000000000");
     }
 
-    /// The config half is `#[serde(flatten)]`ed, so a client sees one flat
-    /// record. Nesting it would silently break every consumer's parser.
+    /// The config half is `#[serde(flatten)]`ed, so a client sees one flat record.
+    /// Nesting it would break every consumer's parser.
     #[test]
     fn test_serialize_chain_health_flattens_config_into_one_object() {
         let json = serde_json::to_value(health(ChainConfigOut {
@@ -319,9 +314,9 @@ mod tests {
 
     /// An undescribed field is omitted rather than serialised as `null`.
     ///
-    /// That distinction is load-bearing for the wallet: absent means "this
-    /// deployment does not describe it, use your own default", which is how a
-    /// relayer predating the registry keeps existing clients working.
+    /// The distinction matters to the wallet: absent means the deployment does not
+    /// describe the field and the client should use its own default, which keeps a
+    /// relayer predating the registry working with existing clients.
     #[test]
     fn test_serialize_chain_health_omits_undescribed_config_fields() {
         let json = serde_json::to_value(health(ChainConfigOut::default())).expect("serialize");
@@ -342,9 +337,8 @@ mod tests {
         assert_eq!(json["maspAddress"], "0xMASP");
     }
 
-    /// `tokens` is always present, so a client can tell "no assets indexed
-    /// yet" from "this relayer predates the field" — the first is an empty
-    /// array, the second is a missing key.
+    /// `tokens` is always present, so a client can distinguish no assets indexed
+    /// yet, an empty array, from a relayer predating the field, a missing key.
     #[test]
     fn test_serialize_chain_health_always_carries_a_token_array() {
         let json = serde_json::to_value(health(ChainConfigOut::default())).expect("serialize");
@@ -378,7 +372,7 @@ mod tests {
 
         assert_eq!(json["tokens"][0]["symbol"], "WETH");
         assert_eq!(json["tokens"][0]["decimals"], 18);
-        // Scale is a decimal string: it does not fit a JSON number safely.
+        // Scale is a decimal string; it does not fit a JSON number safely.
         assert_eq!(json["tokens"][0]["scale"], "10000000000");
         assert!(json["tokens"][1].get("symbol").is_none());
         assert!(json["tokens"][1].get("decimals").is_none());

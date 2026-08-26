@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Verdicts are cached per normalized address, negatives included — almost
-/// every screened address is clean, so negative caching is where the hit rate
-/// comes from.
+/// Verdicts are cached per normalized address, negatives included. Almost every
+/// screened address is clean, so negative caching supplies most of the hit
+/// rate.
 pub type ScreenCache = Cache<NormalizedAddress, Arc<ScreenOut>>;
 
 const CACHE_CAPACITY: u64 = 10_000;
@@ -21,9 +21,9 @@ pub struct ScreeningService {
 }
 
 impl ScreeningService {
-    /// `ttl_s` bounds how long the service can lag behind the table. There is
-    /// no write path to invalidate on, so a row inserted by SQL becomes
-    /// visible only once the entry expires — on every replica independently.
+    /// `ttl_s` bounds how long the service can lag behind the table. There is no
+    /// write path to invalidate on, so a row inserted by SQL becomes visible only
+    /// once the entry expires, independently on every replica.
     pub fn new(repo: Arc<dyn ScreenedAddressRepo>, ttl_s: u64) -> Self {
         Self {
             repo,
@@ -33,8 +33,8 @@ impl ScreeningService {
 
     /// Screen every address, preserving request order.
     ///
-    /// Fail-closed: a DB error propagates rather than being reported as
-    /// clean. The service never claims an address is unlisted when it could
+    /// Fail-closed: a database error propagates rather than being reported as
+    /// clean, so the service never claims an address is unlisted when it could
     /// not read the list.
     pub async fn screen(&self, addrs: Vec<NormalizedAddress>) -> AppResult<Vec<Arc<ScreenOut>>> {
         let mut out: Vec<Option<Arc<ScreenOut>>> = vec![None; addrs.len()];
@@ -106,7 +106,7 @@ impl ScreeningService {
     }
 }
 
-/// Verdict for one address: highest risk across its listings.
+/// Verdict for one address: the highest risk across its listings.
 fn build_verdict(chain: &str, address: &str, rows: &[&ScreenedRow]) -> AppResult<ScreenOut> {
     let mut risk = RiskLevel::None;
     let mut matches = Vec::with_capacity(rows.len());
@@ -155,7 +155,7 @@ mod tests {
         }
     }
 
-    /// Repo that answers with `rows` and asserts it is called exactly `times`.
+    /// Repo that answers with `rows` and asserts it is called `times` times.
     fn svc_returning(rows: Vec<ScreenedRow>, times: usize) -> ScreeningService {
         let mut repo = MockScreenedAddressRepo::new();
         repo.expect_find().times(times).returning(move |_, _| {

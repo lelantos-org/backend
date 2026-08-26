@@ -12,15 +12,15 @@ pub struct AssetRow {
     pub asset_id_u64: i64,
     pub token: Vec<u8>,
     pub scale: BigDecimal,
-    /// `NULL` until the indexer has read `decimals()` over RPC. Unknown, not 18.
+    /// `NULL` until the indexer has read `decimals()` over RPC: unknown, not 18.
     pub decimals: Option<i16>,
-    /// `NULL` until the indexer has read `symbol()` over RPC. Unknown, not a
-    /// label to invent — some tokens do not implement it at all.
+    /// `NULL` until the indexer has read `symbol()` over RPC, or permanently for
+    /// tokens that do not implement it.
     pub symbol: Option<String>,
 }
 
 pub async fn list(pool: &DbPool, chain_id: Option<i64>) -> AppResult<Vec<AssetRow>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     let mut q = assets::table.into_boxed();
     if let Some(c) = chain_id {
         q = q.filter(assets::chain_id.eq(c));

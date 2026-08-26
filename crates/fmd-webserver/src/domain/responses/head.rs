@@ -1,12 +1,12 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// The two cursors a wallet syncs against, and nothing else.
+/// The two cursors a wallet syncs against.
 ///
-/// Deliberately not a summary of chain state: this is polled far more often
-/// than any other endpoint, so every field has to be an indexed `MAX()`. A
-/// caller compares these to what it last saw and only pays for `/v1/notes`,
-/// `/v1/matches` and the chunk feeds when one has moved.
+/// Not a summary of chain state: this endpoint is polled far more often than any
+/// other, so every field must be an indexed `MAX()`. A caller compares these to
+/// what it last saw and only requests `/v1/notes`, `/v1/matches` and the chunk
+/// feeds when one has moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HeadOut {

@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use database::DbPool;
 use database::listen::{self, CHANNEL_NOTES_APPENDED};
+pub use database::models::NoteRow;
 use database::schema::notes;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -25,34 +26,14 @@ pub struct NewNote {
     pub cv_dep_y: BigDecimal,
 }
 
-#[derive(Debug, Clone, Queryable, Selectable)]
-#[diesel(table_name = notes)]
-pub struct NoteRow {
-    pub id: i64,
-    pub chain_id: i64,
-    pub block_number: i64,
-    pub tx_hash: Vec<u8>,
-    pub log_index: i32,
-    pub cm: Vec<u8>,
-    pub clue_rx: BigDecimal,
-    pub clue_ry: BigDecimal,
-    pub eph_pub_x: BigDecimal,
-    pub eph_pub_y: BigDecimal,
-    pub ciphertext: Vec<u8>,
-    pub leaf_index: i64,
-    pub cv_dep_x: BigDecimal,
-    pub cv_dep_y: BigDecimal,
-}
-
 #[async_trait]
 pub trait NotesRepo: Send + Sync {
     async fn insert_batch(&self, rows: &[NewNote]) -> Result<usize>;
     async fn delete_from_block(&self, chain_id: i64, from_block: i64) -> Result<usize>;
     async fn fetch_after(&self, chain_id: i64, after_id: i64, limit: i64) -> Result<Vec<NoteRow>>;
 
-    /// Chain-agnostic variant for the subscription backfill pass, which
-    /// tracks a single global `notes.id` pointer rather than a per-chain
-    /// cursor.
+    /// Chain-agnostic variant for the subscription backfill pass, which tracks a
+    /// single global `notes.id` pointer rather than a per-chain cursor.
     async fn fetch_after_any_chain(&self, after_id: i64, limit: i64) -> Result<Vec<NoteRow>>;
 
     /// Highest ingested `notes.id` across all chains, or 0 when empty.
@@ -60,15 +41,14 @@ pub trait NotesRepo: Send + Sync {
 
     /// Wake the filter loop after a commit.
     ///
-    /// Best-effort by contract: the filter's cursor finds these rows on its
-    /// next poll regardless, so a failed notify is a latency cost and never a
-    /// correctness one.
+    /// Best-effort by contract: the filter's cursor finds these rows on its next
+    /// poll, so a failed notify costs latency rather than correctness.
     async fn notify_appended(&self, chain_id: i64) -> Result<()>;
 }
 
 /// Rows per INSERT. Postgres caps a statement at 65535 bind parameters and
-/// `NewNote` binds 13 columns, so an operator raising `filter_batch` past
-/// ~5000 would otherwise turn every tick into a hard error.
+/// `NewNote` binds 13 columns, so chunking keeps a large `filter_batch` from
+/// failing every tick.
 const INSERT_CHUNK: usize = 2000;
 
 pub struct PostgresNotesRepo {

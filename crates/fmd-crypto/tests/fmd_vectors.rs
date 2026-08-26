@@ -11,10 +11,10 @@ struct VectorFile {
 }
 
 /// A clue-key expansion vector: the detection scalars the wallet derives from
-/// its root secret, and a clue a sender built from the published clue key
-/// alone. The detection scalars stay plain `Fr` on the wire, so this crate
-/// needs no expansion logic — only proof that what the wallet POSTs detects
-/// what the sender flagged.
+/// its root secret, and a clue a sender built from the published clue key alone.
+/// The detection scalars stay plain `Fr` on the wire, so this crate needs no
+/// expansion logic, only evidence that what the wallet posts detects what the
+/// sender flagged.
 #[derive(Debug, Deserialize)]
 #[allow(non_snake_case)]
 struct Expansion {
@@ -134,8 +134,8 @@ fn detect_self_match() {
     for v in load().vectors {
         let dk: Vec<_> = v.dk_x.iter().map(|s| fr_from_dec(s)).collect();
         let r = unpack(&h2b(&v.clue_R)).unwrap();
-        // Vectors store clue_bits as a single byte (gamma ≤ 8 cases) or two bytes
-        // for gamma=16. Tests cover gamma ∈ {3, 5, 8} → 1 byte each.
+        // Vectors store clue_bits as one byte for gamma <= 8 and two bytes for
+        // gamma = 16. These tests cover gamma in {3, 5, 8}, so one byte each.
         let bits_bytes = h2b(&v.clue_bits);
         let bits: u16 = match bits_bytes.len() {
             1 => bits_bytes[0] as u16,
@@ -157,7 +157,7 @@ fn detect_self_match() {
 
 #[test]
 fn batch_matches_scalar() {
-    // Batch of the real dk plus 7 perturbed dks must equal per-key test_clue.
+    // A batch of the real dk plus 7 perturbed dks must match per-key test_clue.
     for v in load().vectors {
         let real_dk: Vec<Fr> = v.dk_x.iter().map(|s| fr_from_dec(s)).collect();
         let r = unpack(&h2b(&v.clue_R)).unwrap();
@@ -188,9 +188,9 @@ fn batch_matches_scalar() {
     }
 }
 
-/// The expanded halves must still satisfy `X_i = x_i · B`, same invariant the
-/// raw-key vectors assert. If the wallet's expansion and the sender's ever
-/// diverge, every clue silently stops matching.
+/// The expanded halves must satisfy `X_i = x_i · B`, the same invariant the
+/// raw-key vectors assert. If the wallet's expansion and the sender's diverge,
+/// every clue stops matching.
 #[test]
 fn expansion_dk_to_fk_consistency() {
     let g = base8_circom();
@@ -215,9 +215,10 @@ fn expansion_dk_to_fk_consistency() {
     }
 }
 
-/// Cross-language check on the v4 key derivation: a clue built in TS from the
-/// published clue key must be detected by this crate using the TS-expanded
-/// detection scalars, and not by a key expanded from a different root.
+/// Cross-language check on the v4 key derivation: a clue built in TypeScript
+/// from the published clue key must be detected by this crate using the
+/// TypeScript-expanded detection scalars, and not by a key expanded from a
+/// different root.
 #[test]
 fn expansion_detect_matches() {
     for v in load().expansion {
@@ -240,11 +241,11 @@ fn expansion_detect_matches() {
             v.label
         );
 
-        // No negative case here. The foreign key in the vector is expanded
-        // from `other_root`, and expansion is wallet-side by design — this
-        // crate cannot derive it. Perturbing a scalar is not a substitute:
-        // it flips one of gamma bits, so it still matches half the time. The
-        // negative is pinned on the TS side, where the expansion lives.
+        // No negative case here. The foreign key in the vector is expanded from
+        // `other_root`, and expansion is wallet-side, so this crate cannot derive
+        // it. Perturbing a scalar is not a substitute: it flips one of gamma
+        // bits and still matches half the time. The negative case is pinned on
+        // the TypeScript side, where the expansion lives.
     }
 }
 

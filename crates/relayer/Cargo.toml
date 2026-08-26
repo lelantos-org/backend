@@ -57,9 +57,8 @@ parking_lot = "0.12"
 rayon = { workspace = true }
 
 [dev-dependencies]
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
+test-support = { path = "../test-support" }
 
 [build-dependencies]
-vergen-gix = "9"
+vergen-gix = { workspace = true }
 

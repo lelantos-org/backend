@@ -4,8 +4,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-/// BN254 scalar field order — the modulus every in-circuit signal lives under,
-/// and the one `fmd_crypto::poseidon` (over `ark_ed_on_bn254::Fq`) enforces.
+/// BN254 scalar field order: the modulus every in-circuit signal lives under, and
+/// the one `fmd_crypto::poseidon` enforces over `ark_ed_on_bn254::Fq`.
 pub static BN254_R: LazyLock<U256> = LazyLock::new(|| {
     U256::from_str_radix(
         "21888242871839275222246405745257275088548364400416034343698204186575808495617",
@@ -14,8 +14,8 @@ pub static BN254_R: LazyLock<U256> = LazyLock::new(|| {
     .expect("BN254 modulus literal")
 });
 
-/// Parse a `0x`-hex or decimal integer. Accepts either case of the prefix, and
-/// strips it exactly once — `"0x0x12"` is a malformed input, not `0x12`.
+/// Parse a `0x`-hex or decimal integer. Accepts either case of the prefix and
+/// strips it exactly once, so `"0x0x12"` is malformed rather than `0x12`.
 pub fn parse_u256(s: &str) -> AppResult<U256> {
     let (body, radix) = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         Some(hex) => (hex, 16),
@@ -32,9 +32,8 @@ pub fn parse_b32(s: &str) -> AppResult<FixedBytes<32>> {
 
 /// Why a value cannot serve as an in-circuit field element.
 ///
-/// Deliberately carries no message: the caller knows which input it was
-/// reading, and building that label eagerly would allocate on every element of
-/// every valid payload.
+/// Carries no message: the caller knows which input it was reading, and building
+/// that label eagerly would allocate for every element of every valid payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotAField {
     /// Not an integer literal at all.
@@ -54,12 +53,11 @@ impl NotAField {
     }
 }
 
-/// Core field parse. Rejects anything at or above the BN254 scalar modulus:
-/// such a value is not a field element at all, `fmd_crypto`'s Poseidon refuses
-/// it, and the contract's coefficient range check reverts on it. Left
-/// unchecked, a non-canonical `outCm` reaches [`crate::services::tree`] and
-/// fails *between* two speculative leaf inserts, which is how a single request
-/// could permanently desync a chain's mirror.
+/// Core field parse. Rejects anything at or above the BN254 scalar modulus: such
+/// a value is not a field element, `fmd_crypto`'s Poseidon refuses it, and the
+/// contract's coefficient range check reverts on it. Unchecked, a non-canonical
+/// `outCm` would reach [`crate::services::tree`] and fail between two speculative
+/// leaf inserts, permanently desyncing that chain's mirror.
 fn field_bytes(s: &str) -> Result<FixedBytes<32>, NotAField> {
     let v = parse_u256(s).map_err(|_| NotAField::Malformed)?;
     if v >= *BN254_R {
@@ -70,9 +68,9 @@ fn field_bytes(s: &str) -> Result<FixedBytes<32>, NotAField> {
 
 /// Where a field element came from, for error messages.
 ///
-/// Rendered only when a parse fails, so a valid payload never pays for the
-/// label — building `format!("nullifier[{i}]")` eagerly would allocate once per
-/// element of every request.
+/// Rendered only when a parse fails, so a valid payload never pays for the label;
+/// building `format!("nullifier[{i}]")` eagerly would allocate once per element
+/// of every request.
 #[derive(Debug, Clone, Copy)]
 pub enum FieldRef<'a> {
     /// A single named input, e.g. `pubInputs.merkleRoot`.
@@ -129,8 +127,8 @@ mod tests {
         assert_eq!(parse_u256("0X12").unwrap(), U256::from(18u8));
     }
 
-    /// `trim_start_matches` stripped every repetition, so a doubled prefix
-    /// silently parsed as a valid value instead of being rejected.
+    /// `trim_start_matches` would strip every repetition, so a doubled prefix
+    /// would parse as a valid value instead of being rejected.
     #[test]
     fn a_doubled_prefix_is_malformed_not_stripped_twice() {
         assert!(parse_u256("0x0x12").is_err());
@@ -145,9 +143,8 @@ mod tests {
         );
     }
 
-    /// The modulus itself and everything above it is not a field element.
-    /// Poseidon rejects these, and letting one through is what corrupts the
-    /// tree mirror mid-batch.
+    /// The modulus and everything above it is not a field element. Poseidon
+    /// rejects these, and letting one through corrupts the tree mirror mid-batch.
     #[test]
     fn rejects_non_canonical_field_elements() {
         for v in [*BN254_R, *BN254_R + U256::from(1u8), U256::MAX] {
@@ -158,8 +155,8 @@ mod tests {
         }
     }
 
-    /// A value that is not an integer at all reports that, rather than being
-    /// reported as out of range.
+    /// A value that is not an integer reports that rather than being reported as
+    /// out of range.
     #[test]
     fn distinguishes_malformed_from_non_canonical() {
         assert_eq!(field_bytes("not-a-number"), Err(NotAField::Malformed));

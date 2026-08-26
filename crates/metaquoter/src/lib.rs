@@ -1,9 +1,9 @@
 //! Quote-aggregation backend for shielded swaps.
 //!
-//! Layered binary; see `backend/ARCHITECTURE.md`. Races venue-specific
-//! [`Quoter`](repositories::quoter::Quoter) impls per request and returns
-//! the highest-`expected_out` route. Phase 1 ships UniV3 only; Curve and
-//! 1inch slot in via the same trait.
+//! Layered binary; see `backend/ARCHITECTURE.md`. Races the venue-specific
+//! [`Quoter`](repositories::quoter::Quoter) impls per request and returns the
+//! route with the highest `expected_out`. UniV3 is the only venue implemented;
+//! further venues plug in through the same trait.
 
 pub mod adapters;
 pub mod app;

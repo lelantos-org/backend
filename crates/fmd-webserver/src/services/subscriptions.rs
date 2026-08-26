@@ -8,26 +8,25 @@ use crate::repositories::{
 };
 use std::sync::Arc;
 
-/// γ sets the false-positive rate at `2^-γ`. The circuit carries
-/// out_clue_bits as a plain PolyEval-bound public input with no in-circuit
-/// constraints; the upper bits above γ are masked by the contract (0x3FFF).
-/// Higher γ = lower FP rate; lower γ = more privacy via false positives.
+/// γ sets the false-positive rate at `2^-γ`. The circuit carries `out_clue_bits`
+/// as a PolyEval-bound public input with no in-circuit constraints, and the
+/// contract masks the bits above γ with 0x3FFF. A higher γ lowers the
+/// false-positive rate; a lower γ increases privacy through false positives.
 pub const GAMMA_MIN: i32 = 1;
 pub const GAMMA_MAX: i32 = 16;
 
 /// How many false positives a subscription's match set must be expected to
-/// contain. The decoys are the only thing standing between the stored
-/// `matches` rows and an exact user → note map, so γ cannot be chosen
-/// independently of how many notes exist to draw decoys from: at γ=16 with
-/// fewer than 65k notes the expected decoy count drops below one and the
-/// match set *is* the user's note set.
+/// contain. The decoys are what separates the stored `matches` rows from an exact
+/// user-to-note map, so γ depends on how many notes exist to draw decoys from: at
+/// γ=16 with fewer than 65k notes the expected decoy count drops below one and
+/// the match set equals the user's note set.
 const MIN_EXPECTED_DECOYS: i64 = 64;
 
 /// Largest γ that still yields `MIN_EXPECTED_DECOYS` false positives against
 /// a pool of `note_count` notes, clamped to the protocol range.
 fn max_gamma_for(note_count: i64) -> i32 {
-    // Largest γ with 2^γ <= note_count / MIN_EXPECTED_DECOYS. `ilog2` panics
-    // on zero, hence the floor.
+    // Largest γ with 2^γ <= note_count / MIN_EXPECTED_DECOYS. `ilog2` panics on
+    // zero, hence the floor.
     match note_count / MIN_EXPECTED_DECOYS {
         budget if budget < 2 => GAMMA_MIN,
         budget => (budget.ilog2() as i32).clamp(GAMMA_MIN, GAMMA_MAX),
@@ -47,9 +46,8 @@ pub async fn id_for_token(st: &AppState, token: &TokenHash) -> AppResult<i64> {
 
 /// Internal id plus the backfill watermark behind a capability token.
 ///
-/// `/v1/matches` needs both: the id to select rows, the watermark so the
-/// client knows how far its resume cursor may safely advance. See
-/// `MatchesPage`.
+/// `/v1/matches` needs both: the id to select rows and the watermark so the
+/// client knows how far its resume cursor may advance. See `MatchesPage`.
 pub async fn cursor_state_for_token(st: &AppState, token: &TokenHash) -> AppResult<(i64, i64)> {
     subscriptions::find_by_token(&st.pool, token)
         .await?
@@ -57,8 +55,8 @@ pub async fn cursor_state_for_token(st: &AppState, token: &TokenHash) -> AppResu
         .ok_or_else(not_found)
 }
 
-/// Total note count, memoised for the cache TTL. See `AppCache::note_count`
-/// for why this must not hit the database per request.
+/// Total note count, memoised for the cache TTL. See `AppCache::note_count` for
+/// why this must not hit the database per request.
 async fn note_count(st: &AppState) -> AppResult<i64> {
     let pool = st.pool.clone();
     let probe = shared::metrics::CacheProbe::new("note_count");
@@ -115,10 +113,9 @@ fn output(row: &SubscriptionRow, created: bool) -> SubscriptionOut {
 }
 
 /// Registration under an existing token is idempotent only when the request
-/// describes the same subscription. Any other request is rejected: updating
-/// the detection key in place would repoint the row at the new caller's key
-/// while the original owner still holds the token, exposing that owner's
-/// match stream.
+/// describes the same subscription. Anything else is rejected: updating the
+/// detection key in place would repoint the row at the new caller's key while the
+/// original owner still holds the token, exposing that owner's match stream.
 fn reattach(existing: &SubscriptionRow, dk: &[u8], gamma: i32) -> AppResult<SubscriptionOut> {
     if existing.detection_key != dk || existing.gamma != gamma {
         return Err(AppError::Conflict("token already registered".to_string()));
@@ -136,22 +133,21 @@ pub async fn create(
     let dk = validate(st, dk_hex, gamma).await?;
     let token = TokenHash::registered(token_hex)?;
 
-    // Insert first and let the unique index on `token_hash` arbitrate. It is
-    // the authority on token ownership, so no concurrent registration can
-    // slip past the write.
+    // Insert first and let the unique index on `token_hash` arbitrate: it is the
+    // authority on token ownership, so no concurrent registration can slip past
+    // the write.
     //
-    // The row lands with `backfilled_through_note_id = 0`; the indexer's
-    // filter worker walks it forward over history one batch at a time. No
-    // shared cursor is rewound, so registering cannot force a rescan for
-    // every other subscriber.
+    // The row lands with `backfilled_through_note_id = 0`, and the indexer's
+    // filter worker walks it forward over history one batch at a time. No shared
+    // cursor is rewound, so registering cannot force a rescan for other
+    // subscribers.
     if let Some(row) = subscriptions::create(&st.pool, dk.clone(), gamma, &token).await? {
         return Ok(output(&row, true));
     }
 
-    // The token is taken. Derived tokens are stable across registrations, so
-    // this is the path a wallet takes when re-registering after losing local
-    // state: it resolves to the existing subscription rather than a duplicate
-    // that would backfill from scratch.
+    // The token is taken. Derived tokens are stable across registrations, so a
+    // wallet re-registering after losing local state resolves to the existing
+    // subscription rather than a duplicate that would backfill from scratch.
     let existing = subscriptions::find_by_token(&st.pool, &token)
         .await?
         .ok_or_else(|| AppError::Conflict("token deleted mid-registration; retry".to_string()))?;
@@ -208,7 +204,7 @@ mod tests {
 
     #[test]
     fn gamma_ceiling_tracks_note_volume() {
-        // Not enough notes to hide anyone: only the most permissive γ.
+        // Not enough notes to hide anyone, so only the most permissive γ.
         assert_eq!(max_gamma_for(0), GAMMA_MIN);
         assert_eq!(max_gamma_for(127), GAMMA_MIN);
 

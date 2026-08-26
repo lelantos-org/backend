@@ -1,10 +1,9 @@
 //! Fiat-Shamir compression for the `transact_3x3` circuit.
 //!
 //! Mirrors `contracts/src/libs/PubInputs.sol :: compress(Transact, aux)` and
-//! `SnarkCompression.evaluatePolyAtRaw`, so the relayer derives the same
-//! `(y, z)` public-signal pair the on-chain verifier does — which is what lets
-//! it check a wallet's proof locally instead of discovering it is junk only
-//! after paying for a `tree_update_batch` Groth16.
+//! `SnarkCompression.evaluatePolyAtRaw`, so the relayer derives the same `(y, z)`
+//! public-signal pair the on-chain verifier does. That lets it check a wallet's
+//! proof locally rather than after paying for a `tree_update_batch` Groth16.
 //!
 //! Coefficient layout (42 entries), pinned by `circuits/src/3x3.circom`:
 //!   [ 0]      merkleRoot
@@ -29,22 +28,22 @@ use crate::domain::dto::{TRANSACT_IN, TRANSACT_OUT};
 use alloy::primitives::{U256, keccak256};
 use alloy::sol_types::SolValue;
 
-/// ABI calldata words of the `Transact` struct itself — the coefficients that
-/// are copied verbatim before any are derived from `aux`.
+/// ABI calldata words of the `Transact` struct itself: the coefficients copied
+/// verbatim before any are derived from `aux`.
 ///
-/// Derived rather than written out: `merkleRoot`, one word per nullifier and
-/// per `outCm`, the three public-value words, `inCv` as a coordinate pair per
-/// input, the four address/chain words, and `outCv` + `outCvDep` as two
-/// coordinate pairs per output. 32 at 3x3, 40 at 4x4 — a literal here is a
-/// number that silently stops matching the circuit when the arity moves.
+/// Derived rather than written out: `merkleRoot`, one word per nullifier and per
+/// `outCm`, the three public-value words, `inCv` as a coordinate pair per input,
+/// the four address and chain words, and `outCv` plus `outCvDep` as two
+/// coordinate pairs per output. 32 at 3x3 and 40 at 4x4; a literal here would
+/// stop matching the circuit when the arity moves.
 const STRUCT_WORDS: usize =
     1 + TRANSACT_IN + TRANSACT_OUT + 3 + 2 * TRANSACT_IN + 4 + 4 * TRANSACT_OUT;
 /// Word index of the first `(clueRx, clueRy, clueBits)` triple: they start
 /// where the struct's own words end.
 const CLUE_BASE: usize = STRUCT_WORDS;
-/// The struct words, one clue triple per output, then the aux digest.
-/// 42 at 3x3, 53 at 4x4 — and `contracts/test/fixtures/transact_4x4_vector.json`
-/// publishes `coeffCount` for the deployed shape, which the tests check.
+/// The struct words, one clue triple per output, then the aux digest: 42 at 3x3
+/// and 53 at 4x4. `contracts/test/fixtures/transact_4x4_vector.json` publishes
+/// `coeffCount` for the deployed shape, which the tests check.
 pub const TRANSACT_COEFFS: usize = STRUCT_WORDS + 3 * TRANSACT_OUT + 1;
 
 /// The `(y, z)` pair the deployed verifier is handed as its two public
@@ -57,9 +56,8 @@ pub struct TransactPublicSignals {
 
 /// Build the coefficient vector ([`TRANSACT_COEFFS`] of them), then compress it.
 ///
-/// Takes the already-built ABI structs rather than the wire DTOs so there is
-/// exactly one place that decides what a field means — the same builders the
-/// calldata uses.
+/// Takes the already-built ABI structs rather than the wire DTOs, so one place
+/// decides what a field means: the same builders the calldata uses.
 pub fn compress(
     pi: &IMasp::Transact,
     aux: &[IMasp::OutputAux; TRANSACT_OUT],
@@ -72,9 +70,9 @@ pub fn compress(
     }
 }
 
-/// The 42 coefficients, in the order `PubInputs.compress(Transact)` lays them
-/// out. Separate from [`compress`] so the layout can be pinned against the
-/// published circuit vectors without a proof.
+/// The coefficients, in the order `PubInputs.compress(Transact)` lays them out.
+/// Separate from [`compress`] so the layout can be pinned against the published
+/// circuit vectors without a proof.
 pub fn coefficients(pi: &IMasp::Transact, aux: &[IMasp::OutputAux; TRANSACT_OUT]) -> Vec<U256> {
     let mut c: Vec<U256> = Vec::with_capacity(TRANSACT_COEFFS);
     c.push(U256::from_be_bytes(pi.merkleRoot.0));
@@ -117,17 +115,17 @@ pub fn coefficients(pi: &IMasp::Transact, aux: &[IMasp::OutputAux; TRANSACT_OUT]
 
 /// The clue's leading two bytes, as the contract reads them:
 /// `uint16(bytes2(o.ciphertext[0:2]))`. A ciphertext shorter than two bytes
-/// would revert there; here it contributes zero, and the proof check that
-/// follows is what rejects the payload.
+/// would revert there; here it contributes zero, and the following proof check
+/// rejects the payload.
 fn clue_bits(ciphertext: &[u8]) -> u16 {
     let hi = ciphertext.first().copied().unwrap_or(0);
     let lo = ciphertext.get(1).copied().unwrap_or(0);
     u16::from_be_bytes([hi, lo])
 }
 
-/// `keccak256(abi.encode(Output[] memory)) % R`. Encoding as a *dynamic* array
-/// is what the contract does — it copies the fixed-size array into one first —
-/// and the two encodings differ by a leading offset word.
+/// `keccak256(abi.encode(Output[] memory)) % R`. The contract encodes a dynamic
+/// array, copying the fixed-size array into one first, and the two encodings
+/// differ by a leading offset word.
 fn aux_digest(aux: &[IMasp::OutputAux; TRANSACT_OUT]) -> U256 {
     let dynamic: Vec<IMasp::OutputAux> = aux.to_vec();
     U256::from_be_bytes(keccak256(dynamic.abi_encode()).0) % *BN254_R
@@ -144,26 +142,24 @@ fn eval_poly(coeffs: &[U256], z: U256) -> U256 {
 
 /// Compile-time reminder that this module is pinned to one circuit shape.
 ///
-/// Every length above is derived from the two constants, so this is not what
-/// keeps the layout correct — the published vectors are. It is here so that
-/// changing the arity is a deliberate edit in this file too, where the
-/// coefficient *order* lives and no test can infer it from the constants.
+/// Every length above is derived from the two constants, so the published vectors
+/// are what keep the layout correct. This assertion makes changing the arity a
+/// deliberate edit in this file, where the coefficient order lives and no test
+/// can infer it from the constants.
 const _: () = assert!(TRANSACT_IN == 4 && TRANSACT_OUT == 4);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Published `transact_4x4` vectors. They carry the coefficient vector the
-    /// reference implementation built, plus the `z` and `y` derived from it —
-    /// which is exactly what this module has to reproduce, since a layout that
-    /// drifts from the contract's produces a proof the chain rejects and a
-    /// local check that rejects proofs the chain would accept.
+    /// Published `transact_4x4` vectors, carrying the coefficient vector the
+    /// reference implementation built plus the `z` and `y` derived from it, which
+    /// is what this module must reproduce. A layout that drifts from the
+    /// contract's produces proofs the chain rejects and a local check that rejects
+    /// proofs the chain would accept.
     ///
-    /// A missing file is a hard failure, not a skip. It used to be a skip, and
-    /// when the fixture was renamed for the 4x4 shape these tests quietly
-    /// stopped running — the arity drift they exist to catch then went
-    /// unnoticed until it broke every spend end to end.
+    /// A missing file is a hard failure rather than a skip, so a renamed fixture
+    /// cannot stop these tests from running unnoticed.
     fn vectors() -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../contracts/test/fixtures/transact_4x4_vector.json");
@@ -184,9 +180,8 @@ mod tests {
             .collect()
     }
 
-    /// `z` and `y` must match the published derivation for every vector — this
-    /// pins the ABI preimage, the modular reduction, and the Horner order at
-    /// once.
+    /// `z` and `y` must match the published derivation for every vector, pinning
+    /// the ABI preimage, the modular reduction and the Horner order at once.
     #[test]
     fn z_and_y_match_the_published_vectors() {
         let v = vectors();
@@ -211,8 +206,8 @@ mod tests {
                 u256(case["compression"]["y"].as_str().unwrap()),
                 "{name} y"
             );
-            // The circuit's own output must agree, or a proof would never
-            // satisfy the public signals we hand the verifier.
+            // The circuit's own output must agree, or a proof would never satisfy
+            // the public signals handed to the verifier.
             assert_eq!(
                 case["compression"]["y"], case["circuitOutput"]["y"],
                 "{name} circuit output"
@@ -220,10 +215,9 @@ mod tests {
         }
     }
 
-    /// And the *layout*: fields have to land in the slots the vector says they
-    /// do. Slot 41 is the aux digest, which is derived from ciphertext bytes
-    /// the vector does not carry, so it is compared separately by construction
-    /// in `aux_digest`.
+    /// The layout: fields must land in the slots the vector specifies. The last
+    /// slot is the aux digest, derived from ciphertext bytes the vector does not
+    /// carry, so it is compared separately by construction in `aux_digest`.
     #[test]
     fn the_coefficient_layout_matches_the_published_vectors() {
         let v = vectors();
@@ -248,8 +242,8 @@ mod tests {
         }
     }
 
-    /// Which field a mismatched slot belongs to, so a layout drift names
-    /// itself instead of printing an index.
+    /// Which field a mismatched slot belongs to, so a layout drift names itself
+    /// rather than printing an index.
     fn slot_name(i: usize) -> &'static str {
         match i {
             0 => "merkleRoot",
@@ -306,9 +300,9 @@ mod tests {
         }
     }
 
-    /// The vector publishes `clue_bits` as a number, not as the ciphertext it
-    /// was read from — so the ciphertext is reconstructed as the two bytes the
-    /// contract would slice, which is also what exercises `clue_bits`.
+    /// The vector publishes `clue_bits` as a number rather than the ciphertext it
+    /// was read from, so the ciphertext is reconstructed as the two bytes the
+    /// contract would slice, which also exercises `clue_bits`.
     fn aux_from_witness(w: &serde_json::Value) -> [IMasp::OutputAux; TRANSACT_OUT] {
         let rx = strs(&w["out_clue_Rx"]);
         let ry = strs(&w["out_clue_Ry"]);
@@ -327,8 +321,7 @@ mod tests {
 
     /// Checked against the circuit's own declaration rather than a second
     /// hand-written number: the fixture publishes `coeffCount` alongside the
-    /// vectors, so this cannot be "fixed" by editing a literal to match a
-    /// layout that has drifted.
+    /// vectors, so a drifted layout cannot be reconciled by editing a literal.
     #[test]
     fn the_coefficient_vector_is_the_width_the_circuit_declares() {
         let v = vectors();
@@ -338,9 +331,9 @@ mod tests {
         assert_eq!(TRANSACT_COEFFS, declared);
     }
 
-    /// The fixture also publishes the arity it was generated at. A vector file
-    /// for another shape would otherwise satisfy every test above by being
-    /// internally consistent.
+    /// The fixture also publishes the arity it was generated at. A vector file for
+    /// another shape would otherwise satisfy every test above by being internally
+    /// consistent.
     #[test]
     fn the_published_vectors_are_for_the_deployed_arity() {
         let v = vectors();
@@ -356,8 +349,8 @@ mod tests {
         assert_eq!(clue_bits(&[]), 0);
     }
 
-    /// Horner must agree with the direct power-sum, or `y` is silently wrong
-    /// and every local verification fails against proofs the chain accepts.
+    /// Horner must agree with the direct power-sum, or `y` is wrong and every
+    /// local verification fails against proofs the chain accepts.
     #[test]
     fn horner_matches_the_direct_power_sum() {
         let r = *BN254_R;
@@ -373,8 +366,8 @@ mod tests {
         assert_eq!(eval_poly(&coeffs, z), expected);
     }
 
-    /// Coefficients are reduced before folding, matching the contract's
-    /// in-field requirement rather than wrapping at 2^256.
+    /// Coefficients are reduced before folding, matching the contract's in-field
+    /// requirement rather than wrapping at 2^256.
     #[test]
     fn evaluation_stays_in_the_field() {
         let z = U256::from(3u64);

@@ -1,11 +1,11 @@
 //! Per-chain leader election for the consume loop.
 //!
 //! Lets fmd-indexer run as N replicas: each tick, a replica must hold the
-//! advisory lock for a chain before touching it. One replica wins, the rest
-//! skip and retry, and a dead leader's lock releases so a standby takes over.
+//! advisory lock for a chain before touching it. One replica wins, the rest skip
+//! and retry, and a dead leader's lock releases so a standby takes over.
 //!
-//! This is failover, not scale-out — a chain is still processed by exactly one
-//! process at a time.
+//! This provides failover rather than scale-out; a chain is processed by exactly
+//! one process at a time.
 
 use crate::domain::error::{FmdIndexerError, Result};
 use database::advisory::{ChainLock, NS_FMD_CONSUME, chain_key};
@@ -28,11 +28,11 @@ impl ChainLocks {
         }
     }
 
-    /// No locking — every caller believes it is the leader.
+    /// No locking: every caller acts as leader.
     ///
-    /// Only for single-process tests. In a deployment this reintroduces the
-    /// concurrent-writer races the locks exist to prevent, including silent
-    /// `spent_nullifiers.seq` gaps.
+    /// For single-process tests only. In a deployment this reintroduces the
+    /// concurrent-writer races the locks prevent, including `spent_nullifiers.seq`
+    /// gaps.
     pub fn disabled() -> Self {
         Self {
             database_url: None,
@@ -42,9 +42,10 @@ impl ChainLocks {
 
     /// Whether this process may act on `chain_id` right now.
     ///
-    /// Re-checks the lock connection on every call: if it has died, the lock
-    /// is gone and another replica may already have taken over, so continuing
-    /// to write would be split brain. Drop the guard and re-acquire next tick.
+    /// Re-checks the lock connection on every call: if it has died the lock is
+    /// gone and another replica may already have taken over, so continuing to
+    /// write would be a split brain. The guard is dropped and re-acquired on the
+    /// next tick.
     pub async fn is_leader(&self, chain_id: i64) -> Result<bool> {
         let Some(url) = &self.database_url else {
             return Ok(true);
@@ -67,8 +68,8 @@ impl ChainLocks {
                 held.insert(chain_id, lock);
                 Ok(true)
             }
-            // Standby. Debug, not info: at a 500ms tick this fires twice a
-            // second per chain on every non-leader replica.
+            // Standby. Logged at debug rather than info: at a 500ms tick this
+            // fires twice a second per chain on every non-leader replica.
             Ok(None) => {
                 debug!(chain_id, "consume lock held elsewhere; standing by");
                 Ok(false)

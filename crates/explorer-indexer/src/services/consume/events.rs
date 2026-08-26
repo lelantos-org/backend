@@ -4,7 +4,7 @@ use crate::repositories::{
     assets::{self, UpsertAsset},
     deposit_events::{self, NewDepositEscrowed},
     raw_events::RawEventRow,
-    tree_advances::{self, NewTreeAdvance},
+    tree_advances::{self, TreeAdvanceRow},
 };
 use crate::util::u256_to_bigdecimal;
 use alloy::primitives::{Address, B256, U256};
@@ -98,9 +98,8 @@ pub async fn deposit_escrowed(
             fee_cv_dep_x: u256_to_bigdecimal(fee.cv_dep_x),
             fee_cv_dep_y: u256_to_bigdecimal(fee.cv_dep_y),
             fee_rcv: u256_to_bigdecimal(fee.rcv),
-            // Built here rather than by the caller: the fee leaf's payload is
-            // stored in the same shape as the depositor's, and doing it in one
-            // place is what keeps the two from drifting.
+            // Built here rather than by the caller so the fee leaf's payload
+            // keeps the same shape as the depositor's.
             fee_aux: encode_aux(
                 fee.clue_rx,
                 fee.clue_ry,
@@ -110,8 +109,9 @@ pub async fn deposit_escrowed(
             ),
             // The digest the contract stored hashes `uint32(block.number)`,
             // which on Arbitrum is the L1 height rather than `row.block_number`.
-            // Rows ingested before `evm_block_number` existed fall back — correct
-            // on every chain except Arbitrum, whose rows need an explicit repair.
+            // Rows ingested before `evm_block_number` existed fall back to
+            // `block_number`: correct on every chain except Arbitrum, whose rows
+            // need an explicit repair.
             submitted_at_block: row.evm_block_number.unwrap_or(row.block_number),
             tx_hash: row.tx_hash.clone(),
             block_ts: row.block_ts,
@@ -150,7 +150,7 @@ pub async fn deposit_canceled(
 }
 
 /// Encode the deposit leaf's aux blob as JSON for the `aux` column. A deposit
-/// occupies one leaf, so this is a single object, not an array.
+/// occupies one leaf, so this is a single object rather than an array.
 pub fn encode_aux(
     clue_rx: U256,
     clue_ry: U256,
@@ -178,7 +178,7 @@ pub async fn root_advanced(
 ) -> Result<(), ExplorerIndexerError> {
     tree_advances::insert(
         pool,
-        NewTreeAdvance {
+        TreeAdvanceRow {
             chain_id,
             block_number: row.block_number,
             log_index: row.log_index,

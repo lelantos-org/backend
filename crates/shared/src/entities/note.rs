@@ -9,12 +9,13 @@ pub struct Note {
     pub tx_hash: Vec<u8>,
     pub log_index: i32,
     pub commitment: Vec<u8>,
-    /// 2-byte big-endian clueBits prefix + ChaCha20-Poly1305 body. Indexers
-    /// MUST split as `clue_bits = u16::from_be_bytes(ciphertext[0..2])`,
-    /// `body = ciphertext[2..]`.
+    /// 2-byte big-endian clueBits prefix followed by the ChaCha20-Poly1305
+    /// body. Indexers must split it as
+    /// `clue_bits = u16::from_be_bytes(ciphertext[0..2])`, `body =
+    /// ciphertext[2..]`.
     pub ciphertext: Vec<u8>,
-    /// Leaf position in the canonical merkle tree. Set by fmd-indexer once
-    /// the matching `RootAdvanced` event is observed: the i-th note of the
-    /// tx sits at `startIndex + i`.
+    /// Leaf position in the canonical merkle tree. Set by fmd-indexer once the
+    /// matching `RootAdvanced` event is observed: the i-th note of the
+    /// transaction sits at `startIndex + i`.
     pub leaf_index: i64,
 }

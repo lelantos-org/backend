@@ -19,10 +19,10 @@ pub struct MatchedNote {
 
 /// Matches for `subscription_id` on `chain_id` only.
 ///
-/// A subscription is not chain-scoped — `subscriptions.detection_key` is
-/// globally UNIQUE, so one row serves every chain — and the detection key is
-/// chain-independent, so another chain's note still decrypts against the
-/// caller's key. Filtering here is what keeps it out of their wallet.
+/// A subscription is not chain-scoped: `subscriptions.detection_key` is globally
+/// UNIQUE, so one row serves every chain, and the detection key is
+/// chain-independent, so another chain's note still decrypts against the caller's
+/// key. This filter keeps it out of their wallet.
 pub async fn list_for_subscription(
     pool: &DbPool,
     subscription_id: i64,
@@ -30,7 +30,7 @@ pub async fn list_for_subscription(
     after_note_id: i64,
     limit: i64,
 ) -> AppResult<Vec<MatchedNote>> {
-    let mut conn = pool.get().await.map_err(|e| AppError::Db(e.to_string()))?;
+    let mut conn = super::conn(pool).await?;
     matches::table
         .inner_join(notes::table.on(notes::id.eq(matches::note_id)))
         .filter(matches::subscription_id.eq(subscription_id))

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use explorer_indexer::adapters::{DynTokenMetadata, HttpTokenMetadata};
+use explorer_indexer::build_info;
 use explorer_indexer::config::ExplorerIndexerConfig;
 use explorer_indexer::services::consume::ConsumeServiceImpl;
-use explorer_indexer::version;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -13,8 +13,8 @@ async fn main() -> Result<()> {
     shared::tracing_init::init();
 
     info!(
-        version = version::CARGO_PKG_VERSION,
-        commit = version::GIT_SHA,
+        version = build_info::PKG_VERSION,
+        commit = build_info::GIT_SHA,
         "explorer-indexer starting"
     );
 

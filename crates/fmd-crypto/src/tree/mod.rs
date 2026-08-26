@@ -1,14 +1,14 @@
-// Quaternary sparse Merkle tree, Poseidon-arity-5 nodes:
-//   node = Poseidon(TAG_MERKLE, c0, c1, c2, c3)
-//
-// Rust port of `sdk/src/crypto/merkle.ts`. MUST stay byte-identical to the
-// SDK and to `circuits/src/lib/merkle.circom`. Used by:
-//   - fmd-webserver: serve `/v1/tree-state`.
-//   - relayer: build tree_update witnesses (frontier + path indices).
-//
-// NOT a privacy-sensitive primitive — the tree is public data — but lives in
-// `fmd-crypto` because it shares the Poseidon dependency and is only consumed
-// by FMD-zone crates (explorer-* never references it).
+//! Quaternary sparse Merkle tree with Poseidon-arity-5 nodes:
+//! `node = Poseidon(TAG_MERKLE, c0, c1, c2, c3)`.
+//!
+//! Rust port of `sdk/src/crypto/merkle.ts`. Must stay byte-identical to the SDK
+//! and to `circuits/src/lib/merkle.circom`. Used by fmd-webserver to serve
+//! `/v1/tree-state` and by the relayer to build tree_update witnesses (frontier
+//! and path indices).
+//!
+//! The tree is public data rather than a privacy-sensitive primitive, but lives
+//! in `fmd-crypto` because it shares the Poseidon dependency and is consumed only
+//! by FMD-zone crates.
 
 mod hash;
 
@@ -17,8 +17,8 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 pub use hash::TAG_MERKLE;
-/// Big-endian is how field elements cross this crate's boundary; these are the
-/// single conversion pair, shared with `note` so the two cannot disagree.
+/// Field elements cross this crate's boundary big-endian. This is the single
+/// conversion pair, shared with `note` so the two cannot disagree.
 pub(crate) use hash::{be_to_fq, fq_to_be};
 
 #[derive(Debug, Error)]
@@ -27,10 +27,19 @@ pub enum TreeError {
     Poseidon(String),
     #[error("leaf index {0} out of range")]
     OutOfRange(usize),
+    #[error("expected 32-byte field, got {0}")]
+    BadFieldLength(usize),
 }
 
 /// Big-endian 32-byte field element (matches SDK `Field`).
 pub type Field = [u8; 32];
+
+/// Read a field element out of a database column or a wire value.
+pub fn field_from_bytes(bytes: &[u8]) -> Result<Field, TreeError> {
+    bytes
+        .try_into()
+        .map_err(|_| TreeError::BadFieldLength(bytes.len()))
+}
 
 #[derive(Debug, Clone)]
 pub struct MerkleProof {
@@ -40,15 +49,14 @@ pub struct MerkleProof {
 
 pub struct MerkleTree {
     pub depth: usize,
-    /// Materialised nodes per level: `levels[0]` are the leaves, `levels[d][i]`
-    /// is the node at level `d`, index `i`. Indices past a level's length are
-    /// implicitly `zeros[d]` — since `zeros[d+1] = hash(zeros[d] × 4)`, an
-    /// absent node and a materialised all-zero subtree are the same value.
+    /// Materialised nodes per level: `levels[0]` holds the leaves and
+    /// `levels[d][i]` the node at level `d`, index `i`. Indices past a level's
+    /// length are implicitly `zeros[d]`; since `zeros[d+1] = hash(zeros[d] × 4)`,
+    /// an absent node and a materialised all-zero subtree hold the same value.
     ///
-    /// Kept in sync by every mutation, so `root()` is O(1) and `frontier()` /
-    /// `proof()` are O(depth) table lookups. Costs ~1.33 × leaf-count of
-    /// memory; buys back the O(N) Poseidon sweep the recursive form paid on
-    /// every single call.
+    /// Kept in sync by every mutation, so `root()` is O(1) and `frontier()` and
+    /// `proof()` are O(depth) table lookups, at a cost of about 1.33 times the
+    /// leaf count in memory.
     levels: Vec<Vec<Field>>,
     zeros: Vec<Field>,
 }
@@ -77,9 +85,9 @@ impl MerkleTree {
         Ok(index)
     }
 
-    /// Append many leaves and rebuild the internal levels bottom-up in
-    /// parallel. O(N) total rather than the O(N · depth) of N `insert` calls —
-    /// use this for bootstrap replay.
+    /// Append many leaves and rebuild the internal levels bottom-up in parallel.
+    /// O(N) in total rather than the O(N · depth) of N `insert` calls, so this is
+    /// the path for bootstrap replay.
     pub fn extend(&mut self, leaves: impl IntoIterator<Item = Field>) -> Result<(), TreeError> {
         self.levels[0].extend(leaves);
         self.rebuild()
@@ -89,10 +97,10 @@ impl MerkleTree {
         self.levels[0].len()
     }
 
-    /// Drop the last `n` leaves. Used by callers that speculatively
-    /// `insert` and need to undo on failure (relayer rollback).
+    /// Drop the last `n` leaves, for callers that insert speculatively and undo
+    /// on failure, such as relayer rollback.
     ///
-    /// Every level shrinks to `ceil(child_len / ARITY)`; only its new last
+    /// Every level shrinks to `ceil(child_len / ARITY)`, and only its new last
     /// node can have lost children, so one re-hash per level suffices.
     pub fn truncate_leaves(&mut self, n: usize) -> Result<(), TreeError> {
         let len = self.levels[0].len();
@@ -122,15 +130,9 @@ impl MerkleTree {
         Ok(self.node_at(self.depth, 0))
     }
 
-    /// Retained for call sites that predate incremental node maintenance.
-    /// `root()` is now O(1), so this is a plain alias.
-    pub fn root_par(&self) -> Result<Field, TreeError> {
-        self.root()
-    }
-
-    /// Re-hash the path from `leaf_index` up to the root. Each level's parent
-    /// index grows by at most one slot, so the `resize` appends at most one
-    /// entry and never leaves a gap.
+    /// Re-hash the path from `leaf_index` to the root. Each level's parent index
+    /// grows by at most one slot, so the `resize` appends at most one entry and
+    /// never leaves a gap.
     fn refresh_path(&mut self, leaf_index: usize) -> Result<(), TreeError> {
         let mut idx = leaf_index;
         for lvl in 0..self.depth {
@@ -174,14 +176,17 @@ impl MerkleTree {
         Ok(())
     }
 
-    /// `frontier()` — depth × 3 slots, mirroring the layout the prior on-chain
-    /// `filledSubtrees` storage exposed. For each level lvl and slot k:
-    ///   frontier[lvl][k] = nodeAt(lvl, parentIdx*4 + k)   if k < currentSlot
-    ///   frontier[lvl][k] = 0                                otherwise
-    /// where `currentSlot = (N / 4^lvl) % 4`, `parentIdx = N / 4^(lvl+1)`,
-    /// `N = leaves.len()`. The k ≥ currentSlot entries are unread by the next
-    /// insert at this level (would have been stale-from-prior-parent in the
-    /// contract); we zero them deterministically.
+    /// Frontier of `depth × 3` slots, mirroring the on-chain `filledSubtrees`
+    /// layout. For each level `lvl` and slot `k`:
+    ///
+    /// ```text
+    /// frontier[lvl][k] = node_at(lvl, parent_idx * 4 + k)   if k < current_slot
+    /// frontier[lvl][k] = 0                                  otherwise
+    /// ```
+    ///
+    /// where `current_slot = (N / 4^lvl) % 4`, `parent_idx = N / 4^(lvl+1)` and
+    /// `N = leaf_count()`. Entries at `k >= current_slot` are not read by the
+    /// next insert at this level and are zeroed deterministically.
     pub fn frontier(&self) -> Result<Vec<[Field; 3]>, TreeError> {
         let n = self.leaf_count();
         let mut out: Vec<[Field; 3]> = Vec::with_capacity(self.depth);
@@ -212,8 +217,8 @@ impl MerkleTree {
         out
     }
 
-    /// Sibling path for `leaf_index`. Not-yet-inserted leaves get zero
-    /// siblings via `node_at`'s zero fallback, matching SDK behaviour.
+    /// Sibling path for `leaf_index`. Leaves not yet inserted get zero siblings
+    /// through `node_at`'s zero fallback, matching the SDK.
     pub fn proof(&self, leaf_index: usize) -> Result<MerkleProof, TreeError> {
         let mut path_elements: Vec<[Field; 3]> = Vec::with_capacity(self.depth);
         let mut path_indices: Vec<u8> = Vec::with_capacity(self.depth);
@@ -239,8 +244,8 @@ impl MerkleTree {
         })
     }
 
-    /// Materialised node, or the level's zero-subtree constant when the index
-    /// is past what has been filled.
+    /// Materialised node, or the level's zero-subtree constant when the index is
+    /// past what has been filled.
     fn node_at(&self, level: usize, index: usize) -> Field {
         self.levels[level]
             .get(index)

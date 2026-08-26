@@ -1,12 +1,11 @@
 use alloy::sol;
 
 sol! {
-    /// Encrypted-note payload for the spend path, emitted once per output
-    /// leaf by `MASP._emitNotes`. Carries the FMD clue, the ECDH ephemeral
-    /// pubkey, the ciphertext and the leaf's Pedersen value commitment.
-    /// `cm` is indexed, so this log doubles as the note-creation signal for
-    /// indexers that track commitments only — there is no separate
-    /// `NotesCreated` event.
+    /// Encrypted-note payload for the spend path, emitted once per output leaf
+    /// by `MASP._emitNotes`. Carries the FMD clue, the ECDH ephemeral pubkey,
+    /// the ciphertext and the leaf's Pedersen value commitment. `cm` is
+    /// indexed, making this log the note-creation signal for indexers that
+    /// track commitments only.
     #[derive(Debug)]
     event NotePayload(
         bytes32 indexed cm,
@@ -19,10 +18,10 @@ sol! {
         uint256 cvDepY
     );
 
-    /// Emitted in MASP constructor for each registered asset. `token` is the
-    /// underlying ERC20; `scale` lifts circuit `uint64` value into smallest
-    /// token unit. The Baby-Jubjub asset generator is derived in-circuit via
-    /// `HashToAssetGen(assetId)` and is no longer stored on-chain.
+    /// Emitted in the MASP constructor for each registered asset. `token` is
+    /// the underlying ERC20; `scale` lifts a circuit `uint64` value into the
+    /// smallest token unit. The Baby-Jubjub asset generator is derived
+    /// in-circuit via `HashToAssetGen(assetId)`.
     #[derive(Debug)]
     event AssetRegistered(
         uint64 indexed assetId,
@@ -30,16 +29,15 @@ sol! {
         uint256 scale
     );
 
-    /// Emitted by CommitmentTree._advanceRoot whenever a tree-update SNARK
-    /// lands on chain. `startIndex` is the leaf index of the first newly
-    /// inserted commitment; `inserted` is the leaf count — spends insert
-    /// `PubInputs.TRANSACT_OUT` leaves, a flush inserts one per deposit, so
-    /// an odd count is normal. `oldRoot → newRoot` lets indexers chain root
-    /// history.
+    /// Emitted by `CommitmentTree._advanceRoot` when a tree-update SNARK lands
+    /// on chain. `startIndex` is the leaf index of the first newly inserted
+    /// commitment; `inserted` is the leaf count — spends insert
+    /// `PubInputs.TRANSACT_OUT` leaves and a flush inserts one per deposit, so
+    /// an odd count is expected. `oldRoot → newRoot` chains root history.
     ///
-    /// Backend uses (chain_id, block_number, log_index) ordering plus
-    /// (tx_hash) to associate the accompanying note events with their leaf
-    /// indices: the i-th note of the tx is leaf `startIndex + i`.
+    /// Indexers associate the accompanying note events with leaf indices by
+    /// (chain_id, block_number, log_index) ordering within a `tx_hash`: the
+    /// i-th note of the transaction is leaf `startIndex + i`.
     #[derive(Debug)]
     event RootAdvanced(
         uint64 indexed startIndex,
@@ -48,9 +46,9 @@ sol! {
         bytes32 newRoot
     );
 
-    /// Emitted once per spend whenever the gross deposit/withdraw amount is
-    /// non-zero. Internal transfers emit nothing. `inAmount` / `outAmount`
-    /// are token base units (already scaled).
+    /// Emitted per spend when the gross deposit/withdraw amount is non-zero;
+    /// internal transfers emit nothing. `inAmount` / `outAmount` are scaled
+    /// token base units.
     #[derive(Debug)]
     event AssetMoved(
         uint64 indexed assetId,
@@ -59,21 +57,20 @@ sol! {
         uint256 outAmount
     );
 
-    /// Emitted on every nullifier burn. Indexed off-chain so wallets can
-    /// reconcile cached notes against the on-chain spent set without per-nf
-    /// `eth_call` to `spent(bytes32)`.
+    /// Emitted on every nullifier burn. Lets wallets reconcile cached notes
+    /// against the on-chain spent set without a per-nullifier `eth_call` to
+    /// `spent(bytes32)`.
     #[derive(Debug)]
     event NullifierConsumed(bytes32 indexed nf);
 
     /// Emitted on `deposit` / `depositAuthorized`. A deposit occupies exactly
     /// one leaf, so this carries a single cm plus that leaf's FMD clue, ECDH
-    /// eph pub, ciphertext, Pedersen value commitment `cvDep` and its blinder
-    /// `rcv` — everything the relayer needs to assemble a `flushBatch`.
-    /// `NotePayload` is NOT emitted on the escrow path; this event is the
-    /// canonical "shielded note created" signal for shields.
+    /// ephemeral pubkey, ciphertext, Pedersen value commitment `cvDep` and its
+    /// blinder `rcv`. `NotePayload` is not emitted on the escrow path; this
+    /// event is the shielded-note-created signal for shields.
     ///
     /// The event's block number is the deposit's `submittedAt`, which the
-    /// relayer must replay into `MASP.DepositMeta` at flush time and into the
+    /// relayer replays into `MASP.DepositMeta` at flush time and into the
     /// digest preimage at cancel time.
     #[derive(Debug)]
     event DepositEscrowed(
@@ -93,9 +90,8 @@ sol! {
         uint256 ephPubY,
         bytes ciphertext,
         // The relayer's fee note. Non-indexed: all three topic slots are
-        // already taken, and a relayer finds its note by trial decryption
-        // rather than by filtering, so indexing would buy nothing and would
-        // publish who is being paid.
+        // taken, and a relayer locates its note by trial decryption rather
+        // than by filtering.
         uint64 feeIn,
         bytes32 feeCm,
         uint256 feeCvDepX,
@@ -108,13 +104,13 @@ sol! {
         bytes feeCiphertext
     );
 
-    /// Emitted per-deposit inside `flushBatch`. (id, cm) — the full per-note
-    /// data was emitted at deposit time by `DepositEscrowed`.
+    /// Emitted per deposit inside `flushBatch`. The full per-note data is
+    /// carried by `DepositEscrowed`.
     #[derive(Debug)]
     event DepositFlushed(uint256 indexed id, bytes32 cm);
 
-    /// Emitted by `cancelDeposit`. Refund target + total refunded
-    /// (in + fee, scaled token units).
+    /// Emitted by `cancelDeposit`. Carries the refund target and the total
+    /// refunded (in + fee, scaled token units).
     #[derive(Debug)]
     event DepositCanceled(uint256 indexed id, address indexed payer, uint256 refunded);
 }

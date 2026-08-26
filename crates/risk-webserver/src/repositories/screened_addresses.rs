@@ -28,14 +28,14 @@ pub struct EntryFilter {
 
 /// Read-only access to `screened_addresses`.
 ///
-/// The service holds this as `Arc<dyn ScreenedAddressRepo>` so screening
-/// policy can be tested without Postgres. There is deliberately no write
-/// method: the list is populated out-of-band by SQL.
+/// The service holds this as `Arc<dyn ScreenedAddressRepo>` so screening policy
+/// can be tested without Postgres. There is no write method; the list is
+/// populated out-of-band by SQL.
 #[async_trait]
 #[cfg_attr(test, mockall::automock)]
 pub trait ScreenedAddressRepo: Send + Sync {
-    /// Every row listing any of `addrs` within `chain`. One query regardless
-    /// of how many addresses are asked for.
+    /// Every row listing any of `addrs` within `chain`, in one query regardless
+    /// of how many addresses are requested.
     async fn find(&self, chain: &str, addrs: &[String]) -> AppResult<Vec<ScreenedRow>>;
 
     async fn list(&self, filter: EntryFilter) -> AppResult<Vec<ScreenedRow>>;

@@ -1,8 +1,8 @@
 //! Sparse-matrix schedule for the partial rounds.
 //!
 //! A partial round is `x -> M · S(x + c)`, where `S` raises only `x[0]` to the
-//! fifth power. The full `M` costs `t²` multiplications, but almost all of that
-//! work is redundant when the S-box touches one element.
+//! fifth power. The full `M` costs `t²` multiplications, most of which is
+//! redundant when the S-box touches a single element.
 //!
 //! Factor `M = S̃ · P`, where
 //!
@@ -12,14 +12,14 @@
 //! ```
 //!
 //! with `M̂ = M[1.., 1..]`, `v = M[1.., 0]`, and `b` solving `M̂ᵀ b = M[0, 1..]`.
-//! `P` acts as the identity on index 0, so it commutes with `S`, which lets it
-//! be pushed back through the S-box into the previous round. Doing that for
-//! every partial round leaves one `P` in front of the whole block and a `S̃` per
-//! round costing `2t-1` multiplications instead of `t²` — for `t = 7`, 13
-//! instead of 49, across the 57 partial rounds that dominate the permutation.
+//! `P` acts as the identity on index 0, so it commutes with `S` and can be
+//! pushed back through the S-box into the previous round. Applying that to every
+//! partial round leaves one `P` in front of the whole block and one `S̃` per round
+//! costing `2t-1` multiplications instead of `t²`: for `t = 7`, 13 instead of 49
+//! across the 57 partial rounds that dominate the permutation.
 //!
-//! This is an exact re-association, not an approximation: the output is
-//! unchanged, which `super::tests` checks against `light-poseidon` directly.
+//! The re-association is exact rather than approximate; `super::tests` checks the
+//! output against `light-poseidon`.
 
 use ark_ed_on_bn254::Fq;
 use ark_ff::{Field, Zero};
@@ -34,18 +34,17 @@ struct Sparse {
 
 /// Everything the partial-round block needs.
 ///
-/// The per-round matrices and constants are held in two flat buffers rather
-/// than a `Vec` per round. There are `partial_rounds` of each — 63 at `t = 7` —
-/// and the loop touches them strictly in order, so one contiguous walk beats
-/// 126 separately-allocated vectors scattered across the heap. Flattening the
-/// MDS the same way was most of what made the permutation faster to begin with.
+/// The per-round matrices and constants are held in two flat buffers rather than
+/// a `Vec` per round. There are `partial_rounds` of each, 63 at `t = 7`, and the
+/// loop walks them in order, so one contiguous buffer outperforms 126 separately
+/// allocated vectors.
 pub(super) struct Schedule {
     /// `P` for the first partial round, applied once in front of the block.
     pub(super) pre: Vec<Fq>,
     /// `[row0 (t) | col (t - 1)]` per round.
     sparse: Vec<Fq>,
     /// Round constants pushed through the `P` matrices, `t` per round.
-    /// `folded(0)` is added with the pre-multiplication, `folded(r)` after
+    /// `folded(0)` is added with the pre-multiplication and `folded(r)` after
     /// round `r - 1`.
     folded: Vec<Fq>,
     t: usize,
@@ -88,8 +87,8 @@ impl Schedule {
         let mut sparse = Vec::with_capacity(rounds);
         let mut primes = Vec::with_capacity(rounds);
 
-        // Walk the block backwards: the last round decomposes the bare MDS,
-        // and each `P` produced propagates into the round before it.
+        // Walk the block backwards: the last round decomposes the bare MDS, and
+        // each `P` produced propagates into the preceding round.
         let mut a = mds.to_vec();
         for _ in 0..rounds {
             let (s, p) = decompose(&a, t)?;
@@ -121,12 +120,12 @@ impl Schedule {
     }
 }
 
-/// Split `a` into `(S̃, P)` with `a = S̃ · P`. `None` if `M̂` is singular, which
-/// an MDS matrix never is.
+/// Split `a` into `(S̃, P)` with `a = S̃ · P`. `None` if `M̂` is singular, which an
+/// MDS matrix never is.
 fn decompose(a: &[Fq], t: usize) -> Option<(Sparse, Vec<Fq>)> {
     let n = t - 1;
 
-    // M̂ = a[1.., 1..], transposed up front since that is what the solve needs.
+    // M̂ = a[1.., 1..], transposed up front as the solve requires.
     let mut hat_t = vec![Fq::ZERO; n * n];
     for i in 0..n {
         for j in 0..n {

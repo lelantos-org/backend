@@ -7,8 +7,8 @@ pub struct RawEvent {
     pub chain_id: i64,
     pub block_number: i64,
     /// What Solidity's `block.number` returned in this block. Equal to
-    /// `block_number` except on Arbitrum, where the EVM reports the L1 height
-    /// and MASP hashes that into the deposit digest.
+    /// `block_number` except on Arbitrum, where the EVM reports the L1 height and
+    /// MASP hashes that into the deposit digest.
     pub evm_block_number: i64,
     pub block_hash: Vec<u8>,
     pub block_ts: i64,
@@ -23,8 +23,8 @@ pub struct RawEvent {
 pub struct BlockCursor {
     pub chain_id: i64,
     /// Highest block whose hash was verified against the chain. Paired with
-    /// `last_block_hash`, this is the anchor reorg detection walks back from,
-    /// so it is only ever written alongside a real block.
+    /// `last_block_hash`, this is the anchor reorg detection walks back from, so
+    /// it is only written alongside a real block.
     pub last_block: i64,
     pub last_block_hash: Vec<u8>,
     pub last_scanned_block: i64,
@@ -43,8 +43,8 @@ pub enum TickOutcome {
     Reorg {
         rewind_to: i64,
     },
-    /// Too far behind for the live tail to be the right tool; the worker
-    /// should drop back into chunked, parallel backfill.
+    /// Too far behind for the live tail, so the worker returns to chunked,
+    /// parallel backfill.
     Lagging {
         lag: i64,
     },

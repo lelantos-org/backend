@@ -40,8 +40,8 @@ pub async fn list(
         })
         .await
         .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
-    // After the await, and on the error path too: a load that failed still
-    // missed, and counting it as a hit would flatter the cache.
+    // Recorded after the await and on the error path: a failed load is still a
+    // miss.
     probe.record();
     out
 }

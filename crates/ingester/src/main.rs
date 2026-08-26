@@ -4,6 +4,7 @@ use database::advisory::{ChainLock, MIGRATE_KEY};
 use ingester::adapters::{DynRpc, HttpRpc};
 use ingester::app::config::{ChainConfig, IngesterConfig, redact_url};
 use ingester::app::state::WorkerDeps;
+use ingester::build_info;
 use ingester::domain::error::IngesterError;
 use ingester::handlers::worker::{self, WorkerExit};
 use ingester::repositories::{
@@ -13,7 +14,6 @@ use ingester::services::backfill::BackfillService;
 use ingester::services::ingest::IngestService;
 use ingester::services::reorg::ReorgService;
 use ingester::services::retry::{Policy, is_retryable};
-use ingester::version;
 use shared::shutdown::{self, Shutdown};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 
 /// How long a replica waits between attempts at the migration lock.
 const MIGRATE_LOCK_POLL: Duration = Duration::from_secs(1);
-/// Give up on the migration lock rather than hang a deploy forever.
+/// Give up on the migration lock rather than hang a deploy indefinitely.
 const MIGRATE_LOCK_ATTEMPTS: u32 = 120;
 
 #[tokio::main]
@@ -29,18 +29,14 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     shared::tracing_init::init();
     info!(
-        version = version::CARGO_PKG_VERSION,
-        commit = version::GIT_SHA,
+        version = build_info::PKG_VERSION,
+        commit = build_info::GIT_SHA,
         "ingester starting"
     );
 
     let cfg = load_config()?;
 
-    let metrics_addr: std::net::SocketAddr = cfg
-        .metrics_addr
-        .parse()
-        .with_context(|| format!("metrics_addr {}", cfg.metrics_addr))?;
-    shared::metrics::init(metrics_addr).context("install metrics listener")?;
+    shared::metrics::init_addr(&cfg.metrics_addr)?;
 
     migrate(&cfg.database_url).await?;
 
@@ -72,8 +68,9 @@ fn load_config() -> Result<IngesterConfig> {
     let mut cfg: IngesterConfig = shared::config::load_toml("INGESTER_CONFIG", "ingester.toml")
         .context("load ingester config")?;
     cfg.apply_env_overlay().context("apply env overlay")?;
-    // Before anything is spawned: a bad address or a zero chunk size should
-    // fail the process now, not after a standby has waited out a chain lock.
+    // Validated before anything is spawned, so a bad address or a zero chunk size
+    // fails the process now rather than after a standby has waited out a chain
+    // lock.
     cfg.validate().context("validate ingester config")?;
     info!(chains = cfg.chains.len(), "config loaded");
     Ok(cfg)
@@ -109,10 +106,10 @@ fn build_deps(pool: &DbPool, cfg: ChainConfig, database_url: &str) -> Result<Wor
     })
 }
 
-/// Wait for every chain worker, then report whether any of them died.
+/// Wait for every chain worker, then report whether any of them failed.
 ///
-/// A dead chain is a failed process. Exiting 0 once every worker had given up
-/// made a fully stalled ingester look healthy to its orchestrator.
+/// A dead chain is a failed process: exiting 0 after every worker gave up would
+/// present a stalled ingester as healthy to its orchestrator.
 async fn await_workers(
     workers: Vec<(i64, tokio::task::JoinHandle<Result<(), IngesterError>>)>,
 ) -> Result<()> {
@@ -139,8 +136,8 @@ async fn await_workers(
 
 /// Run migrations under an advisory lock so concurrent replicas serialise.
 ///
-/// `diesel_migrations` takes no lock of its own, so N replicas booting
-/// together can otherwise apply the same migration at the same time.
+/// `diesel_migrations` takes no lock of its own, so replicas booting together
+/// would otherwise apply the same migration concurrently.
 async fn migrate(database_url: &str) -> Result<()> {
     let lock = acquire_migrate_lock(database_url)
         .await?
@@ -149,7 +146,7 @@ async fn migrate(database_url: &str) -> Result<()> {
     info!("running migrations");
     let url = database_url.to_string();
     let result = tokio::task::spawn_blocking(move || database::migrate::run(&url)).await;
-    // Held until here on purpose: dropping the lock closes its connection.
+    // Held until here: dropping the lock closes its connection.
     drop(lock);
     result?.context("migrations")?;
     info!("migrations complete");
@@ -174,9 +171,9 @@ async fn acquire_migrate_lock(database_url: &str) -> Result<Option<ChainLock>> {
 
 /// Keep one chain's worker alive across recoverable failures.
 ///
-/// A worker that loses its advisory lock is restarted rather than abandoned:
-/// it goes back to standby and takes the chain again when the lock frees.
-/// That is not a failure, so it does not consume a restart.
+/// A worker that loses its advisory lock is restarted rather than abandoned: it
+/// returns to standby and retakes the chain when the lock frees. That is not a
+/// failure and does not consume a restart.
 async fn supervise(deps: WorkerDeps, mut shutdown: Shutdown) -> Result<(), IngesterError> {
     let chain_id = deps.cfg.chain_id;
     let policy = Policy::WORKER_RESTART;

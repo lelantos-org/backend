@@ -1,10 +1,10 @@
-// Orchestrates a fee estimate: observed gas units + live fee data + price
-// oracle + configured fee tokens → final `EstimateResponse`.
-//
-// Each accepted fee token is priced concurrently; one that cannot be priced
-// drops out of the quote rather than failing it.
-// Amount math uses scaled integers (PRICE_SCALE=1e8) to avoid f64
-// precision loss for low-decimal tokens vs 18-decimal native.
+//! Orchestrates a fee estimate: observed gas units, live fee data, the price
+//! oracle and the configured fee tokens produce an `EstimateResponse`.
+//!
+//! Each accepted fee token is priced concurrently, and one that cannot be priced
+//! drops out of the quote rather than failing it. Amount arithmetic uses scaled
+//! integers (`PRICE_SCALE = 1e8`) to avoid f64 precision loss between low-decimal
+//! tokens and 18-decimal native.
 
 use crate::app::config::FeeTokenCfg;
 use crate::domain::error::{AppError, AppResult};
@@ -83,17 +83,16 @@ impl FeeQuoter {
             decimals: token.decimals,
             amount: amount.to_string(),
             // Filled in by the pipeline, which owns the asset registry this
-            // service deliberately does not depend on. See
-            // `pipeline::common::decorate_estimate`.
+            // service does not depend on. See `pipeline::common::decorate_estimate`.
             asset_id: None,
             scale: None,
             circuit_amount: None,
         })
     }
 
-    /// Price `gas_used` units at the chain's current fee data. Callers source
-    /// the units from `gas_witness`, so this path costs one RPC round trip and
-    /// a (usually cached) oracle lookup — no proving, no `eth_estimateGas`.
+    /// Price `gas_used` units at the chain's current fee data. Callers source the
+    /// units from `gas_witness`, so this path costs one RPC round trip and a
+    /// usually cached oracle lookup, with no proving and no `eth_estimateGas`.
     pub async fn quote_for_gas(&self, gas_used: u64) -> AppResult<EstimateResponse> {
         let fee_data = self.gas_estimator.fee_data().await?;
         let total_native_wei =
@@ -110,9 +109,9 @@ impl FeeQuoter {
         .await;
 
         // One unresolvable pair drops that token from the quote rather than
-        // failing the estimate: a caller who can pay in any of the others is
-        // still served, and the boot-time check in `build_state` is what keeps
-        // a permanently broken pair from going unnoticed.
+        // failing the estimate, so a caller who can pay in any of the others is
+        // still served. The boot-time check in `build_state` catches a permanently
+        // broken pair.
         let fees: Vec<FeeQuote> = self
             .accepted_fee_tokens
             .iter()
@@ -156,10 +155,9 @@ impl FeeQuoter {
 
     /// Base-unit amount of `token` that covers `gas_used` right now.
     ///
-    /// This is the number a fee is judged against, and it is derived here
-    /// rather than taken from the caller: an estimate the relayer handed out
-    /// earlier is neither signed nor stored, so honouring one would mean
-    /// honouring anything shaped like one.
+    /// This is the number a fee is judged against, derived here rather than taken
+    /// from the caller: an earlier estimate is neither signed nor stored, so
+    /// honouring one would mean honouring anything of the same shape.
     pub async fn required_amount(&self, token: &FeeToken, gas_used: u64) -> AppResult<U256> {
         let fee_data = self.gas_estimator.fee_data().await?;
         let total_native_wei =

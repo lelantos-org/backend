@@ -1,8 +1,8 @@
 //! Explorer webserver.
 //!
-//! Layered binary; see `backend/ARCHITECTURE.md`. Read-only HTTP API for
-//! assets, asset flows, tree advances. Error type from `shared::http`.
-//! Must NOT depend on `fmd-crypto` (privacy gate).
+//! Layered binary; see `backend/ARCHITECTURE.md`. Read-only HTTP API for assets,
+//! asset flows and tree advances, using the error type from `shared::http`. Must
+//! not depend on `fmd-crypto`, which is the privacy gate.
 
 pub mod adapters;
 pub mod app;

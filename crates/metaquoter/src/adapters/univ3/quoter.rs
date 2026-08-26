@@ -11,8 +11,8 @@ use alloy::transports::http::{Client, Http};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Wrapper overhead added on top of the venue's reported `gasEstimate`:
-/// 2× MASP transact (~250k each, inline verifier) + ~85k wrapper bookkeeping.
+/// Wrapper overhead added on top of the venue's reported `gasEstimate`: two
+/// MASP transacts (~250k each, inline verifier) plus ~85k wrapper bookkeeping.
 const WRAPPER_OVERHEAD_GAS: u64 = 585_000;
 
 /// Per-chain config wired by `main.rs`.
@@ -52,8 +52,8 @@ impl Quoter for UniV3Quoter {
 
         let best = best_tier(setup, req).await?;
         // MASP charges its fee on top of `expected_out` (see
-        // MASP._computeAmounts), so `expected_out` is the reciprocal of the
-        // fee applied to gross — not gross minus fee.
+        // `MASP._computeAmounts`), so `expected_out` is the reciprocal of the
+        // fee applied to gross rather than gross minus fee.
         let expected_out = max_deposit(best.amount_out, setup.masp_fee_bps);
         let masp_fee = best.amount_out.saturating_sub(expected_out);
 
@@ -61,8 +61,8 @@ impl Quoter for UniV3Quoter {
             venue: Venue::UniV3,
             adapter: setup.adapter_addr,
             // Single-hop route layout: abi.encode(uint24 fee, uint160
-            // sqrtPriceLimitX96). 0 disables the pool's slippage guard; we
-            // still rely on `min_out` for sandwich protection at this layer.
+            // sqrtPriceLimitX96). Zero disables the pool's slippage guard;
+            // `min_out` provides sandwich protection at this layer.
             route: (U24::from(best.fee), U160::ZERO).abi_encode().into(),
             min_out: req.apply_slippage(expected_out),
             expected_out,
@@ -74,9 +74,9 @@ impl Quoter for UniV3Quoter {
     }
 }
 
-/// Largest `expected_out` such that `expected_out + expected_out*bps/10_000
-/// <= gross`. Equivalent to `gross * 10_000 / (10_000 + bps)`. Bps clamped
-/// to 10_000.
+/// Largest `expected_out` such that
+/// `expected_out + expected_out * bps / 10_000 <= gross`, equivalent to
+/// `gross * 10_000 / (10_000 + bps)`. `bps` is clamped to 10_000.
 fn max_deposit(gross: U256, bps: u16) -> U256 {
     let bps = u32::from(bps).min(10_000);
     let denom = U256::from(10_000u32 + bps);
@@ -89,9 +89,9 @@ struct TierQuote {
     gas_estimate: u64,
 }
 
-/// Race all canonical fee tiers and pick the highest-output pool. Tiers
-/// without a deployed pool revert at the quoter; those failures are
-/// silently dropped. Returns [`AppError::NoLiquidity`] if every tier fails.
+/// Race all canonical fee tiers and pick the highest-output pool. Tiers without
+/// a deployed pool revert at the quoter and are dropped. Returns
+/// [`AppError::NoLiquidity`] if every tier fails.
 async fn best_tier(setup: &ChainSetup, req: &QuoteRequest) -> Result<TierQuote, AppError> {
     let quoter = IQuoterV2::new(setup.quoter_addr, &setup.provider);
 
@@ -152,8 +152,8 @@ mod tests {
             U256::from(1_000_000u64)
         );
 
-        // 50 bps fee: expected_out = gross * 10_000 / 10_050 ≈ 995_024.
-        //   masp_fee = gross - expected_out ≈ 4_975 ≈ expected_out * 50/10_000.
+        // 50 bps fee: expected_out = gross * 10_000 / 10_050 ≈ 995_024, so
+        // masp_fee = gross - expected_out ≈ 4_975 ≈ expected_out * 50/10_000.
         let gross = U256::from(1_000_000u64);
         let expected = max_deposit(gross, 50);
         let fee = gross - expected;

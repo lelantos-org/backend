@@ -24,35 +24,36 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
-/// Per-chain swap pipeline. Mirrors `SpendPipeline` end-to-end except:
-///   - the leg-1 SNARK PIs travel inside `SwapWrapper.SwapArgs.pi_w`
-///     instead of the bare MASP entry point;
-///   - calldata targets the wrapper, not the pool;
-///   - leg-2 escrow data (`deposit_d`, `aux_d`) ride along in the same
-///     calldata blob — no separate Permit2 pull, no SNARK at submit.
+/// Per-chain swap pipeline, mirroring `SpendPipeline` except that:
 ///
-/// Shares the per-chain `TreeMirror` mutex with `SpendPipeline` so spend
-/// and swap submissions serialise against each other.
+/// - the leg-1 SNARK public inputs travel inside `SwapWrapper.SwapArgs.pi_w`
+///   rather than the bare MASP entry point;
+/// - the calldata targets the wrapper rather than the pool;
+/// - leg-2 escrow data (`deposit_d`, `aux_d`) rides in the same calldata blob,
+///   with no separate Permit2 pull and no SNARK at submit.
+///
+/// Shares the per-chain `TreeMirror` mutex with `SpendPipeline`, so spend and
+/// swap submissions serialise against each other.
 pub struct SwapPipeline {
     pub chain_id: i64,
     pub mirror: Arc<Mutex<TreeMirror>>,
-    /// Submitter target MUST be the SwapWrapper address, not the MASP.
+    /// The submitter target must be the SwapWrapper address rather than the MASP.
     pub submitter: Arc<Submitter>,
     pub prover: Arc<dyn TreeUpdateBatchProver>,
-    /// Cached for shape validation: `pi_w.recipient` + `deposit_d.payer`
-    /// must both equal this. Wrapper enforces on-chain too, but rejecting
-    /// here gives a 400 instead of a wasted Groth16 + revert.
+    /// Cached for shape validation: `pi_w.recipient` and `deposit_d.payer` must
+    /// both equal this. The wrapper enforces it on chain too, but rejecting here
+    /// gives a 400 instead of a wasted Groth16 and a revert.
     pub wrapper_address: Address,
     pub fee_quoter: Arc<FeeQuoter>,
     pub gas_witness: Arc<GasWitness>,
     /// Applied when the wallet pins no `deadline`. See
     /// `ChainCfg::swap_default_deadline_s`.
     pub default_deadline_s: u64,
-    /// See `SpendPipeline::transact_verifier`. Leg 1 of a swap is the same
-    /// transact proof, so it gets the same pre-check.
+    /// See `SpendPipeline::transact_verifier`. Leg 1 of a swap is the same transact
+    /// proof and gets the same pre-check.
     pub transact_verifier: Option<Arc<TransactVerifier>>,
-    /// See `SpendPipeline::shielded_fee`. Leg 1 carries the same three output
-    /// slots, so a swap pays its fee exactly as a spend does.
+    /// See `SpendPipeline::shielded_fee`. Leg 1 carries the same output slots, so
+    /// a swap pays its fee as a spend does.
     pub shielded_fee: Option<Arc<ShieldedFeeChecker>>,
     /// See `SpendPipeline::assets`.
     pub assets: Arc<AssetRegistry>,
@@ -60,11 +61,11 @@ pub struct SwapPipeline {
 
 impl SwapPipeline {
     /// Neither `start_index` nor the token pair is recorded. See
-    /// `SpendPipeline::process` for `start_index`; the pair is omitted for the
-    /// same reason `metaquoter`'s `post_quote` omits it — a quote and a swap
-    /// from one client are already adjacent in the access log, and naming the
-    /// pair in both is what turns that adjacency into a trade record. `adapter`
-    /// stays: it identifies the venue, not the trade.
+    /// `SpendPipeline::process` for `start_index`; the pair is omitted for the same
+    /// reason `metaquoter`'s `post_quote` omits it, since a quote and a swap from
+    /// one client are already adjacent in the access log and naming the pair in
+    /// both turns that adjacency into a trade record. `adapter` remains: it
+    /// identifies the venue rather than the trade.
     #[instrument(
         skip_all,
         fields(chain_id = self.chain_id, adapter = %payload.swap.adapter),
@@ -118,8 +119,8 @@ impl SwapPipeline {
         }
     }
 
-    /// Fee quote for `/v1/swap/estimate`. See `SpendPipeline::estimate` — no
-    /// mirror access, no prove, and no payload: every swap prices as
+    /// Fee quote for `/v1/swap/estimate`. See `SpendPipeline::estimate`: no mirror
+    /// access, no prove and no payload, since every swap prices as
     /// `EntryPoint::Swap`.
     pub async fn estimate(&self) -> AppResult<EstimateResponse> {
         self.fees()
@@ -139,10 +140,9 @@ impl SwapPipeline {
     /// The `deadline` this swap goes out with.
     ///
     /// A wallet that pins one gets exactly that. One that does not gets
-    /// `now + default_deadline_s`, **not** `U256::MAX`: an unbounded deadline
-    /// disables the wrapper's `SwapExpired` guard entirely, so a tx parked in
-    /// the mempool can execute at a much later price with nothing but
-    /// `min_out` behind it.
+    /// `now + default_deadline_s` rather than `U256::MAX`: an unbounded deadline
+    /// disables the wrapper's `SwapExpired` guard, so a transaction parked in the
+    /// mempool could execute at a much later price with only `min_out` behind it.
     fn deadline_for(&self, payload: &SubmitSwapPayload) -> AppResult<alloy::primitives::U256> {
         if let Some(s) = &payload.swap.deadline {
             return parse_u256(s);
@@ -157,10 +157,10 @@ impl SwapPipeline {
     }
 
     fn validate(&self, payload: &SubmitSwapPayload) -> AppResult<()> {
-        // The wrapper calls `MASP.withdraw` for leg 1, so it — not this
-        // relayer's signer — is the pool's `msg.sender`, and the pool checks
-        // `pi.relayer == msg.sender`. Binding to the signer here rejects every
-        // correctly-built swap with a 400.
+        // The wrapper calls `MASP.withdraw` for leg 1, so the wrapper rather than
+        // this relayer's signer is the pool's `msg.sender`, and the pool checks
+        // `pi.relayer == msg.sender`. Binding to the signer here would reject every
+        // correctly built swap with a 400.
         let binding = TransactBinding {
             chain_id: self.chain_id,
             relayer: self.wrapper_address,
@@ -222,9 +222,9 @@ fn validate_swap_shape(
             p.swap.deposit_d.chain_id, binding.chain_id
         )));
     }
-    // Leg 1 is structurally a withdraw: shielded note(s) → public token to
-    // the wrapper. The transact SNARK enforces conservation; we just block
-    // the obviously-wrong shapes early.
+    // Leg 1 is structurally a withdraw: shielded notes to a public token held by
+    // the wrapper. The transact SNARK enforces conservation, so these checks only
+    // reject clearly wrong shapes early.
     if p.pub_inputs.public_in != 0 {
         return Err(AppError::BadRequest(
             "swap payload must have publicIn == 0".into(),
@@ -252,8 +252,8 @@ fn validate_swap_shape(
             "deposit_d.publicIn must be > 0".into(),
         ));
     }
-    // `minOut == 0` accepts any output at all, which is total sandwich
-    // exposure. The wrapper honours it; the relayer will not relay it.
+    // `minOut == 0` accepts any output, which is full sandwich exposure. The
+    // wrapper honours it; the relayer does not relay it.
     if parse_u256(&p.swap.min_out)?.is_zero() {
         return Err(AppError::BadRequest(
             "swap.minOut must be > 0; a zero floor accepts any output".into(),
@@ -351,7 +351,8 @@ mod tests {
             aux: array::from_fn(|_| one_aux()),
             swap: SwapBlob {
                 adapter: "0x0000000000000000000000000000000000000001".into(),
-                // 64B single-hop: abi.encode(uint24 fee, uint160 sqrtPriceLimitX96).
+                // 64-byte single hop:
+                // `abi.encode(uint24 fee, uint160 sqrtPriceLimitX96)`.
                 route:
                     "0x00000000000000000000000000000000000000000000000000000000000000640000000000000000000000000000000000000000000000000000000000000000"
                         .into(),
@@ -375,10 +376,9 @@ mod tests {
 
     /// Payload as a well-behaved wallet would send it, plus a mutation.
     ///
-    /// Leg 1 is bound to the wrapper throughout: it is the contract that
-    /// calls `MASP.withdraw`, so it is the pool's `msg.sender` and therefore
-    /// the address `pi.relayer` must name. Binding these to the relayer's own
-    /// signer instead is what made every real swap 400.
+    /// Leg 1 is bound to the wrapper throughout: the wrapper calls `MASP.withdraw`,
+    /// so it is the pool's `msg.sender` and the address `pi.relayer` must name.
+    /// Binding these to the relayer's own signer would 400 every real swap.
     fn checked(mutate: impl FnOnce(&mut SubmitSwapPayload)) -> AppResult<()> {
         let w = wrapper();
         let mut p = fake_payload(&w.to_string());
@@ -447,9 +447,9 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
-    /// The transact proof pins the caller; a proof naming anyone other than
-    /// the wrapper cannot satisfy `pi.relayer == msg.sender`, so it must not
-    /// reach the prover.
+    /// The transact proof pins the caller, so a proof naming anything other than
+    /// the wrapper cannot satisfy `pi.relayer == msg.sender` and must not reach the
+    /// prover.
     #[test]
     fn validate_rejects_a_proof_bound_to_another_relayer() {
         let err =

@@ -1,5 +1,5 @@
-// `tree_update_batch` prover. In-process Groth16 over ark-bn254 against the
-// snarkjs-compatible `.zkey`; the proving key is parsed once at startup.
+//! `tree_update_batch` prover: in-process Groth16 over ark-bn254 against the
+//! snarkjs-compatible `.zkey`, with the proving key parsed once at startup.
 
 use crate::domain::error::{AppError, AppResult, ErrorContext};
 use crate::services::witness_calc::{self, WitnessCalculator};
@@ -23,26 +23,27 @@ use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeUpdateBatchWitness {
-    /// Decimal field-element strings (snarkjs convention). Caller composes
-    /// the witness shape that matches `circuits/src/tree_update_batch.circom`.
+    /// Decimal field-element strings, the snarkjs convention. The caller composes
+    /// the witness shape `circuits/src/tree_update_batch.circom` declares.
     pub z: String,
     pub old_root: String,
     pub new_root: String,
     pub start_index: String,
     pub actual_count: String,
-    /// `MAX_L_BATCH` entries, leaf-indexed; padding (i ≥ actual_count)
-    /// MUST be "0".
+    /// `MAX_L_BATCH` leaf-indexed entries. Padding, where `i >= actual_count`,
+    /// must be "0".
     pub cms: Vec<String>,
-    /// `MAX_L_BATCH` Baby-Jubjub points (depositor-anchored value
-    /// commitments). Padding entries MUST be "0".
+    /// `MAX_L_BATCH` Baby-Jubjub points, the depositor-anchored value
+    /// commitments. Padding entries must be "0".
     pub cv_dep: Vec<[String; 2]>,
-    /// `MAX_L_BATCH` per-leaf publicAssetId. Padding "0".
+    /// `MAX_L_BATCH` per-leaf `publicAssetId`. Padding is "0".
     pub leaf_asset: Vec<String>,
-    /// `MAX_L_BATCH` per-leaf publicIn. Padding "0".
+    /// `MAX_L_BATCH` per-leaf `publicIn`. Padding is "0".
     pub leaf_public_in: Vec<String>,
-    /// `MAX_L_BATCH` 0/1 flags. 1 = deposit leaf (binding enforced).
+    /// `MAX_L_BATCH` 0/1 flags, where 1 marks a deposit leaf whose binding the
+    /// circuit enforces.
     pub is_deposit: Vec<String>,
-    /// `MAX_L_BATCH` private per-leaf rcv_dep. Padding "0".
+    /// `MAX_L_BATCH` private per-leaf `rcv_dep`. Padding is "0".
     pub rcv: Vec<String>,
     pub frontier_in: Vec<[String; 3]>,
 }
@@ -55,9 +56,9 @@ pub struct TreeUpdateBatchProof {
     pub public_signals: Vec<String>,
 }
 
-/// Who is waiting on a proof. A spend has an HTTP caller blocked on it; a
-/// flush is a background tick that will come round again in seconds, so it
-/// yields the prover rather than queueing ahead of a spend.
+/// Who is waiting on a proof. A spend has an HTTP caller blocked on it, while a
+/// flush is a background tick that returns in seconds, so it yields the prover
+/// rather than queueing ahead of a spend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     Spend,
@@ -74,10 +75,10 @@ pub trait TreeUpdateBatchProver: Send + Sync {
 
     /// Whether a [`Priority::Flush`] prove would be refused right now.
     ///
-    /// Advisory: the answer can go stale before the caller acts on it, and a
-    /// stale answer only costs what the caller would have paid anyway. It lets
-    /// a background tick bail out *before* taking a chain's tree-mirror lock
-    /// instead of reserving leaves and unwinding them.
+    /// Advisory: the answer can go stale before the caller acts on it, at no more
+    /// cost than the caller would have paid anyway. It lets a background tick bail
+    /// out before taking a chain's tree-mirror lock rather than reserving leaves
+    /// and unwinding them.
     fn is_busy(&self) -> bool {
         false
     }
@@ -85,22 +86,22 @@ pub trait TreeUpdateBatchProver: Send + Sync {
 
 /// Everything a proof needs from the zkey, parsed once at startup.
 ///
-/// The A/B/C matrices are the point: the zkey already carries them, so
-/// `create_proof_with_reduction_and_matrices` can be handed them directly.
-/// The alternative — `Groth16::prove` over a `CircomCircuit` — rebuilds them
-/// from the `.r1cs` on *every* proof: clone the constraint list, re-emit every
-/// linear combination, inline them, then materialise the matrices again inside
-/// the QAP witness map.
+/// The zkey already carries the A/B/C matrices, so
+/// `create_proof_with_reduction_and_matrices` receives them directly.
+/// `Groth16::prove` over a `CircomCircuit` would instead rebuild them from the
+/// `.r1cs` on every proof: cloning the constraint list, re-emitting every linear
+/// combination, inlining them, then materialising the matrices again inside the
+/// QAP witness map.
 struct Groth16Params {
     pk: ProvingKey<Bn254>,
     /// `[a, b, c]`, in the order `create_proof_with_reduction_and_matrices`
     /// indexes them.
     matrices: Vec<Matrix<Fr>>,
-    /// Verifies the proof we just produced, in place of circom's per-signal
-    /// sanity check. Three pairings, against a whole-witness re-check.
+    /// Verifies the proof just produced, in place of circom's per-signal sanity
+    /// check: three pairings against a whole-witness re-check.
     pvk: PreparedVerifyingKey<Bn254>,
-    /// Length of the witness prefix that is public — the `1` at the head plus
-    /// the circuit's public outputs and inputs.
+    /// Length of the public witness prefix: the leading `1` plus the circuit's
+    /// public outputs and inputs.
     num_inputs: usize,
     num_constraints: usize,
 }
@@ -122,9 +123,9 @@ impl Groth16Params {
     /// The public prefix of a full witness.
     ///
     /// Element 0 is circom's constant `1`, which the verifier supplies itself.
-    /// This is the same slice `CircomCircuit::get_public_inputs` returns once
-    /// the wire mapping is dropped, so the signals reaching the contract are
-    /// unchanged by proving from matrices.
+    /// This is the slice `CircomCircuit::get_public_inputs` returns once the wire
+    /// mapping is dropped, so proving from matrices leaves the signals reaching
+    /// the contract unchanged.
     fn public_inputs<'w>(&self, witness: &'w [Fr]) -> AppResult<&'w [Fr]> {
         witness
             .get(1..self.num_inputs)
@@ -148,9 +149,9 @@ impl Groth16Params {
 
     /// Check our own output before it becomes calldata.
     ///
-    /// This stands in for circom's `sanity_check`: a witness that does not
-    /// satisfy the constraints cannot yield a proof that verifies, and failing
-    /// here is a failed submission rather than an opaque on-chain revert.
+    /// Stands in for circom's `sanity_check`: a witness that does not satisfy the
+    /// constraints cannot yield a verifying proof, and failing here is a failed
+    /// submission rather than an opaque on-chain revert.
     fn verify(&self, public_inputs: &[Fr], proof: &Proof<Bn254>) -> AppResult<()> {
         let ok = Groth16::<Bn254, CircomReduction>::verify_with_processed_vk(
             &self.pvk,
@@ -165,9 +166,8 @@ impl Groth16Params {
     }
 }
 
-/// Where one proof spent its time. `elapsed_ms` alone cannot say whether it
-/// went to the wasm witness build or to the MSMs, and the two have completely
-/// different fixes.
+/// Where one proof spent its time. `elapsed_ms` alone cannot distinguish the wasm
+/// witness build from the MSMs, which have different fixes.
 #[derive(Debug, Default)]
 struct Timings {
     witness_ms: u64,
@@ -183,15 +183,14 @@ fn timed<T>(slot: &mut u64, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// In-process Groth16 prover. The proving key (~150MB zkey), the A/B/C
-/// matrices it carries, and the circom witness generator are loaded once at
-/// startup and reused; a prove then costs only the witness calculation and the
-/// proof itself.
+/// In-process Groth16 prover. The proving key, a ~150 MB zkey, the A/B/C matrices
+/// it carries, and the circom witness generator are loaded once at startup and
+/// reused, so a prove costs only the witness calculation and the proof itself.
 ///
-/// Proving is serialized — the MSMs already saturate the machine — but the
-/// gate is a `Semaphore` held *outside* `spawn_blocking`, not a mutex inside
-/// it. Queuing on a blocking-pool thread would let a burst of requests park
-/// the whole pool, which the DB and everything else also draws from.
+/// Proving is serialised, since the MSMs already saturate the machine, but the
+/// gate is a `Semaphore` held outside `spawn_blocking` rather than a mutex inside
+/// it: queueing on a blocking-pool thread would let a burst of requests park the
+/// whole pool, which the database and everything else also draw from.
 pub struct ArkCircomProver {
     params: Arc<Groth16Params>,
     /// Guarded by `gate`, so the inner lock is always uncontended.
@@ -200,9 +199,9 @@ pub struct ArkCircomProver {
 }
 
 impl ArkCircomProver {
-    /// `r1cs_path` is accepted and ignored: the constraint matrices now come
-    /// from the zkey, which already carries them. The config key stays so
-    /// deployed `relayer.toml`s keep loading.
+    /// `r1cs_path` is accepted and ignored: the constraint matrices come from the
+    /// zkey, which already carries them. The config key remains so deployed
+    /// `relayer.toml` files keep loading.
     pub fn new(wasm_path: &Path, _r1cs_path: &Path, zkey_path: &Path) -> AppResult<Self> {
         let wtns = WitnessCalculator::new(wasm_path)?;
         let params = Groth16Params::load(zkey_path)?;
@@ -225,10 +224,10 @@ impl ArkCircomProver {
     /// Take the prover.
     ///
     /// The gate is FIFO, so a background flush that queued first would make a
-    /// spend wait a whole proof. [`Priority::Flush`] therefore never queues:
-    /// it takes the permit only if it is free, and its worker retries on the
-    /// next tick. Within one chain the mirror mutex already excludes the two;
-    /// this is the cross-chain case, where several chains share one prover.
+    /// spend wait a whole proof. [`Priority::Flush`] therefore never queues: it
+    /// takes the permit only if free, and its worker retries on the next tick.
+    /// Within one chain the mirror mutex already excludes the two; this covers the
+    /// cross-chain case, where several chains share one prover.
     async fn acquire(&self, priority: Priority) -> AppResult<SemaphorePermit<'_>> {
         match priority {
             Priority::Spend => self.gate.acquire().await.prover("prove gate"),
@@ -237,8 +236,8 @@ impl ArkCircomProver {
     }
 }
 
-/// Witness → proof, start to finish. Blocking and CPU-bound; the caller runs
-/// this on a blocking thread while holding the prover's permit.
+/// Witness to proof, start to finish. Blocking and CPU-bound; the caller runs it
+/// on a blocking thread while holding the prover's permit.
 fn run_proof(
     params: &Groth16Params,
     wtns: &Mutex<WitnessCalculator>,
@@ -308,9 +307,9 @@ impl TreeUpdateBatchProver for ArkCircomProver {
     }
 }
 
-/// Witness → circom signal map, in the shape `tree_update_batch.circom`
+/// Witness to circom signal map, in the shape `tree_update_batch.circom`
 /// declares. Kept separate from proving so the mapping is checkable without a
-/// zkey; a wrong length here otherwise surfaces from circom as an opaque
+/// zkey; a wrong length would otherwise surface from circom as an opaque
 /// witness-build failure.
 fn circom_inputs(w: &TreeUpdateBatchWitness) -> AppResult<witness_calc::Inputs> {
     let mut inputs = witness_calc::Inputs::new();
@@ -351,7 +350,7 @@ fn circom_inputs(w: &TreeUpdateBatchWitness) -> AppResult<witness_calc::Inputs> 
     Ok(inputs)
 }
 
-/// Affine G1 → snarkjs proof shape: `[x, y, "1"]` in decimal.
+/// Affine G1 in snarkjs proof shape: `[x, y, "1"]`, decimal.
 fn g1_to_dec(p: &ark_bn254::G1Affine) -> [String; 3] {
     use ark_ec::AffineRepr;
     if p.is_zero() {
@@ -360,7 +359,8 @@ fn g1_to_dec(p: &ark_bn254::G1Affine) -> [String; 3] {
     [fq_to_dec(&p.x), fq_to_dec(&p.y), "1".into()]
 }
 
-/// Affine G2 → snarkjs proof shape: `[[x_c0, x_c1], [y_c0, y_c1], ["1","0"]]`.
+/// Affine G2 in snarkjs proof shape:
+/// `[[x_c0, x_c1], [y_c0, y_c1], ["1", "0"]]`.
 fn g2_to_dec(p: &ark_bn254::G2Affine) -> [[String; 2]; 3] {
     use ark_ec::AffineRepr;
     if p.is_zero() {
@@ -394,8 +394,8 @@ mod tests {
     use crate::services::witness;
     use alloy::primitives::{FixedBytes, U256};
 
-    /// A spend witness: `TRANSACT_OUT` leaves, no deposit binding — the
-    /// shape both single-spend pipelines produce.
+    /// A spend witness: `TRANSACT_OUT` leaves with no deposit binding, the shape
+    /// both single-spend pipelines produce.
     fn spend_witness() -> TreeUpdateBatchWitness {
         let slot = ReservedSlot {
             start_index: 4,
@@ -414,8 +414,9 @@ mod tests {
         witness::build_spend(&slot, &advanced, &cms, &cv_deps, "12".to_string())
     }
 
-    /// The circuit declares fixed-width arrays; a short or long signal is
-    /// rejected deep inside circom with no useful message, so pin the widths.
+    /// The circuit declares fixed-width arrays, and a short or long signal is
+    /// rejected inside circom with no useful message, so the widths are pinned
+    /// here.
     #[test]
     fn signal_widths_match_the_circuit_declaration() {
         let inputs = circom_inputs(&spend_witness()).unwrap();
@@ -462,8 +463,8 @@ mod tests {
         );
     }
 
-    /// Padding slots must be zero — the circuit and the contract both enforce
-    /// it, and a stray value there is otherwise invisible until the prove.
+    /// Padding slots must be zero: the circuit and the contract both enforce it,
+    /// and a stray value is otherwise invisible until the prove.
     #[test]
     fn padding_slots_are_zero() {
         let inputs = circom_inputs(&spend_witness()).unwrap();
@@ -493,9 +494,9 @@ mod zkey_compat {
     //! the result in snarkjs shape, so it can be verified with the snarkjs CLI.
     //!
     //! Skipped unless `ZKEY_COMPAT_DIR` points at a directory holding
-    //! `tree_update_batch.{wasm,r1cs}`, `tree_update_batch_final.zkey` and
-    //! `vector.json` (the published `tree-update-batch-8` vector). Writes
-    //! `proof.json` / `public.json` next to them.
+    //! `tree_update_batch.{wasm,r1cs}`, `tree_update_batch_final.zkey` and a
+    //! `vector.json` carrying the published vector. Writes `proof.json` and
+    //! `public.json` next to them.
 
     use super::*;
     use std::path::Path;

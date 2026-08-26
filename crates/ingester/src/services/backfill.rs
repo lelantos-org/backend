@@ -28,8 +28,8 @@ struct Chunk {
 
 /// Split `[from, to]` into chunks of at most `size` blocks.
 ///
-/// A free function so the boundary arithmetic — the off-by-one at the tail,
-/// and the `size == 0` case that would panic `step_by` — is testable directly.
+/// A free function so the boundary arithmetic, including the tail clip and the
+/// `size == 0` case that would panic `step_by`, is testable directly.
 fn chunks(from: u64, to: u64, size: u64) -> Vec<Chunk> {
     if from > to {
         return Vec::new();
@@ -81,8 +81,8 @@ impl BackfillService {
         }))
         .buffered(cfg.backfill_concurrency.max(1));
 
-        // `buffered` yields in submission order, so the cursor only ever moves
-        // forward even though the fetches complete out of order.
+        // `buffered` yields in submission order, so the cursor moves only forward
+        // even though the fetches complete out of order.
         while let Some(result) = fetches.next().await {
             let (chunk, logs) = result?;
             let inserted = self.commit(chain_id, chunk, logs).await?;
@@ -140,8 +140,8 @@ mod tests {
         assert!(chunks(10, 9, 50).is_empty());
     }
 
-    /// `Iterator::step_by(0)` panics. Config validation rejects it, but this
-    /// is where it would detonate, so it is defended here too.
+    /// `Iterator::step_by(0)` panics. Config validation rejects a zero size, and
+    /// this guards the call site as well.
     #[test]
     fn a_zero_chunk_size_does_not_panic() {
         assert_eq!(chunks(1, 3, 0).len(), 3);

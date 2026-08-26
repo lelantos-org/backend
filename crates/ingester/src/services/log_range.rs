@@ -1,9 +1,9 @@
 //! Adaptive `eth_getLogs` windowing.
 //!
-//! Providers cap how much one query may return — by block span, by response
-//! size, or both — and they disagree on the limit and on how they report
-//! hitting it. Rather than configure a per-provider constant that goes stale,
-//! probe: shrink on rejection, grow on success.
+//! Providers cap how much one query may return, by block span, by response size
+//! or both, and disagree on the limit and on how they report reaching it. Rather
+//! than a per-provider constant, the window is probed: shrink on rejection, grow
+//! on success.
 
 use crate::adapters::DynRpc;
 use crate::domain::error::{IngesterError, RpcError};
@@ -12,13 +12,13 @@ use alloy::rpc::types::eth::Log;
 
 /// The window size search.
 ///
-/// Split out from the fetch loop so the sizing rule — the part that is easy to
-/// get subtly wrong — is testable without a provider.
+/// Split out from the fetch loop so the sizing rule is testable without a
+/// provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Window {
     size: u64,
     /// Largest size known to be rejected, minus one. Once the provider has
-    /// said no, never climb back to that size.
+    /// refused a size, the window never climbs back to it.
     ceiling: u64,
 }
 
@@ -30,16 +30,16 @@ impl Window {
         }
     }
 
-    /// Can this shrink any further, or is a single block already too much?
+    /// Whether the window can shrink further, or a single block is already too
+    /// much.
     fn can_shrink(&self) -> bool {
         self.size > 1
     }
 
     fn shrink(&mut self) {
         self.size = (self.size / 2).max(1);
-        // Remembering the cap is the whole point. Doubling straight back into
-        // it after every shrink makes half of all requests guaranteed
-        // failures, which is what the naive version did.
+        // Remember the cap: doubling straight back into it after every shrink
+        // would make half of all requests fail.
         self.ceiling = self.size;
     }
 
@@ -56,8 +56,8 @@ impl Window {
 /// Fetch every matching log in `[from, to]`, narrowing the query window to
 /// whatever the provider will actually serve.
 ///
-/// Bubbles up anything that is not a range cap: rate limits and transport
-/// errors are the retry layer's problem, not this one's.
+/// Anything that is not a range cap propagates: rate limits and transport errors
+/// belong to the retry layer.
 pub async fn fetch_adaptive(
     rpc: &DynRpc,
     address: Address,
@@ -151,7 +151,7 @@ mod tests {
     }
 
     /// Without a learned ceiling the window doubles straight back into the cap
-    /// after every success, so roughly half of all requests fail forever.
+    /// after every success, so roughly half of all requests fail.
     #[tokio::test]
     async fn does_not_climb_back_into_the_cap() {
         let rpc = CappedRpc::new(8);
@@ -176,8 +176,8 @@ mod tests {
         assert!(matches!(err, IngesterError::Rpc(RpcError::RangeTooLarge)));
     }
 
-    /// Rate limits belong to the retry layer; swallowing them here would
-    /// shrink the window over a condition that has nothing to do with size.
+    /// Rate limits belong to the retry layer; handling them here would shrink the
+    /// window over a condition unrelated to size.
     #[tokio::test]
     async fn passes_non_range_errors_through() {
         struct Limited;

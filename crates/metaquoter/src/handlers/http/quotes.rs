@@ -5,8 +5,8 @@ use axum::Json;
 use axum::extract::State;
 use tracing::{debug, info, warn};
 
-/// Hard cap on user-supplied slippage; higher values almost certainly
-/// mean percent was passed where basis points were expected.
+/// Hard cap on caller-supplied slippage. Higher values indicate percent was
+/// passed where basis points were expected.
 const MAX_SLIPPAGE_BPS: u16 = 5_000;
 
 #[utoipa::path(
@@ -22,17 +22,17 @@ const MAX_SLIPPAGE_BPS: u16 = 5_000;
         (status = 502, description = "All venues failed or RPC error"),
     )
 )]
-/// A quote names the pair and the amount a user is about to trade, minutes or
-/// seconds before the swap reaches the chain. Nothing on chain ties that quote
-/// to the requester — but this log line and the access-log line share a
-/// timestamp, and `POST /relayer/v1/swap` follows from the same client shortly
-/// after. Logging the pair here is therefore the only server-side record of
-/// that correlation, so none of `token_in`, `token_out`, `amount_in` or
-/// `expected_out` is recorded. `expected_out` alone is enough: with the pair
-/// and the venue it reconstructs `amount_in`.
+/// A quote names the pair and the amount a caller is about to trade, seconds or
+/// minutes before the swap reaches the chain. Nothing on chain ties the quote to
+/// the requester, but this log line shares a timestamp with the access-log line
+/// and `POST /relayer/v1/swap` follows from the same client shortly after, so
+/// logging the pair here would be the only server-side record of that
+/// correlation. None of `token_in`, `token_out`, `amount_in` or `expected_out`
+/// is recorded; `expected_out` alone reconstructs `amount_in` given the pair and
+/// the venue.
 ///
-/// What is left — chain, venue, outcome class — is what operating the service
-/// actually needs. Diagnosing one pair is a reproduction, not a log grep.
+/// Chain, venue and outcome class are recorded, which is what operating the
+/// service requires.
 pub async fn post_quote(
     State(st): State<AppState>,
     Json(req): Json<QuoteRequest>,

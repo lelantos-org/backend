@@ -1,8 +1,8 @@
 //! Exponential backoff for idle polling loops.
 //!
 //! Used by the [tick driver](crate::tick) to keep a drained service cheap
-//! without paying a fixed tick of latency on the next arrival: the delay
-//! starts near zero and only grows while nothing is happening.
+//! without paying a fixed tick of latency on the next arrival: the delay starts
+//! near zero and grows only while nothing is happening.
 
 use std::time::Duration;
 
@@ -22,10 +22,8 @@ impl Backoff {
     /// # Panics
     ///
     /// If `initial` is zero, exceeds `max`, or `factor < 2`. These are hard
-    /// asserts rather than `debug_assert!`s because each one degenerates into
-    /// a delay that never grows — a caller polling in a loop would spin at
-    /// full speed in release, which is precisely the failure this type exists
-    /// to prevent.
+    /// asserts rather than `debug_assert!`s because each case yields a delay
+    /// that never grows, making a polling caller spin at full speed in release.
     pub fn new(initial: Duration, max: Duration, factor: u32) -> Self {
         assert!(!initial.is_zero(), "initial delay must be non-zero");
         assert!(initial <= max, "initial delay must not exceed max");
@@ -116,14 +114,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "initial delay must be non-zero")]
     fn a_zero_initial_is_rejected() {
-        // Would otherwise stay zero forever: saturating_mul(0, n) == 0.
+        // Would stay zero forever: saturating_mul(0, n) == 0.
         Backoff::new(Duration::ZERO, ms(5000), 2);
     }
 
     #[test]
     #[should_panic(expected = "factor must be at least 2")]
     fn a_factor_below_two_is_rejected() {
-        // Would otherwise never grow, busy-looping at `initial`.
+        // Would never grow, busy-looping at `initial`.
         Backoff::new(ms(50), ms(5000), 1);
     }
 

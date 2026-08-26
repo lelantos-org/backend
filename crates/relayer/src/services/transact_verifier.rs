@@ -1,12 +1,11 @@
-//! Local Groth16 verification of the wallet's `transact_3x3` proof.
+//! Local Groth16 verification of the wallet's transact proof.
 //!
-//! Without this the first thing to check a wallet's proof is the contract —
-//! after the relayer has already run a multi-second `tree_update_batch`
-//! Groth16 behind a single-permit gate, holding the chain's tree mutex. Any
-//! unauthenticated caller could therefore spend the relayer's prover on
-//! payloads that were never going to land.
+//! Without it the first check of a wallet's proof happens on chain, after the
+//! relayer has run a multi-second `tree_update_batch` Groth16 behind a
+//! single-permit gate while holding the chain's tree mutex, letting any
+//! unauthenticated caller consume the prover on payloads that cannot land.
 //!
-//! Verification is a few pairings: milliseconds against seconds, and it runs
+//! Verification is a few pairings, milliseconds against seconds, and it runs
 //! before the mirror lock is taken.
 
 use crate::adapters::abi::IMasp;
@@ -48,7 +47,7 @@ impl SnarkjsVk {
             )));
         }
         // The circuit publishes exactly `(y, z)`; a key with any other arity
-        // belongs to a different circuit and would verify nothing useful.
+        // belongs to a different circuit.
         if self.n_public != EXPECTED_PUBLIC_SIGNALS || self.ic.len() != EXPECTED_PUBLIC_SIGNALS + 1
         {
             return Err(AppError::Internal(format!(
@@ -71,7 +70,7 @@ impl SnarkjsVk {
     }
 }
 
-/// `y` (the circuit's output) and `z` (the Fiat-Shamir challenge) — see
+/// `y`, the circuit's output, and `z`, the Fiat-Shamir challenge. See
 /// [`crate::domain::transact_pi`].
 const EXPECTED_PUBLIC_SIGNALS: usize = 2;
 
@@ -114,10 +113,9 @@ impl TransactVerifier {
     }
 }
 
-/// Wire proof → ark. The wire format is snarkjs-native, so the G2 coordinates
-/// stay in `(c0, c1)` order here — the swap to `(c1, c0)` belongs only to the
-/// Solidity verifier's calling convention, and `adapters::calldata` does it
-/// there.
+/// Wire proof to ark. The wire format is snarkjs-native, so the G2 coordinates
+/// stay in `(c0, c1)` order here; the swap to `(c1, c0)` belongs to the Solidity
+/// verifier's calling convention and happens in `adapters::calldata`.
 fn ark_proof(p: &ProofDto) -> AppResult<ark_groth16::Proof<Bn254>> {
     Ok(ark_groth16::Proof {
         a: g1(&p.pi_a, "piA", Origin::Payload)?,
@@ -128,9 +126,9 @@ fn ark_proof(p: &ProofDto) -> AppResult<ark_groth16::Proof<Bn254>> {
 
 /// Whose fault a malformed curve point is.
 ///
-/// The same parsing serves the verification key — a file this deployment ships
-/// — and the proof, which is client input. A broken key is an operator problem
-/// and must not be reported to a caller as a bad request.
+/// The same parsing serves the verification key, a file this deployment ships,
+/// and the proof, which is client input. A broken key is an operator problem and
+/// must not be reported to a caller as a bad request.
 #[derive(Debug, Clone, Copy)]
 enum Origin {
     Vkey,
@@ -189,9 +187,9 @@ fn g2(p: &[[String; 2]; 3], field: &str, origin: Origin) -> AppResult<G2Affine> 
     Ok(point)
 }
 
-/// A point off the curve or off the prime-order subgroup is not a proof
+/// A point off the curve or outside the prime-order subgroup is not a proof
 /// element. `new_unchecked` tests neither, and pairing an invalid point is
-/// undefined rather than merely false.
+/// undefined rather than false.
 fn check_on_curve<C: SWCurveConfig>(
     point: &Affine<C>,
     field: &str,
@@ -244,12 +242,12 @@ mod tests {
             Ok(_) => panic!("a 5-signal key is not this circuit's"),
         };
         assert!(err.to_string().contains("2 public signals"), "got {err}");
-        // Operator problem, not the caller's.
+        // An operator problem rather than the caller's.
         assert!(matches!(err, AppError::Internal(_)), "got {err}");
     }
 
-    /// A broken verification key is a deployment fault. Reporting it as a
-    /// `400` would blame whichever caller happened to arrive first.
+    /// A broken verification key is a deployment fault; reporting it as a 400
+    /// would blame whichever caller arrived first.
     #[test]
     fn a_malformed_key_is_an_internal_error_not_a_bad_request() {
         let bad = ["1".into(), "1".into(), "1".into()];
@@ -263,7 +261,7 @@ mod tests {
         ));
     }
 
-    /// snarkjs writes the identity as `z = 0`; anything else non-affine is a
+    /// snarkjs writes the identity as `z = 0`; any other non-affine value is a
     /// malformed proof rather than something to renormalise.
     #[test]
     fn non_affine_points_are_rejected() {
@@ -285,8 +283,8 @@ mod tests {
         );
     }
 
-    /// A point that parses as two field elements but is not on the curve must
-    /// not reach the pairing.
+    /// A point that parses as two field elements but is not on the curve must not
+    /// reach the pairing.
     #[test]
     fn off_curve_points_are_rejected() {
         let err = g1(

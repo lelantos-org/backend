@@ -15,16 +15,16 @@ pub struct FmdIndexerConfig {
     pub filter_batch: usize,
     #[serde(default = "default_filter_tick_ms")]
     pub filter_tick_ms: u64,
-    /// Consume-loop batch size. Defaults to `filter_batch`, but the two loops
-    /// price it differently: for the filter it is a throughput knob, while for
-    /// consume it bounds the widest tx that can be committed at all.
+    /// Consume-loop batch size, defaulting to `filter_batch`. For the filter it
+    /// is a throughput setting; for consume it bounds the widest transaction that
+    /// can be committed.
     #[serde(default)]
     pub consume_batch: Option<usize>,
     #[serde(default)]
     pub consume_tick_ms: Option<u64>,
-    /// Where `/metrics` is served. This is the process's only listener.
-    /// Defaults to loopback; under compose it is set to `0.0.0.0:<port>` and
-    /// the host publish restricts it (see `shared::metrics::init`).
+    /// Where `/metrics` is served; the process's only listener. Defaults to
+    /// loopback. Under compose it is set to `0.0.0.0:<port>` and the host publish
+    /// restricts it (see `shared::metrics::init`).
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
 }
@@ -61,11 +61,9 @@ impl FmdIndexerConfig {
 
     /// Overlay env vars on whichever base was loaded.
     ///
-    /// Applied to the TOML branch too, not just the fallback: this used to be
-    /// either/or, so the `FILTER_*` vars compose sets were read on neither path
-    /// — there is no `fmd-indexer.toml` in the repo, and the env branch only
-    /// looked at `DATABASE_URL` and `METRICS_ADDR`. Every tuning knob the
-    /// deployment exposed was silently inert.
+    /// Applied to the TOML branch as well as the fallback, so the `FILTER_*` and
+    /// `CONSUME_*` variables the deployment sets take effect on either load
+    /// path.
     fn apply_env_overlay(&mut self) -> Result<()> {
         if let Ok(v) = std::env::var(ENV_DATABASE_URL) {
             self.database_url = v;
@@ -94,8 +92,8 @@ impl FmdIndexerConfig {
 
 /// Read and parse `key`, or `None` when it is unset.
 ///
-/// A typo is an error rather than a fallback to the default: a knob that reads
-/// as set and behaves as unset is the exact failure this overlay exists to fix.
+/// A malformed value is an error rather than a fallback to the default, so a
+/// setting cannot read as set while behaving as unset.
 fn parse_env<T: std::str::FromStr>(key: &str) -> Result<Option<T>> {
     let Ok(raw) = std::env::var(key) else {
         return Ok(None);
@@ -126,8 +124,8 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
 
-    /// The process environment is global, and cargo runs these on threads of
-    /// one process — without this, one test's `FILTER_BATCH` is visible to
+    /// The process environment is global and cargo runs these tests on threads of
+    /// one process, so without this lock one test's `FILTER_BATCH` is visible to
     /// another's overlay call.
     static ENV: Mutex<()> = Mutex::new(());
 
@@ -167,8 +165,8 @@ mod tests {
         }
     }
 
-    /// The regression this overlay exists for: compose set `FILTER_TICK_MS` and
-    /// nothing read it, on either load path.
+    /// `FILTER_TICK_MS` set in the environment must override the default on
+    /// either load path.
     #[test]
     fn test_apply_env_overlay_with_filter_tick_ms_set_overrides_the_default() {
         let _env = EnvVar::set("FILTER_TICK_MS", "50");
@@ -177,8 +175,8 @@ mod tests {
         assert_eq!(cfg.filter_tick_ms, 50);
     }
 
-    /// A malformed value must stop the process, not silently keep the default —
-    /// a knob that reads as set and behaves as unset is the original bug.
+    /// A malformed value must stop the process rather than keep the default, so a
+    /// setting cannot read as set while behaving as unset.
     #[test]
     fn test_apply_env_overlay_with_unparsable_value_returns_error() {
         let _env = EnvVar::set("FILTER_BATCH", "lots");
@@ -189,8 +187,8 @@ mod tests {
         ));
     }
 
-    /// `consume_*` stay `None` unless explicitly set: `None` is what makes them
-    /// track `filter_*` rather than freeze a copy of it.
+    /// `consume_*` stay `None` unless explicitly set, which is what makes them
+    /// track `filter_*` rather than freeze a copy.
     #[test]
     fn test_apply_env_overlay_with_no_consume_vars_leaves_them_unset() {
         let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());

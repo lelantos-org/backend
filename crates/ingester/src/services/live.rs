@@ -1,16 +1,16 @@
 //! Live-tail service.
 //!
-//! Owns one tick: verify the reorg anchor, then scan forward from the cursor
-//! and commit. The handler layer only calls `tick()` on a schedule.
+//! Owns one tick: verify the reorg anchor, then scan forward from the cursor and
+//! commit. The handler layer calls `tick()` on a schedule.
 //!
 //! # Head buffer
 //!
-//! This deliberately scans all the way to `tip` rather than stopping at
-//! `tip - reorg_depth`. `reorg_depth` bounds the backfill's safe range and the
-//! depth of the anchor walk, not the live head. That keeps head latency at
-//! zero at the cost of routinely ingesting blocks a reorg can still take away
-//! — which is why [`ReorgService::check_anchor`] runs first on every tick, and
-//! why a rewind emits a retraction signal for consumers.
+//! The scan runs all the way to `tip` rather than stopping at
+//! `tip - reorg_depth`, which bounds the backfill's safe range and the depth of
+//! the anchor walk rather than the live head. Head latency is therefore zero, at
+//! the cost of ingesting blocks a reorg can still remove, which is why
+//! [`ReorgService::check_anchor`] runs first on every tick and a rewind emits a
+//! retraction signal for consumers.
 
 use crate::adapters::DynRpc;
 use crate::app::config::ChainConfig;
@@ -47,7 +47,7 @@ pub struct LiveServiceImpl {
 enum Plan {
     /// Cursor is at tip.
     UpToDate,
-    /// Too far behind for a tail; hand back to backfill.
+    /// Too far behind for a tail, so control returns to backfill.
     Lagging {
         lag: i64,
     },
@@ -60,8 +60,8 @@ enum Plan {
 impl LiveServiceImpl {
     /// Re-verify the anchor and rewind if the chain has moved under us.
     ///
-    /// Returns `Some` when a rewind happened, in which case the tick stops:
-    /// the cursor has changed and the next tick re-derives from it.
+    /// Returns `Some` when a rewind happened, in which case the tick stops: the
+    /// cursor has changed and the next tick re-derives from it.
     async fn settle_reorg(&self) -> Result<Option<TickOutcome>, IngesterError> {
         let chain_id = self.cfg.chain_id;
         let Some(divergence) = self
@@ -94,23 +94,23 @@ impl LiveServiceImpl {
         if from > tip {
             return Ok(Plan::UpToDate);
         }
-        // Far enough behind that chunked, parallel backfill is the right tool.
-        // Handing control back lets the worker re-enter it instead of grinding
-        // through the gap one poll interval at a time.
+        // Far enough behind that chunked, parallel backfill applies. Handing
+        // control back lets the worker re-enter it rather than closing the gap one
+        // poll interval at a time.
         let lag = tip - last_scanned;
         if lag > self.cfg.backfill_threshold as i64 {
             return Ok(Plan::Lagging { lag });
         }
-        // Cap the span even inside the threshold: after a stall the gap can
-        // still be wider than a provider will serve in one `eth_getLogs`.
+        // Cap the span even inside the threshold: after a stall the gap can still
+        // exceed what a provider serves in one `eth_getLogs`.
         let to = tip.min(from + self.cfg.chunk_blocks as i64 - 1);
         Ok(Plan::Scan { from, to })
     }
 
     async fn scan(&self, from: i64, to: i64) -> Result<TickOutcome, IngesterError> {
         let chain_id = self.cfg.chain_id;
-        // The same adaptive fetcher the backfill uses, so a provider-side
-        // range cap narrows the window instead of failing the tick.
+        // The same adaptive fetcher the backfill uses, so a provider-side range
+        // cap narrows the window rather than failing the tick.
         let logs = fetch_adaptive(&self.rpc, self.pool_addr, from as u64, to as u64).await?;
         if logs.is_empty() {
             self.ingest.advance_empty(chain_id, to).await?;
@@ -121,10 +121,9 @@ impl LiveServiceImpl {
         let rows = logs_to_rows(chain_id, logs, &block_meta)?;
         let inserted = self.ingest.commit_batch(chain_id, &rows, to).await?;
 
-        // Live path only. `commit_batch` also serves the backfill, where the
-        // age is the age of history rather than of the head, and mixing the two
-        // would make the histogram unreadable in exactly the situation it is
-        // meant to explain.
+        // Live path only. `commit_batch` also serves the backfill, where the age
+        // is that of history rather than of the head, and mixing the two would
+        // make the histogram unreadable.
         if let Some(newest) = rows.iter().map(|r| r.block_ts).max() {
             record_event_age(stage::INGEST, chain_id, newest);
         }
@@ -150,9 +149,9 @@ impl LiveService for LiveServiceImpl {
     }
 
     async fn tick(&self) -> Result<TickOutcome, IngesterError> {
-        // Reorg check first. The cursor only means anything while the block it
-        // anchors to is still canonical, so scanning forward from an
-        // unverified cursor would extend a dead branch.
+        // Reorg check first. The cursor is only meaningful while the block it
+        // anchors to is canonical, so scanning forward from an unverified cursor
+        // would extend an abandoned branch.
         if let Some(outcome) = self.settle_reorg().await? {
             return Ok(outcome);
         }

@@ -38,5 +38,5 @@ utoipa-swagger-ui = { workspace = true }
 moka = { workspace = true }
 
 [build-dependencies]
-vergen = { version = "8", features = ["build", "cargo", "git", "git2", "rustc"] }
+vergen-gix = { workspace = true }
 anyhow = { workspace = true }

@@ -17,14 +17,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
-/// Floor on how often a standby retries, and how often the leader re-checks
-/// its own lock. `block_poll_ms` can be very small; polling Postgres that hard
-/// buys nothing here.
+/// Floor on how often a standby retries and how often the leader re-checks its
+/// own lock. `block_poll_ms` can be very small, and polling Postgres at that rate
+/// adds nothing.
 const LOCK_POLL_FLOOR: Duration = Duration::from_secs(1);
 
-/// Why a worker stopped. The supervisor restarts on [`WorkerExit::LockLost`]
-/// so the process re-queues for the chain instead of abandoning it, and stops
-/// on [`WorkerExit::Shutdown`].
+/// Why a worker stopped. The supervisor restarts on [`WorkerExit::LockLost`] so
+/// the process re-queues for the chain, and stops on [`WorkerExit::Shutdown`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerExit {
     Shutdown,
@@ -45,8 +44,8 @@ pub async fn run_inner(
     let lock_poll = Duration::from_millis(deps.cfg.block_poll_ms).max(LOCK_POLL_FLOOR);
     info!(
         chain_id,
-        // Never the raw URL: Alchemy, Infura and QuickNode all put the API key
-        // in the path, and this line goes to every log consumer.
+        // Never the raw URL: Alchemy, Infura and QuickNode all place the API key
+        // in the path, and this line reaches every log consumer.
         rpc_url = %redact_url(&deps.cfg.rpc_url),
         pool_address = %deps.cfg.pool_address,
         start_block = deps.cfg.start_block,
@@ -56,7 +55,7 @@ pub async fn run_inner(
     let lock = if take_lock {
         match acquire(&deps.database_url, chain_id, lock_poll, shutdown.clone()).await? {
             Some(lock) => Some(lock),
-            // Shutdown arrived while standing by; there is nothing to run.
+            // Shutdown arrived while standing by, so there is nothing to run.
             None => return Ok(WorkerExit::Shutdown),
         }
     } else {
@@ -67,10 +66,10 @@ pub async fn run_inner(
     let body = chain.ingest();
 
     match lock {
-        // Stop the moment the lock goes away rather than keep writing beside
-        // whichever replica has taken over. Cancelling mid-batch is safe:
-        // every write is transactional and `ON CONFLICT`-idempotent, so the
-        // new leader redoes it.
+        // Stop as soon as the lock goes away rather than write alongside whichever
+        // replica has taken over. Cancelling mid-batch is safe: every write is
+        // transactional and idempotent under `ON CONFLICT`, so the new leader
+        // redoes it.
         Some(lock) => tokio::select! {
             r = body => r.map(|()| WorkerExit::Shutdown),
             () = until_lock_lost(lock, lock_poll) => {
@@ -95,7 +94,7 @@ pub async fn run_inner(
 /// Block until this process owns the chain, or shutdown is signalled.
 ///
 /// Retrying rather than returning is what makes a standby replica useful: it
-/// sits here until the leader exits or dies, then picks up the chain.
+/// waits here until the leader exits or dies, then takes the chain.
 async fn acquire(
     database_url: &str,
     chain_id: i64,
@@ -119,14 +118,14 @@ async fn acquire(
                     () = shutdown.recv() => return Ok(None),
                 }
             }
-            // Advisory errors are connection failures; surface them as db errors.
+            // Advisory errors are connection failures, surfaced as db errors.
             Err(e) => return Err(IngesterError::Db(e.to_string())),
         }
     }
 }
 
-/// Resolves once the lock connection stops answering — the lock is then gone
-/// server-side and a standby may already have taken the chain.
+/// Resolves once the lock connection stops answering, at which point the lock is
+/// gone server-side and a standby may already hold the chain.
 async fn until_lock_lost(mut lock: ChainLock, poll: Duration) {
     loop {
         tokio::time::sleep(poll).await;
@@ -136,7 +135,7 @@ async fn until_lock_lost(mut lock: ChainLock, poll: Duration) {
     }
 }
 
-/// One chain's ingest pipeline, with the lock plumbing left behind.
+/// One chain's ingest pipeline, without the lock plumbing.
 struct Chain {
     cfg: ChainConfig,
     pool_addr: Address,
@@ -178,9 +177,8 @@ impl Chain {
 
     /// Alternate between catch-up and live tail for the life of the worker.
     ///
-    /// The loop is the point: backfill used to run exactly once, at startup,
-    /// so a worker that fell behind afterwards ground through the gap one poll
-    /// interval at a time with no chunking and no parallelism.
+    /// Looping means a worker that falls behind after startup re-enters chunked,
+    /// parallel backfill rather than closing the gap one poll interval at a time.
     ///
     /// Never returns `Ok`; it ends only on error or cancellation.
     async fn ingest(&self) -> Result<(), IngesterError> {
@@ -196,16 +194,16 @@ impl Chain {
     /// Backfill up to a reorg-safe height, if far enough behind to be worth it.
     async fn catch_up(&self) -> Result<(), IngesterError> {
         let chain_id = self.cfg.chain_id;
-        let last_scanned = self
-            .chain_state
-            .fetch(chain_id)
-            .await?
+        // The cursor comes from Postgres and the tip from the RPC provider, so the
+        // two round trips overlap rather than sum.
+        let (cursor, tip) = tokio::try_join!(self.chain_state.fetch(chain_id), self.rpc.tip())?;
+        let last_scanned = cursor
             .map(|c| c.last_scanned_block)
             .unwrap_or(self.cfg.start_block - 1);
-        let tip = self.rpc.tip().await? as i64;
-        // In i64 throughout: `last_scanned` is -1 before the first commit, and
-        // casting that to u64 made the lag u64::MAX and silently skipped
-        // backfill entirely.
+        let tip = tip as i64;
+        // Computed in i64 throughout: `last_scanned` is -1 before the first
+        // commit, and casting that to u64 would make the lag `u64::MAX` and skip
+        // backfill.
         let lag = tip - last_scanned;
         info!(chain_id, last_scanned, tip, lag, "chain state resolved");
 

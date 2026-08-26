@@ -15,7 +15,10 @@ export STACK_ENV := env_var_or_default("STACK_ENV", "dev")
 export DEBUG := env_var_or_default("DEBUG", "0")
 export TRACE := env_var_or_default("TRACE", "0")
 
-CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.10.0")
+# v0.11.2 is the first release carrying `4x4_verification_key.json`. The
+# relayer's transact DTOs are 4x4, so an older pin has no key that matches the
+# deployed verifier — see `transact_vkey_path` in config/*/relayer.toml.
+CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.11.2")
 DC := "docker compose"
 
 default:

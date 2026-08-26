@@ -15,9 +15,8 @@ mod wire_contract {
     //! `services/relayer/codec.ts` emits.
     //!
     //! Every field here is named on one side and consumed on the other, so a
-    //! rename that lands in only one repo is invisible until a wallet gets a
-    //! 422 in production. Deserializing the literal JSON is what makes that a
-    //! compile-time-adjacent failure instead.
+    //! rename landing in only one repo would otherwise surface as a 422 in
+    //! production. Deserializing the literal JSON turns it into a test failure.
 
     use super::*;
 
@@ -70,8 +69,8 @@ mod wire_contract {
             "cvDep": ["23", "24"],
             "rcv": "27",
             // The deposit's second leaf. `feeIn` is a JSON number here and a
-            // decimal string on `/v1/deposit` — the two DTOs declare it
-            // differently, and `codec.ts` encodes each accordingly.
+            // decimal string on `/v1/deposit`: the two DTOs declare it
+            // differently and `codec.ts` encodes each accordingly.
             "feeIn": 5,
             "feeCm": "0x06",
             "feeCvDep": ["25", "26"],
@@ -94,8 +93,8 @@ mod wire_contract {
         assert_eq!(p.aux.len(), TRANSACT_OUT);
     }
 
-    /// The three arity-bearing arrays are fixed-size, so a 2x2 wallet's
-    /// payload must be rejected rather than silently truncated.
+    /// The three arity-bearing arrays are fixed-size, so a 2x2 wallet's payload is
+    /// rejected rather than truncated.
     #[test]
     fn a_two_output_spend_payload_is_refused() {
         let mut pi = pub_inputs();
@@ -110,11 +109,8 @@ mod wire_contract {
         assert!(serde_json::from_value::<SubmitSpendPayload>(raw).is_err());
     }
 
-    /// The shape this relayer actually drifted to: it stayed at 3x3 while the
-    /// contracts, the circuit and the SDK moved to 4x4, and every spend was
-    /// refused at the JSON boundary with no shape error to point at. Rejection
-    /// is correct — being *pinned* to the deployed arity is the point — so
-    /// this asserts the refusal rather than the drift.
+    /// A 3x3 payload against the deployed 4x4 arity. Rejection at the JSON
+    /// boundary is the intended behaviour, so this asserts the refusal.
     #[test]
     fn a_three_output_spend_payload_is_refused() {
         let mut pi = pub_inputs();

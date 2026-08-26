@@ -23,8 +23,7 @@ diesel = { workspace = true }
 diesel-async = { workspace = true }
 alloy = { workspace = true }
 axum = { workspace = true }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
+test-support = { path = "../test-support" }
 serde_json = { workspace = true }
 hex = { workspace = true }
 ark-ff = { workspace = true }

@@ -1,14 +1,14 @@
 //! Circom-compatible Poseidon permutation over BN254.
 //!
-//! Round constants and the MDS matrix come from `light-poseidon`'s
-//! `bn254_x5` tables, so this is the same instance circomlib specifies — only
-//! the evaluation is ours. `light-poseidon` re-parses those tables into a
-//! fresh hasher per call, allocates a `Vec` for the state on every round, and
-//! raises to the fifth power through the generic `Field::pow`. At one hash per
-//! (note, subscription, bit) the filter feels all three.
+//! Round constants and the MDS matrix come from `light-poseidon`'s `bn254_x5`
+//! tables, so this is the instance circomlib specifies; only the evaluation
+//! differs. `light-poseidon` re-parses those tables into a fresh hasher per
+//! call, allocates a `Vec` for the state on every round, and raises to the fifth
+//! power through the generic `Field::pow`, all of which is significant at one
+//! hash per (note, subscription, bit).
 //!
-//! Equivalence with `light-poseidon` is asserted directly, over every
-//! supported arity, in `super::tests`.
+//! `super::tests` asserts equivalence with `light-poseidon` over every supported
+//! arity.
 
 use super::PoseidonError;
 use super::sparse::Schedule;
@@ -21,9 +21,9 @@ pub(super) const MAX_WIDTH: usize = 13;
 
 /// `x^5`, the circomlib S-box.
 ///
-/// Spelled out rather than `x.pow([5])`: the generic version walks the bits of
-/// the exponent, which costs a loop and a branch per bit to reach the same
-/// three multiplications.
+/// Spelled out rather than `x.pow([5])`, which walks the bits of the exponent
+/// and costs a loop and a branch per bit to reach the same three
+/// multiplications.
 #[inline(always)]
 fn pow5(x: Fq) -> Fq {
     let x2 = x.square();
@@ -31,21 +31,21 @@ fn pow5(x: Fq) -> Fq {
     x4 * x
 }
 
-/// Longest run of products `sum_of_products` can accumulate before it has to
-/// reduce, for this field: `2 * (64 * N - modulus_bits) - 1`, which is
-/// `2 * (256 - 254) - 1` for BN254.
+/// Longest run of products `sum_of_products` can accumulate before reducing, for
+/// this field: `2 * (64 * N - modulus_bits) - 1`, which is `2 * (256 - 254) - 1`
+/// for BN254.
 const SOP_CHUNK: usize = 3;
 
 /// Dot product with lazy Montgomery reduction.
 ///
-/// `Fp::sum_of_products` interleaves the multiplications with the reduction, so
-/// a run of terms costs one reduction rather than one per term. It takes fixed
-/// -size arrays, and our width is only known at runtime, so the run length is
-/// spelled out here. Every row of the MDS and the first row of each sparse
-/// matrix is such a dot product.
+/// `Fp::sum_of_products` interleaves the multiplications with the reduction, so a
+/// run of terms costs one reduction rather than one per term. It takes
+/// fixed-size arrays while the width is known only at runtime, so the run length
+/// is fixed here. Every row of the MDS and the first row of each sparse matrix is
+/// such a dot product.
 ///
-/// Passing the whole row to `sum_of_products` and letting it chunk internally
-/// was measured 4% slower than this explicit walk, so the chunking stays here.
+/// Chunking explicitly measured 4% faster than passing the whole row to
+/// `sum_of_products`.
 #[inline(always)]
 pub(super) fn dot(a: &[Fq], b: &[Fq]) -> Fq {
     let mut lhs = a.chunks_exact(SOP_CHUNK);
@@ -53,7 +53,7 @@ pub(super) fn dot(a: &[Fq], b: &[Fq]) -> Fq {
 
     let mut acc = Fq::ZERO;
     for (x, y) in lhs.by_ref().zip(rhs.by_ref()) {
-        // Borrow rather than copy the chunk: `sum_of_products` wants `&[_; N]`,
+        // Borrow rather than copy the chunk: `sum_of_products` takes `&[_; N]`,
         // and an owned array would memcpy `SOP_CHUNK` field elements per term.
         let x: &[Fq; SOP_CHUNK] = x.try_into().expect("chunks_exact yields SOP_CHUNK");
         let y: &[Fq; SOP_CHUNK] = y.try_into().expect("chunks_exact yields SOP_CHUNK");
@@ -126,8 +126,8 @@ impl Circom {
             });
         }
 
-        // Stack-allocated: `MAX_WIDTH` field elements is 416 bytes, and this
-        // keeps the whole permutation free of heap traffic.
+        // Stack-allocated: `MAX_WIDTH` field elements is 416 bytes, keeping the
+        // permutation free of heap traffic.
         let mut state = [Fq::ZERO; MAX_WIDTH];
         state[1..self.width].copy_from_slice(inputs);
         self.permute(&mut state);
@@ -145,7 +145,7 @@ impl Circom {
             self.mix(state, &mut scratch);
             round += 1;
         }
-        // Partial block, rewritten: one dense multiply by `P` in front, then a
+        // Partial block, rewritten as one dense multiply by `P` followed by a
         // sparse multiply per round. See `super::sparse`.
         let t = self.width;
         let sched = &self.schedule;
@@ -157,8 +157,8 @@ impl Circom {
         for r in 0..self.partial_rounds {
             state[0] = pow5(state[0]);
             sched.apply_sparse(r, &mut state[..t]);
-            // The last round's successor constant belongs to the full round
-            // that follows, which adds it the normal way.
+            // The last round's successor constant belongs to the following full
+            // round, which adds it directly.
             if r + 1 < self.partial_rounds {
                 for (s, f) in state[..t].iter_mut().zip(sched.folded(r + 1)) {
                     *s += f;
@@ -189,8 +189,8 @@ impl Circom {
         }
     }
 
-    /// `state <- MDS * state`, through a scratch buffer so no allocation is
-    /// needed to avoid aliasing.
+    /// `state <- MDS * state`, through a scratch buffer to avoid aliasing without
+    /// allocating.
     #[inline(always)]
     fn mix(&self, state: &mut [Fq; MAX_WIDTH], scratch: &mut [Fq; MAX_WIDTH]) {
         let t = self.width;

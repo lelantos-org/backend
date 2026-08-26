@@ -11,14 +11,14 @@ pub async fn list(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<Ass
     cache
         .try_get_with(chain_id, async move {
             let rows = assets::list(&st.pool, chain_id).await?;
-            // Hex once per asset: it is both the price-lookup key and the
-            // wire field.
+            // Hex-encode once per asset: it serves as both the price-lookup key
+            // and the wire field.
             let keyed: Vec<(TokenKey, _)> = rows
                 .into_iter()
                 .map(|a| ((a.chain_id, hex::encode(&a.token)), a))
                 .collect();
-            // One upstream call for the whole registry, and only for tokens
-            // the price cache has not already answered for.
+            // One upstream call for the whole registry, covering only tokens the
+            // price cache has not already answered for.
             let prices = super::prices::for_tokens(
                 &st,
                 &keyed.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),

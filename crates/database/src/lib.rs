@@ -1,15 +1,15 @@
 //! Database layer.
 //!
-//! Owns the diesel schema + migrations, the bb8 async pool, and shared
-//! repository traits used by every indexer/webserver. Contains no business
-//! logic and no domain enums beyond what the schema requires.
+//! Owns the diesel schema and migrations, the bb8 async pool, and the
+//! repository traits shared by every indexer and webserver. Contains no
+//! business logic and no domain enums beyond what the schema requires.
 //!
 //! Layering:
 //!   - May import: `shared`.
-//!   - Must NOT import: any indexer, webserver, relayer, or service crate.
+//!   - Must not import: any indexer, webserver, relayer, or service crate.
 //!   - Repository traits defined here are the canonical contract; per-crate
-//!     impls should live next to their domain only when the storage shape
-//!     differs from a shared concept.
+//!     impls belong next to their domain only when the storage shape differs
+//!     from the shared concept.
 
 pub mod advisory;
 pub mod cursor;

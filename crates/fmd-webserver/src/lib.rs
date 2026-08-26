@@ -1,7 +1,7 @@
 //! FMD webserver.
 //!
-//! Layered binary; see `backend/ARCHITECTURE.md`. Read-only HTTP API for
-//! notes, matches, subscriptions, and tree proofs. Error type comes from
+//! Layered binary; see `backend/ARCHITECTURE.md`. Read-only HTTP API for notes,
+//! matches, subscriptions and tree state, using the error type from
 //! `shared::http`.
 
 pub mod app;

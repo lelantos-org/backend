@@ -10,9 +10,8 @@ pub mod subscriptions;
 
 /// Check a connection out of the pool.
 ///
-/// Every repository method starts with this. Behind a helper so the
-/// pool-error mapping is written once and the methods below open with the
-/// query they actually run.
+/// Every repository method starts with this, so the pool-error mapping is written
+/// once and each method opens with the query it runs.
 pub(crate) async fn conn(pool: &DbPool) -> Result<DbConn<'_>> {
     pool.get()
         .await

@@ -7,27 +7,26 @@ use axum::extract::State;
 
 /// Health, configuration, and the registered assets for every chain.
 ///
-/// This is the registry a client boots from: the relayer is the only service
-/// that already enumerates every chain, so publishing the wallet-facing half
-/// of its config here — plus the asset list explorer-indexer maintains — is
-/// what lets a deployment add a chain without rebuilding any frontend, and
-/// what removes a per-token RPC read from every client.
+/// The registry a client boots from. The relayer is the only service that already
+/// enumerates every chain, so publishing the wallet-facing half of its config
+/// here, together with the asset list explorer-indexer maintains, lets a
+/// deployment add a chain without rebuilding any frontend and removes a per-token
+/// RPC read from every client.
 ///
-/// A chain the operator has not described yet still appears, carrying only
-/// its live readings; omitted fields leave the client on its own defaults
-/// rather than on a guess.
+/// A chain the operator has not described still appears, carrying only its live
+/// readings; omitted fields leave the client on its own defaults.
 pub async fn chains(State(st): State<AppState>) -> AppResult<Json<ChainsResponse>> {
     let mut chains = Vec::with_capacity(st.spend_pipelines.len());
     for (chain_id, pipeline) in st.spend_pipelines.iter() {
-        // Through the shared registry rather than the pool: this route is what
-        // every wallet boots from, and the relayer holds four connections.
+        // Through the shared registry rather than the pool: every wallet boots
+        // from this route and the relayer holds four connections.
         let assets = st.assets.for_chain(*chain_id).await?;
         let tokens: Vec<TokenOut> = assets.iter().map(TokenOut::from).collect();
 
-        // Read the published snapshot rather than the mirror itself. The
-        // mirror mutex is held from reserve through prove and confirmation, so
-        // locking it here would park the endpoint every wallet boots from
-        // behind whatever submission is in flight.
+        // Read the published snapshot rather than the mirror itself. The mirror
+        // mutex is held from reserve through prove and confirmation, so locking it
+        // here would park the boot endpoint behind whatever submission is in
+        // flight.
         let snapshot = &pipeline.snapshot;
         chains.push(ChainHealth {
             chain_id: *chain_id,

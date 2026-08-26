@@ -15,8 +15,8 @@ pub struct MatchOut {
 
 /// Verdict for one address.
 ///
-/// `address` echoes the *normalized* form, not what the caller sent, so a
-/// caller can tell which key the answer is about.
+/// `address` echoes the normalized form rather than what the caller sent, so the
+/// caller can identify which key the answer is about.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenOut {
@@ -24,7 +24,7 @@ pub struct ScreenOut {
     pub address: String,
     /// Highest risk across `matches`, or `none` when there are no matches.
     pub risk: RiskLevel,
-    /// Derived from `risk`; the authoritative field for callers to branch on.
+    /// Derived from `risk`. The authoritative field for callers to branch on.
     pub blocked: bool,
     pub matches: Vec<MatchOut>,
 }

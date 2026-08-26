@@ -1,7 +1,7 @@
 //! Capability token extraction.
 //!
-//! Tokens are carried in `Authorization` rather than the request URI. Proxies
-//! and CDNs write the URI to access logs by default and browsers retain it in
+//! Tokens are carried in `Authorization` rather than the request URI. Proxies and
+//! CDNs write the URI to access logs by default and browsers retain it in
 //! history; neither applies to a request header.
 
 use crate::domain::error::AppError;
@@ -11,8 +11,8 @@ use axum::extract::FromRequestParts;
 use axum::http::header;
 use axum::http::request::Parts;
 
-/// A token presented as `Authorization: Bearer <hex>`, reduced to the form
-/// the database stores. The raw credential does not outlive extraction.
+/// A token presented as `Authorization: Bearer <hex>`, reduced to the form the
+/// database stores. The raw credential does not outlive extraction.
 pub struct CapabilityToken(TokenHash);
 
 impl CapabilityToken {
@@ -21,9 +21,9 @@ impl CapabilityToken {
     }
 }
 
-/// An absent or non-bearer header is a malformed request: `401`. A well-formed
-/// header naming an unregistered token is `404`, raised by the repository
-/// lookup. The two must stay distinct so the status never reports whether a
+/// An absent or non-bearer header is a malformed request and yields `401`. A
+/// well-formed header naming an unregistered token yields `404` from the
+/// repository lookup. The two stay distinct so the status never reveals whether a
 /// given token exists.
 fn malformed() -> AppError {
     AppError::Unauthorized("expected `Authorization: Bearer <token>`".to_string())
@@ -84,8 +84,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_malformed_token_is_not_distinguishable_from_an_unknown_one() {
-        // `NotFound`, not `Unauthorized`: the header is well-formed, so the
-        // status must not reveal that the token cannot match a row.
+        // `NotFound` rather than `Unauthorized`: the header is well-formed, so
+        // the status must not reveal that the token cannot match a row.
         assert!(matches!(
             extract(Some("Bearer zz")).await,
             Err(AppError::NotFound(_))
