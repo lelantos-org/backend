@@ -80,7 +80,9 @@ pub use shared::tick::Wake;
 /// spurious wake rather than a wait for the consumer's idle ceiling.
 pub fn spawn(database_url: &str, channels: &'static [&'static str]) -> Wake {
     let (tx, rx) = watch::channel(0u64);
-    let url = database_url.to_string();
+    // `LISTEN` is session state, so it must not be multiplexed by a pooler.
+    // See `crate::direct`.
+    let url = crate::direct::url(database_url);
     tokio::spawn(async move { run(url, channels, tx).await });
     rx
 }

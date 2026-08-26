@@ -75,7 +75,10 @@ impl ChainLock {
     /// Try to take the lock for `key`. `Ok(None)` means another process holds
     /// it, which is the standby path rather than an error.
     pub async fn try_acquire(database_url: &str, key: i64) -> AdvisoryResult<Option<Self>> {
-        let mut conn = AsyncPgConnection::establish(database_url)
+        // The lock is session-scoped, so it must not be multiplexed by a
+        // pooler. See `crate::direct`.
+        let url = crate::direct::url(database_url);
+        let mut conn = AsyncPgConnection::establish(&url)
             .await
             .map_err(|e| AdvisoryError::Connect(e.to_string()))?;
         let got: LockAcquired =

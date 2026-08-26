@@ -160,9 +160,13 @@ mod tests {
     ///
     /// A missing file is a hard failure rather than a skip, so a renamed fixture
     /// cannot stop these tests from running unnoticed.
+    ///
+    /// The file is vendored from `contracts/test/fixtures/transact_4x4_vector.json`
+    /// because this repository is checked out on its own in CI, where the
+    /// contracts tree is not present.
     fn vectors() -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../contracts/test/fixtures/transact_4x4_vector.json");
+            .join("../../tests/vectors/transact_4x4.json");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("published vectors missing at {}: {e}", path.display()));
         serde_json::from_str(&raw).expect("published vectors parse")
