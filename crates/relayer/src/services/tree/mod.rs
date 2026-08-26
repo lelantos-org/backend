@@ -31,6 +31,8 @@ use tracing::{error, info};
 pub const DEPTH: usize = 10;
 /// Quaternary tree, so `ARITY^DEPTH` leaves. Mirrors `MASP.MAX_LEAVES`.
 const MAX_LEAVES: usize = 4usize.pow(DEPTH as u32);
+/// Leaves read per round trip during [`TreeMirror::bootstrap`].
+const LEAF_PAGE: i64 = 100_000;
 /// Domain-separation tag for Merkle leaf hashing, mirroring `TAG_LEAF` in
 /// `circuits/src/lib/tags.circom`. `leaf = Poseidon(TAG_LEAF, cm, cv_dep_x,
 /// cv_dep_y)`, so a spender can rebuild the same leaf hash from `(cm, cv_dep)`
@@ -209,36 +211,52 @@ impl TreeMirror {
     pub async fn bootstrap(&mut self, pool: &DbPool) -> AppResult<()> {
         info!(chain_id = self.chain_id, "tree mirror bootstrap start");
         let mut conn = crate::repositories::conn(pool).await?;
-        let rows: Vec<LeafInputsRow> = notes::table
-            .filter(notes::chain_id.eq(self.chain_id))
-            .order(notes::leaf_index.asc())
-            .select(LeafInputsRow::as_select())
-            .load(&mut conn)
-            .await
-            .map_err(|e| AppError::Db(e.to_string()))?;
-
-        // Check row contiguity sequentially, which is cheap, then hash leaves in
-        // parallel: `leaf_hash` is a pure Poseidon call, independent per row.
-        for (i, row) in rows.iter().enumerate() {
-            if row.leaf_index != i as i64 {
-                return Err(AppError::Internal(format!(
-                    "tree desync chain {}: notes row {} has leaf_index {}",
-                    self.chain_id, i, row.leaf_index
-                )));
+        // Paged by `leaf_index` rather than loaded whole: a chain with millions of
+        // notes would otherwise hold every leaf in one query result and one Vec
+        // before the first hash runs.
+        // Doubles as the page cursor and, once the loop ends, the leaf count.
+        let mut appended: i64 = 0;
+        loop {
+            let rows: Vec<LeafInputsRow> = notes::table
+                .filter(notes::chain_id.eq(self.chain_id))
+                .filter(notes::leaf_index.ge(appended))
+                .filter(notes::leaf_index.lt(appended + LEAF_PAGE))
+                .order(notes::leaf_index.asc())
+                .select(LeafInputsRow::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Db(e.to_string()))?;
+            if rows.is_empty() {
+                break;
             }
+
+            // Check row contiguity sequentially, which is cheap, then hash leaves
+            // in parallel: `leaf_hash` is a pure Poseidon call, independent per
+            // row. `appended` carries the running leaf index across pages, so a gap at
+            // a page boundary is caught like any other.
+            for (i, row) in rows.iter().enumerate() {
+                let expected = appended + i as i64;
+                if row.leaf_index != expected {
+                    return Err(AppError::Internal(format!(
+                        "tree desync chain {}: notes row {} has leaf_index {}",
+                        self.chain_id, expected, row.leaf_index
+                    )));
+                }
+            }
+            let leaves: Vec<Field> = rows
+                .par_iter()
+                .map(|row| {
+                    let cm_f = vec_to_field(&row.cm)?;
+                    let cv_x = bigdecimal_to_u256(&row.cv_dep_x)?;
+                    let cv_y = bigdecimal_to_u256(&row.cv_dep_y)?;
+                    leaf_hash(&cm_f, &[cv_x, cv_y])
+                })
+                .collect::<AppResult<Vec<Field>>>()?;
+            appended += rows.len() as i64;
+            self.tree
+                .extend(leaves)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         }
-        let leaves: Vec<Field> = rows
-            .par_iter()
-            .map(|row| {
-                let cm_f = vec_to_field(&row.cm)?;
-                let cv_x = bigdecimal_to_u256(&row.cv_dep_x)?;
-                let cv_y = bigdecimal_to_u256(&row.cv_dep_y)?;
-                leaf_hash(&cm_f, &[cv_x, cv_y])
-            })
-            .collect::<AppResult<Vec<Field>>>()?;
-        self.tree
-            .extend(leaves)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
         self.publish();
 
         // The latest `tree_advances.new_root` must match the local root.
@@ -270,7 +288,7 @@ impl TreeMirror {
 
         info!(
             chain_id = self.chain_id,
-            leaves = rows.len(),
+            leaves = appended,
             roots = self.recent_roots.len(),
             "tree mirror replayed notes"
         );

@@ -21,14 +21,16 @@ pub async fn prices(State(st): State<AppState>) -> AppResult<Json<PricesResponse
     let cached = st.prices_response.clone();
     let rows = cached
         .try_get_with((), async move {
-            let mut keys = Vec::new();
+            // One query for every configured chain: a per-chain call would take a
+            // pooled connection each, and the relayer pool holds four.
+            let chain_ids: Vec<i64> = st.spend_pipelines.keys().copied().collect();
             // Hex once per asset: it is both the price-lookup key and, with a
             // `0x`, the wire field.
-            for chain_id in st.spend_pipelines.keys() {
-                for row in assets::list_for_chain(&st.pool, *chain_id).await? {
-                    keys.push((*chain_id, hex::encode(&row.token)));
-                }
-            }
+            let keys: Vec<TokenKey> = assets::list_for_chains(&st.pool, &chain_ids)
+                .await?
+                .into_iter()
+                .map(|(chain_id, row)| (chain_id, hex::encode(&row.token)))
+                .collect();
 
             // One upstream call for every chain at once, and only for tokens the
             // cache has not already answered for.

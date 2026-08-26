@@ -20,6 +20,9 @@ use tokio::sync::Mutex;
 
 const DEPTH: usize = 10;
 
+/// Leaves fetched per round trip while the mirror catches up.
+const LEAF_PAGE: i64 = 100_000;
+
 fn vec_to_field(v: &[u8]) -> AppResult<Field> {
     fmd_crypto::tree::field_from_bytes(v).map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -101,11 +104,27 @@ async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> A
         return Ok(());
     }
 
-    let rows = notes::list_leaf_inputs(pool, chain_id, from, None).await?;
-    append_leaves(&mut mirror.tree, &rows)?;
+    // Paged rather than one statement: a cold build for a chain with millions of
+    // notes would otherwise materialise every leaf at once, in the query and in
+    // the Vec it loads into. `append_leaves` re-reads the tree's leaf count on
+    // each call, so consecutive pages line up and the contiguity check still
+    // covers every leaf.
+    let mut appended = 0usize;
+    let mut next = from;
+    while next < db_leaves {
+        let rows = notes::list_leaf_inputs(pool, chain_id, next, Some(next + LEAF_PAGE)).await?;
+        // A short page means the tip moved under us or a leaf is missing; the
+        // latter fails the contiguity check on the next append.
+        if rows.is_empty() {
+            break;
+        }
+        next += rows.len() as i64;
+        appended += rows.len();
+        append_leaves(&mut mirror.tree, &rows)?;
+    }
     tracing::debug!(
         chain_id,
-        appended = rows.len(),
+        appended,
         leaf_count = mirror.tree.leaf_count(),
         "tree mirror advanced"
     );

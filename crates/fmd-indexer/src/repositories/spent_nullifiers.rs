@@ -32,6 +32,18 @@ struct SeqSpentNullifier {
     seq: i64,
 }
 
+/// One row of the dedup-and-high-water probe. `max_seq` repeats on every row;
+/// the coordinates are `NULL` on the single row a range with no matches yields.
+#[derive(QueryableByName)]
+struct SeqProbeRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    max_seq: i64,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+    block_number: Option<i64>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
+    log_index: Option<i32>,
+}
+
 #[async_trait]
 pub trait SpentNullifiersRepo: Send + Sync {
     async fn insert_batch(&self, rows: &[NewSpentNullifier]) -> Result<usize>;
@@ -78,14 +90,35 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
 
         let mut conn = super::conn(&self.pool).await?;
 
-        let stored: HashSet<(i64, i32)> = spent_nullifiers::table
-            .filter(spent_nullifiers::chain_id.eq(chain_id))
-            .filter(spent_nullifiers::block_number.ge(min_block))
-            .filter(spent_nullifiers::block_number.le(max_block))
-            .select((spent_nullifiers::block_number, spent_nullifiers::log_index))
-            .load::<(i64, i32)>(&mut conn)
-            .await?
-            .into_iter()
+        // The already-stored coordinates and the chain's high-water `seq` in one
+        // statement. The `LEFT JOIN` onto a one-row aggregate keeps `max_seq`
+        // available even when the range holds nothing, and reading both at the
+        // same instant makes them a consistent pair rather than two snapshots a
+        // round trip apart.
+        let observed = diesel::sql_query(
+            "WITH hi AS ( \
+                 SELECT COALESCE(MAX(seq), -1) AS max_seq \
+                   FROM spent_nullifiers WHERE chain_id = $1 \
+             ) \
+             SELECT hi.max_seq, s.block_number, s.log_index \
+               FROM hi \
+               LEFT JOIN spent_nullifiers s \
+                 ON s.chain_id = $1 \
+                AND s.block_number >= $2 \
+                AND s.block_number <= $3",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(chain_id)
+        .bind::<diesel::sql_types::BigInt, _>(min_block)
+        .bind::<diesel::sql_types::BigInt, _>(max_block)
+        .load::<SeqProbeRow>(&mut conn)
+        .await?;
+
+        // Through the slice: `diesel::prelude` puts a `first` in scope that
+        // would otherwise shadow the one wanted here.
+        let next_seq = observed.as_slice().first().map_or(0, |r| r.max_seq + 1);
+        let stored: HashSet<(i64, i32)> = observed
+            .iter()
+            .filter_map(|r| Some((r.block_number?, r.log_index?)))
             .collect();
 
         let mut fresh: Vec<&NewSpentNullifier> = rows
@@ -96,13 +129,6 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
             return Ok(0);
         }
         fresh.sort_by_key(|r| (r.block_number, r.log_index));
-
-        let next_seq = spent_nullifiers::table
-            .filter(spent_nullifiers::chain_id.eq(chain_id))
-            .select(diesel::dsl::max(spent_nullifiers::seq))
-            .first::<Option<i64>>(&mut conn)
-            .await?
-            .map_or(0, |max| max + 1);
 
         let values: Vec<SeqSpentNullifier> = fresh
             .into_iter()

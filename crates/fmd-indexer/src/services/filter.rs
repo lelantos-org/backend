@@ -10,7 +10,7 @@ use crate::domain::error::{FmdIndexerError, Result};
 use crate::repositories::cursor::{CursorRepo, UpsertCursor};
 use crate::repositories::matches::{MatchesRepo, NewMatch};
 use crate::repositories::notes::{NoteRow, NotesRepo};
-use crate::repositories::subscriptions::{SubscriptionRow, SubscriptionsRepo};
+use crate::repositories::subscriptions::{ActiveFingerprint, SubscriptionRow, SubscriptionsRepo};
 use ark_ed_on_bn254::{Fq, Fr};
 use async_trait::async_trait;
 use fmd_crypto::clue::CircomPoint;
@@ -53,6 +53,7 @@ pub struct FilterServiceImpl {
     subscriptions: Arc<dyn SubscriptionsRepo>,
     matches: Arc<dyn MatchesRepo>,
     head: Mutex<LaggedHead>,
+    subscribers: Mutex<Option<Arc<SubscriberSet>>>,
 }
 
 impl FilterServiceImpl {
@@ -68,7 +69,28 @@ impl FilterServiceImpl {
             subscriptions,
             matches,
             head: Mutex::new(LaggedHead::new()),
+            subscribers: Mutex::new(None),
         }
+    }
+
+    /// The active subscriber set, parsed, reused until the table changes.
+    ///
+    /// Reading and parsing it per tick made both costs linear in subscriber
+    /// count on every pass: the rows carry a detection key each, and
+    /// `parse_detection_key` decompresses `gamma` points per key. The
+    /// fingerprint query touches no key and reads no row payload, so the common
+    /// tick pays one aggregate instead.
+    async fn subscribers(&self) -> Result<Arc<SubscriberSet>> {
+        let fingerprint = self.subscriptions.active_fingerprint().await?;
+        let mut slot = self.subscribers.lock().await;
+        if let Some(cached) = slot.as_ref().filter(|c| c.matches(fingerprint)) {
+            return Ok(cached.clone());
+        }
+
+        let rows = self.subscriptions.list_active().await?;
+        let set = Arc::new(SubscriberSet::build(fingerprint, &rows));
+        *slot = Some(set.clone());
+        Ok(set)
     }
 
     /// Scan the notes ingested since this chain's cursor against every active
@@ -87,27 +109,27 @@ impl FilterServiceImpl {
         let progress = TickProgress::from_batch(new_notes.len(), batch);
         let (last_id, last_block) = (last.id, last.block_number);
 
-        let subs = self.subscriptions.list_active().await?;
-        if subs.is_empty() {
+        let subs = self.subscribers().await?;
+        if subs.entries.is_empty() {
             self.advance_cursor(chain_id, last_id, last_block).await?;
             return Ok(progress);
         }
 
-        let outcome = scan(&new_notes, &subs, chain_id).await?;
+        let outcome = scan(&new_notes, &subs.entries, chain_id).await?;
         self.matches.insert_batch(&outcome.hits).await?;
         self.advance_cursor(chain_id, last_id, last_block).await?;
 
-        outcome.stats.warn_unusable();
+        subs.warn_unusable();
         // Emitted unconditionally and at debug. Logging only when hits > 0 would
         // make the log stream a receive-timing side channel; the skip counts are
         // unconditional for the same reason.
         debug!(
             chain_id,
             candidates = new_notes.len(),
-            subs = subs.len(),
+            subs = subs.entries.len(),
             hits = outcome.hits.len(),
             off_curve_notes = outcome.stats.off_curve_notes,
-            invalid_subs = outcome.stats.invalid_subs.len(),
+            invalid_subs = subs.invalid.len(),
             last_id,
             last_block,
             "filter tick"
@@ -152,7 +174,14 @@ impl FilterServiceImpl {
         // `retain` above may have trimmed the batch below `head`, so saturation
         // is measured on what is actually scanned.
         let progress = TickProgress::from_batch(candidates, batch);
-        let subs = [sub];
+        let Some(entry) = sub_entry(&sub) else {
+            // A key that does not parse matches nothing, so the pointer is moved
+            // past this range rather than retried forever on the same rows.
+            warn!(subscription_id = sub_id, "{UNUSABLE_KEY}");
+            self.subscriptions.advance_backfill(sub_id, through).await?;
+            return Ok(progress);
+        };
+        let subs: Arc<[SubEntry]> = vec![entry].into();
         let mut hits: Vec<NewMatch> = Vec::new();
         let mut stats = ScanStats::default();
         // `scan` is per chain, but the pointer is a global note id, so a batch
@@ -166,7 +195,6 @@ impl FilterServiceImpl {
         self.matches.insert_batch(&hits).await?;
         self.subscriptions.advance_backfill(sub_id, through).await?;
 
-        stats.warn_unusable();
         debug!(
             candidates,
             hits = hits.len(),
@@ -292,34 +320,23 @@ impl LaggedHead {
     }
 }
 
-/// Notes and subscriptions `scan` could not use.
+/// Notes `scan` could not use.
 ///
-/// Counted rather than dropped: a subscription whose detection key does not parse
-/// matches nothing permanently, and nothing else reports it.
+/// Counted rather than dropped: an off-curve clue is a note no subscriber can
+/// match, and nothing else reports it.
 #[derive(Default)]
 struct ScanStats {
     off_curve_notes: usize,
-    /// A set, so folding per-chain scans of the same subscriber list reports each
-    /// id once.
-    invalid_subs: BTreeSet<i64>,
 }
 
 impl ScanStats {
     fn absorb(&mut self, other: Self) {
         self.off_curve_notes += other.off_curve_notes;
-        self.invalid_subs.extend(other.invalid_subs);
-    }
-
-    /// Reports ids only, never the key.
-    fn warn_unusable(&self) {
-        if !self.invalid_subs.is_empty() {
-            warn!(
-                subscription_ids = ?self.invalid_subs,
-                "detection key is not gamma * 32 bytes; these subscriptions match nothing"
-            );
-        }
     }
 }
+
+/// What a detection key that does not parse means, said once.
+const UNUSABLE_KEY: &str = "detection key is not gamma * 32 bytes; matches nothing";
 
 struct ScanOutcome {
     hits: Vec<NewMatch>,
@@ -335,10 +352,67 @@ fn group_by_chain(notes: Vec<NoteRow>) -> BTreeMap<i64, Vec<NoteRow>> {
     by_chain
 }
 
+/// One subscriber as `scan` consumes it: id, parsed detection key, gamma.
+type SubEntry = (i64, Arc<[Fr]>, usize);
+
+/// Parse one subscriber's detection key, or `None` when it is not
+/// `gamma * 32` bytes and therefore matches nothing.
+fn sub_entry(row: &SubscriptionRow) -> Option<SubEntry> {
+    let gamma = row.gamma as usize;
+    let dk = fmd_crypto::filter::parse_detection_key(&row.detection_key, gamma)?;
+    Some((row.id, Arc::<[Fr]>::from(dk), gamma))
+}
+
+/// The parsed active subscriber set, with the fingerprint it was built from.
+struct SubscriberSet {
+    fingerprint: ActiveFingerprint,
+    entries: Arc<[SubEntry]>,
+    /// Subscriptions whose key did not parse. Carried so the warning still names
+    /// them without re-parsing on every tick.
+    invalid: BTreeSet<i64>,
+}
+
+impl SubscriberSet {
+    /// Whether this set still describes the table `fingerprint` was taken from.
+    fn matches(&self, fingerprint: ActiveFingerprint) -> bool {
+        self.fingerprint == fingerprint
+    }
+
+    /// Reports ids only, never the key.
+    fn warn_unusable(&self) {
+        if !self.invalid.is_empty() {
+            warn!(subscription_ids = ?self.invalid, "{UNUSABLE_KEY}");
+        }
+    }
+
+    /// Parse every row once, splitting off the keys that do not describe a
+    /// `gamma * 32` byte detection key.
+    fn build(fingerprint: ActiveFingerprint, rows: &[SubscriptionRow]) -> Self {
+        let mut entries = Vec::with_capacity(rows.len());
+        let mut invalid = BTreeSet::new();
+        for row in rows {
+            match sub_entry(row) {
+                Some(e) => entries.push(e),
+                None => {
+                    invalid.insert(row.id);
+                }
+            }
+        }
+        Self {
+            fingerprint,
+            entries: entries.into(),
+            invalid,
+        }
+    }
+}
+
 /// Cartesian product of note by subscription, evaluated in parallel through rayon
 /// on a blocking task. `clueBits` is the first two big-endian bytes of the
 /// ciphertext.
-async fn scan(notes: &[NoteRow], subs: &[SubscriptionRow], chain_id: i64) -> Result<ScanOutcome> {
+///
+/// Takes keys already parsed: the caller holds them across ticks, and parsing is
+/// per-subscriber work that does not depend on the notes being scanned.
+async fn scan(notes: &[NoteRow], subs: &Arc<[SubEntry]>, chain_id: i64) -> Result<ScanOutcome> {
     let mut stats = ScanStats::default();
 
     let note_inputs: Arc<[(i64, Fq, Fq, u16)]> = notes
@@ -358,19 +432,7 @@ async fn scan(notes: &[NoteRow], subs: &[SubscriptionRow], chain_id: i64) -> Res
         .collect::<Vec<_>>()
         .into();
 
-    type SubEntry = (i64, Arc<[Fr]>, usize);
-    let sub_inputs: Arc<[SubEntry]> = subs
-        .iter()
-        .filter_map(|s| {
-            let gamma = s.gamma as usize;
-            let Some(dk) = fmd_crypto::filter::parse_detection_key(&s.detection_key, gamma) else {
-                stats.invalid_subs.insert(s.id);
-                return None;
-            };
-            Some((s.id, Arc::<[Fr]>::from(dk), gamma))
-        })
-        .collect::<Vec<_>>()
-        .into();
+    let sub_inputs = subs.clone();
 
     let hits = tokio::task::spawn_blocking(move || {
         let subs = &*sub_inputs;
@@ -434,6 +496,63 @@ async fn scan(notes: &[NoteRow], subs: &[SubscriptionRow], chain_id: i64) -> Res
 mod tests {
     use super::*;
     use bigdecimal::BigDecimal;
+
+    /// A subscription row with a well-formed `gamma * 32` byte key.
+    fn sub(id: i64, gamma: i32) -> SubscriptionRow {
+        SubscriptionRow {
+            id,
+            detection_key: vec![1u8; gamma as usize * 32],
+            gamma,
+            created_at: chrono::Utc::now(),
+            active: true,
+            backfilled_through_note_id: 0,
+        }
+    }
+
+    #[test]
+    fn a_key_of_the_wrong_width_does_not_parse() {
+        let mut row = sub(1, 3);
+        row.detection_key = vec![0u8; 2 * 32];
+        assert!(sub_entry(&row).is_none(), "gamma is 3, key covers 2");
+        assert!(sub_entry(&sub(1, 3)).is_some());
+    }
+
+    /// An unusable key is recorded once, at build time, and does not displace the
+    /// subscribers that do parse.
+    #[test]
+    fn building_a_set_separates_unusable_keys() {
+        let mut bad = sub(9, 3);
+        bad.detection_key = vec![1u8; 31];
+
+        let set = SubscriberSet::build((2, 9), &[sub(1, 3), bad]);
+
+        assert_eq!(set.entries.len(), 1);
+        assert_eq!(set.entries[0].0, 1);
+        assert!(set.invalid.contains(&9));
+    }
+
+    #[test]
+    fn an_unchanged_fingerprint_reuses_the_parsed_set() {
+        let set = SubscriberSet::build((1, 1), &[sub(1, 3)]);
+        assert!(set.matches((1, 1)));
+    }
+
+    /// A registration raises `max(id)`. Missing it would leave the new subscriber
+    /// unscanned for as long as the process lives.
+    #[test]
+    fn a_new_subscription_invalidates_the_set() {
+        let set = SubscriberSet::build((1, 1), &[sub(1, 3)]);
+        assert!(!set.matches((2, 2)));
+    }
+
+    /// A deregistration lowers the count while `max(id)` can stay put, so the
+    /// count is load-bearing. A stale entry here would make the subscription's
+    /// `matches` insert fail the foreign key rather than conflict.
+    #[test]
+    fn a_deleted_subscription_invalidates_the_set() {
+        let set = SubscriberSet::build((2, 2), &[sub(1, 3), sub(2, 3)]);
+        assert!(!set.matches((1, 2)), "same max id, one fewer row");
+    }
 
     fn note(id: i64, chain_id: i64) -> NoteRow {
         NoteRow {

@@ -58,3 +58,32 @@ pub async fn list_for_chain(pool: &DbPool, chain_id: i64) -> AppResult<Vec<Asset
         .await
         .map_err(|e| AppError::Db(e.to_string()))
 }
+
+/// Every registered asset on each of `chain_ids`, ordered by `(chain_id,
+/// asset_id_u64)`.
+///
+/// One statement and one pooled connection for the whole set. Calling
+/// [`list_for_chain`] per chain costs a checkout each, and the relayer pool has
+/// four connections.
+pub async fn list_for_chains(pool: &DbPool, chain_ids: &[i64]) -> AppResult<Vec<(i64, AssetRow)>> {
+    if chain_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut conn = super::conn(pool).await?;
+    assets::table
+        .filter(assets::chain_id.eq_any(chain_ids))
+        .order((assets::chain_id.asc(), assets::asset_id_u64.asc()))
+        .select((
+            assets::chain_id,
+            (
+                assets::asset_id_u64,
+                assets::token,
+                assets::scale,
+                assets::decimals,
+                assets::symbol,
+            ),
+        ))
+        .load::<(i64, AssetRow)>(&mut conn)
+        .await
+        .map_err(|e| AppError::Db(e.to_string()))
+}

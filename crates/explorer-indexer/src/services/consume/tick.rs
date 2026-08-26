@@ -49,6 +49,14 @@ const METADATA_PER_TICK: i64 = 16;
 /// Each column is fetched only when absent and written only when resolved, so a
 /// token whose `symbol()` reverts still gets its decimals, and neither read can
 /// clear the other's stored value.
+/// Resolve `fut` only when `wanted`, so both calls can sit in one `join!`.
+///
+/// Building the future does not start the call; nothing is sent for the arm that
+/// is not wanted.
+async fn fetch_if<T>(wanted: bool, fut: impl std::future::Future<Output = T>) -> Option<T> {
+    if wanted { Some(fut.await) } else { None }
+}
+
 async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
     let Some(rpc) = ctx.token_meta.get(&chain_id) else {
         return;
@@ -69,19 +77,23 @@ async fn fill_missing_metadata(ctx: &ConsumeCtx, chain_id: i64) {
         let token = Address::from(bytes);
         let mut meta = assets::AssetMetadata::default();
 
-        if row.decimals.is_none() {
-            match rpc.decimals(token).await {
-                Ok(d) => meta.decimals = Some(i16::from(d)),
-                // Left NULL and retried next tick rather than defaulted;
-                // assuming 18 would misreport every amount.
-                Err(e) => warn!(chain_id, asset_id_u64, "decimals() failed: {}", e),
-            }
+        // Two independent `eth_call`s, issued together rather than one round trip
+        // after the other. `None` is a column that already has a value.
+        let (decimals, symbol) = tokio::join!(
+            fetch_if(row.decimals.is_none(), rpc.decimals(token)),
+            fetch_if(row.symbol.is_none(), rpc.symbol(token)),
+        );
+        match decimals {
+            Some(Ok(d)) => meta.decimals = Some(i16::from(d)),
+            // Left NULL and retried next tick rather than defaulted; assuming 18
+            // would misreport every amount.
+            Some(Err(e)) => warn!(chain_id, asset_id_u64, "decimals() failed: {}", e),
+            None => {}
         }
-        if row.symbol.is_none() {
-            match rpc.symbol(token).await {
-                Ok(s) => meta.symbol = Some(s),
-                Err(e) => warn!(chain_id, asset_id_u64, "symbol() failed: {}", e),
-            }
+        match symbol {
+            Some(Ok(s)) => meta.symbol = Some(s),
+            Some(Err(e)) => warn!(chain_id, asset_id_u64, "symbol() failed: {}", e),
+            None => {}
         }
 
         if meta.is_empty() {
