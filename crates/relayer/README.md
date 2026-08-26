@@ -155,7 +155,8 @@ channel behind `/v1/deposits/stream` — 256 slots, dropping oldest for a laggin
 receiver, which is ample at ≤ 8 deposits per tick.
 
 ```
-read pending deposits          oldest first, skipping quarantined ids
+read pending deposits          oldest first, scanning past quarantined
+                               and deferred ids
   └─ pre-flight                escrowed(id) + local digest, before the prover
        └─ tree mirror lock
             ├─ reserve leaves
@@ -164,12 +165,17 @@ read pending deposits          oldest first, skipping quarantined ids
             └─ commit, or roll back and charge the batch
 ```
 
-Two properties shape the two sections below. `flushBatch` is
-**all-or-nothing**: one deposit `_drainDeposit` refuses reverts the batch. And
-the head of the queue is always in the batch, because the ordering is fixed. So
-a single deposit that can never land blocks every newer deposit on its chain —
-and, without a bound, does so forever, rebuilding and reproving the same doomed
-batch every tick.
+Two properties shape the sections below. `flushBatch` is **all-or-nothing**:
+one deposit `_drainDeposit` refuses reverts the batch. And the head of the queue
+is always in the batch, because the ordering is fixed. So a single deposit that
+can never land blocks every newer deposit on its chain — and, without a bound,
+does so forever, rebuilding and reproving the same doomed batch every tick.
+
+The same head-of-queue property applies to deposits the worker merely *declines*
+to flush, such as one whose fee leaf does not pay this relayer. Those are not
+faults and are never quarantined, so the worker instead defers them and the
+mempool query scans past what is excluded rather than stopping at the first
+`flush_max_n` rows. Both are covered under [Failure budget](#failure-budget).
 
 ### Pre-flight
 
@@ -194,6 +200,15 @@ without a node:
   a misconfigured `pool_address`, than a bad deposit — and acting on it would
   take out the whole mempool. Until that proof arrives the mismatches are still
   dropped from the batch, which costs an `eth_call` and no proof.
+* **the fee leaf does not pay us** — not ours to decrypt, malformed, or worth
+  less than this flush costs. Never a fault: `flushBatch` is permissionless, so
+  the deposit remains flushable by the relayer it does pay and reclaimable by
+  its payer. Deferred rather than skipped, since only the payer or a change in
+  gas will alter the verdict; see below.
+* **the flush cannot be priced** — an asset this relayer does not take, or an
+  oracle that is down. The relayer's problem, not the deposit's, so it is
+  dropped from this batch and reconsidered on the next tick, without deferral:
+  the condition is chain-wide and clears on its own.
 
 An RPC failure aborts the tick rather than rejecting anything. A deposit must
 never be judged unflushable because the node was unreachable.
@@ -215,13 +230,38 @@ probably never the deposits' fault.
 Skipping a deposit is safe: it is not lost funds, because the payer can still
 reclaim it with `cancelDeposit` after `cancelDelay`.
 
+### Deferral
+
+A deposit whose fee leaf does not pay this relayer is neither a fault nor
+transient: re-judging it every tick reaches the same verdict, and because the
+queue is ordered by age it holds a slot in the batch window while it does. A few
+such deposits at the head therefore starve every payable deposit behind them,
+indefinitely — until their payers cancel.
+
+So pre-flight defers them (`Verdict::Defer`) instead. A deferred deposit is held
+out of the window for a number of ticks that doubles with each consecutive
+deferral, from two up to a cap of 64, and is then judged from scratch: one that
+became payable — gas fell, or its asset re-priced — is picked up within minutes,
+while one nobody intends to pay for costs a judgement once every 64 ticks. Being
+judged flushable clears the backoff.
+
+Deferral only removes ids from the batch window; on its own it would still leave
+them at the head of the query. `DepositMempool::pop_pending` therefore pages
+forward past every excluded id — quarantined and deferred alike — up to a bounded
+number of rows per tick, rather than reading the oldest `flush_max_n` rows and
+filtering afterwards. A backlog deeper than that bound is walked over successive
+ticks: the deposits ahead of it stay excluded, so each tick resumes where the
+last one was cut off.
+
 ### State
 
 The ledger is re-read every tick, so a restart resumes from whatever the indexer
-has recorded. The one piece of in-process state is the quarantine set, which a
-restart therefore re-admits: deterministic rejections are caught again by the
-next tick's pre-flight, and counted ones have to re-earn their attempts. That is
-the intended trade for keeping the worker free of tables of its own.
+has recorded. The only in-process state is what the worker refuses to batch — the
+quarantine set and the deferrals — which a restart therefore re-admits:
+deterministic rejections are caught again by the next tick's pre-flight, counted
+ones have to re-earn their attempts, and a deferred deposit is re-judged once and
+deferred again. That is the intended trade for keeping the worker free of tables
+of its own.
 
 ## Fee estimation
 

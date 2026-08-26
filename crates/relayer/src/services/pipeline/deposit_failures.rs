@@ -1,27 +1,78 @@
-//! Bounded-attempt tracking for the flush worker.
+//! What the flush worker refuses to batch, and for how long.
 //!
 //! `flushBatch` is all-or-nothing and `pop_pending` returns the oldest deposits
-//! first, so one deposit that can never land blocks every newer deposit on its
-//! chain, at the cost of a `tree_update_batch` Groth16 per tick. This lets the
-//! pipeline give up on one deposit rather than on the chain.
+//! first, so a deposit the worker keeps declining occupies the batch window and
+//! blocks every newer deposit on its chain. Two kinds of deposit do that, and
+//! they are held apart here:
 //!
-//! Giving up is safe because a stuck deposit is not lost: the payer can reclaim
-//! it with `cancelDeposit` once `cancelDelay` has passed.
+//!   * **Quarantined** — it can never land, and its own fields prove it
+//!     (`Verdict::Reject`), or it has failed the contract `max_attempts` times.
+//!     Never batched again while this process lives.
+//!   * **Deferred** — this relayer will not flush it *now*, and only the payer
+//!     or a change in what a flush costs will alter that (`Verdict::Defer`,
+//!     which is every way a fee leaf can fail to pay us). Held out of the window
+//!     for a few ticks, with an exponential backoff, and reconsidered from
+//!     scratch when the wait elapses.
 //!
-//! State is in-memory, since the relayer keeps no tables of its own and
-//! `FlushPipeline::preflight` re-derives the deterministic rejection classes on
-//! the next tick.
+//! Deferral is what keeps an unpayable deposit from starving the chain. Without
+//! it the worker re-judges the same head-of-window deposits every tick, reaches
+//! the same verdict, and never reaches the payable deposits behind them.
+//!
+//! Neither is lost work for the payer: a stuck deposit is reclaimable with
+//! `cancelDeposit` once `cancelDelay` has passed, and `flushBatch` is
+//! permissionless, so a deposit this relayer declines can be flushed by one it
+//! pays.
+//!
+//! Waits are counted in flush ticks rather than wall-clock, so they scale with
+//! `flush_interval_s` and stay deterministic in tests. State is in-memory, since
+//! the relayer keeps no tables of its own and `FlushPipeline::preflight`
+//! re-derives every verdict on the next tick.
 
 use crate::domain::error::AppError;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use tracing::{error, info};
 
+/// Ticks a deposit waits after its first deferral. Short: the usual cause is a
+/// fee quote the payer just missed, and gas moves.
+const DEFER_BASE_TICKS: u64 = 2;
+
+/// Ceiling on the doubling. At a 5s `flush_interval_s` this is a few minutes, so
+/// a deposit that becomes payable — gas fell, or the oracle re-priced its asset —
+/// waits minutes rather than for a restart, while a deposit nobody will ever pay
+/// for costs one re-judgement every 64 ticks.
+const DEFER_MAX_TICKS: u64 = 64;
+
+/// One deposit's standing deferral.
+struct Deferral {
+    /// Tick number at which it re-enters the batch window.
+    resume_at: u64,
+    /// Consecutive deferrals, driving the backoff. Cleared once the deposit is
+    /// judged flushable.
+    strikes: u32,
+}
+
+/// How long a lapsed deferral is remembered after it comes due.
+///
+/// The strike count has to outlive the wait it caused, or a deposit re-judged and
+/// re-deferred every time its wait elapses would restart at the shortest wait and
+/// never actually back off. Entries are dropped once this much has passed with no
+/// further deferral, which is also how a deposit that has since been flushed or
+/// canceled leaves the map.
+const DEFER_FORGET_TICKS: u64 = DEFER_MAX_TICKS;
+
 #[derive(Default)]
 struct State {
     /// Attributable failures per deposit, cleared wholesale on any success.
     attempts: HashMap<u64, u32>,
     quarantined: HashSet<u64>,
+    /// Deposits held out of the batch window until a later tick. Pruned as they
+    /// come due, so this holds only live deferrals.
+    deferred: HashMap<u64, Deferral>,
+    /// Flush attempts this process has started, the clock deferrals are measured
+    /// against. Advanced by [`DepositFailures::begin_tick`], so a tick that bails
+    /// out before looking at the mempool does not shorten anyone's wait.
+    tick: u64,
     /// A batch failed and no single deposit could be blamed, so the next tick
     /// flushes one deposit at a time to make the next failure attributable.
     degraded: bool,
@@ -55,8 +106,87 @@ impl DepositFailures {
         if self.state.lock().degraded { 1 } else { max_n }
     }
 
+    /// Start a flush attempt, advancing the clock deferrals are counted in.
+    ///
+    /// Called once per tick that reaches the mempool, immediately before
+    /// [`Self::excluded_ids`].
+    pub fn begin_tick(&self) {
+        self.state.lock().tick += 1;
+    }
+
     pub fn quarantined_ids(&self) -> Vec<u64> {
         self.state.lock().quarantined.iter().copied().collect()
+    }
+
+    /// Every deposit the next `pop_pending` should look past: quarantined for
+    /// good, or deferred until a later tick.
+    ///
+    /// A deferral that has come due stops excluding its deposit immediately — the
+    /// deposit is re-judged on this tick — but is remembered for
+    /// `DEFER_FORGET_TICKS` so its backoff survives that re-judgement. Entries are
+    /// pruned here rather than by a sweep.
+    pub fn excluded_ids(&self) -> HashSet<u64> {
+        let mut state = self.state.lock();
+        let now = state.tick;
+        state
+            .deferred
+            .retain(|_, d| now <= d.resume_at.saturating_add(DEFER_FORGET_TICKS));
+        state
+            .quarantined
+            .iter()
+            .copied()
+            .chain(
+                state
+                    .deferred
+                    .iter()
+                    .filter(|(_, d)| d.resume_at > now)
+                    .map(|(id, _)| *id),
+            )
+            .collect()
+    }
+
+    /// Hold `id` out of the batch window for a while: this relayer will not flush
+    /// it, and only the payer or a change in what a flush costs will alter that.
+    ///
+    /// The wait doubles with each consecutive deferral, so a deposit nobody
+    /// intends to pay for stops costing a judgement every tick, while one whose
+    /// fee narrowly missed the quote is reconsidered within a few.
+    pub fn defer(&self, id: u64, reason: &str) {
+        let mut state = self.state.lock();
+        let now = state.tick;
+        let entry = state.deferred.entry(id).or_insert(Deferral {
+            resume_at: now,
+            strikes: 0,
+        });
+        entry.strikes = entry.strikes.saturating_add(1);
+        // Doubling from the base on each consecutive deferral. The shift is
+        // clamped well below `DEFER_MAX_TICKS`'s magnitude, so the ceiling is what
+        // bounds the wait, not overflow.
+        let shift = entry.strikes.saturating_sub(1).min(16);
+        let wait = (DEFER_BASE_TICKS << shift).min(DEFER_MAX_TICKS);
+        entry.resume_at = now + wait;
+        info!(
+            chain_id = self.chain_id,
+            deposit_id = id,
+            reason,
+            strikes = entry.strikes,
+            resume_at_tick = entry.resume_at,
+            "deposit deferred; it will not be batched again for several ticks \
+             (another relayer can flush it, and the payer can reclaim it with cancelDeposit)"
+        );
+    }
+
+    /// The deposit is batchable again, so any standing deferral and its backoff
+    /// are dropped: the next one starts from the shortest wait.
+    pub fn note_flushable(&self, id: u64) {
+        self.state.lock().deferred.remove(&id);
+    }
+
+    /// Deferrals still held, lapsed ones included. Test-only: the map is pruned
+    /// lazily, and nothing else should depend on its size.
+    #[cfg(test)]
+    fn deferred_len(&self) -> usize {
+        self.state.lock().deferred.len()
     }
 
     /// Stop batching this deposit. `reason` is a fixed string rather than node
@@ -246,6 +376,120 @@ mod tests {
         let f = DepositFailures::new(1, 0);
         f.note_failure(&[1, 2], &reverted());
         assert_eq!(f.batch_limit(8), 1);
+    }
+
+    /// Ticks the worker would have run, so a test can wait out a backoff without
+    /// sleeping.
+    fn run_ticks(f: &DepositFailures, n: u64) {
+        for _ in 0..n {
+            f.begin_tick();
+        }
+    }
+
+    /// The bug this exists for: without deferral the same underpaid deposit is
+    /// re-judged every tick and fills the batch window, and the payable deposits
+    /// behind it never get in.
+    #[test]
+    fn a_deferred_deposit_leaves_the_batch_window() {
+        let f = DepositFailures::new(1, 1);
+        f.begin_tick();
+        f.defer(7, "fee note does not cover the flush");
+        assert!(f.excluded_ids().contains(&7));
+        assert!(f.quarantined_ids().is_empty(), "deferral is not quarantine");
+    }
+
+    #[test]
+    fn a_deferral_expires_and_the_deposit_is_judged_again() {
+        let f = DepositFailures::new(1, 1);
+        f.begin_tick();
+        f.defer(7, "fee note is not addressed to this relayer");
+        run_ticks(&f, DEFER_BASE_TICKS - 1);
+        assert!(f.excluded_ids().contains(&7), "still inside the first wait");
+        run_ticks(&f, 1);
+        assert!(f.excluded_ids().is_empty(), "the wait elapsed");
+    }
+
+    /// A deposit nobody intends to pay for must stop costing a judgement every
+    /// tick, so consecutive deferrals wait longer each time.
+    #[test]
+    fn consecutive_deferrals_back_off() {
+        let f = DepositFailures::new(1, 1);
+        f.begin_tick();
+        f.defer(7, "underpaid");
+        run_ticks(&f, DEFER_BASE_TICKS);
+        assert!(f.excluded_ids().is_empty());
+
+        f.defer(7, "underpaid again");
+        run_ticks(&f, DEFER_BASE_TICKS);
+        assert!(
+            f.excluded_ids().contains(&7),
+            "the second wait must outlast the first"
+        );
+        run_ticks(&f, DEFER_BASE_TICKS);
+        assert!(f.excluded_ids().is_empty());
+    }
+
+    /// Otherwise a deposit that was underpaid for a while would keep a long
+    /// backoff after its fee became sufficient, and a later shortfall would wait
+    /// minutes to be reconsidered.
+    #[test]
+    fn becoming_flushable_clears_the_backoff() {
+        let f = DepositFailures::new(1, 1);
+        f.begin_tick();
+        for _ in 0..5 {
+            f.defer(7, "underpaid");
+        }
+        f.note_flushable(7);
+        assert!(f.excluded_ids().is_empty());
+
+        // Back to the shortest wait rather than resuming the doubling.
+        f.defer(7, "underpaid");
+        run_ticks(&f, DEFER_BASE_TICKS);
+        assert!(f.excluded_ids().is_empty());
+    }
+
+    /// The wait is bounded, so a deposit that becomes payable — gas fell, or its
+    /// asset re-priced — is picked up within minutes rather than at the next
+    /// restart.
+    #[test]
+    fn the_backoff_is_capped() {
+        let f = DepositFailures::new(1, 1);
+        f.begin_tick();
+        for _ in 0..64 {
+            f.defer(7, "underpaid");
+        }
+        run_ticks(&f, DEFER_MAX_TICKS);
+        assert!(f.excluded_ids().is_empty());
+    }
+
+    /// A deposit that stops being pending — flushed by another relayer, or
+    /// canceled — is never deferred again, so its entry must not sit in the map
+    /// for the life of the process.
+    #[test]
+    fn a_deferral_nobody_renews_is_forgotten() {
+        let f = DepositFailures::new(1, 1);
+        f.begin_tick();
+        f.defer(7, "underpaid");
+        run_ticks(&f, DEFER_BASE_TICKS + DEFER_FORGET_TICKS + 1);
+        assert!(f.excluded_ids().is_empty());
+        assert!(f.deferred_len() == 0, "the lapsed entry must be pruned");
+    }
+
+    /// Both exclusions feed one query, and they are independent: a quarantine is
+    /// permanent where a deferral times out.
+    #[test]
+    fn exclusions_cover_quarantined_and_deferred_alike() {
+        let f = DepositFailures::new(1, 1);
+        f.begin_tick();
+        f.quarantine(1, "digest mismatch");
+        f.defer(2, "underpaid");
+        assert_eq!(f.excluded_ids(), HashSet::from([1, 2]));
+        run_ticks(&f, DEFER_MAX_TICKS);
+        assert_eq!(
+            f.excluded_ids(),
+            HashSet::from([1]),
+            "the quarantine outlives the deferral"
+        );
     }
 
     #[test]

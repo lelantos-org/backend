@@ -1,16 +1,28 @@
 //! DB-backed tests for the pending-deposit query the flush worker runs every
 //! tick.
 //!
-//! Both behaviours matter for liveness. Quarantined deposits must be excluded in
-//! SQL, since they are the oldest rows and post-filtering would let them consume
-//! the whole `LIMIT` window. One unreadable row must not fail the query, since
-//! the worker re-runs it every tick and an error there stops the chain flushing.
+//! Both behaviours matter for liveness. Deposits the worker cannot batch —
+//! quarantined or deferred — are the oldest rows, so the query must scan past
+//! them instead of letting them fill the batch window; otherwise a handful of
+//! unpayable deposits starve every payable one behind them. One unreadable row
+//! must not fail the query, since the worker re-runs it every tick and an error
+//! there stops the chain flushing.
+
+use std::collections::HashSet;
 
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use relayer::services::deposit_mempool::DepositMempool;
+
+/// Wide enough that these fixtures never hit it; `pop_pending`'s own bound is
+/// exercised by `a_scan_bound_stops_the_walk` below.
+const SCAN: usize = 512;
+
+fn excluding(ids: &[u64]) -> HashSet<u64> {
+    ids.iter().copied().collect()
+}
 
 const CHAIN: i64 = 1;
 
@@ -99,12 +111,51 @@ async fn excluded_deposits_do_not_consume_the_limit_window() {
             .collect()
     };
 
-    assert_eq!(ids(mempool.pop_pending(2, &[]).await.unwrap()), vec![1, 2]);
-    // The two oldest are quarantined. Excluding them after the query would return
-    // an empty batch and starve the newer deposits.
     assert_eq!(
-        ids(mempool.pop_pending(2, &[1, 2]).await.unwrap()),
+        ids(mempool.pop_pending(2, &excluding(&[]), SCAN).await.unwrap()),
+        vec![1, 2]
+    );
+    // The two oldest are quarantined. Filtering them out of a two-row window would
+    // return an empty batch and starve the newer deposits.
+    assert_eq!(
+        ids(mempool
+            .pop_pending(2, &excluding(&[1, 2]), SCAN)
+            .await
+            .unwrap()),
         vec![3, 4]
+    );
+}
+
+/// The case that stalls a chain: every deposit the relayer will flush sits behind
+/// a run of deposits it will not, longer than one page of the scan.
+#[tokio::test]
+async fn a_long_run_of_excluded_deposits_does_not_starve_the_ones_behind_it() {
+    let (pool, _guard) = fresh_pool().await;
+    insert(&pool, (1..=200).map(deposit).collect()).await;
+    let mempool = DepositMempool::new(pool, CHAIN);
+
+    // Everything but the newest two: a backlog deeper than `SCAN_PAGE_ROWS`, so
+    // the walk has to page through it rather than stopping at the first query.
+    let blocked = excluding(&(1..=198).collect::<Vec<_>>());
+    let got = mempool.pop_pending(2, &blocked, SCAN).await.unwrap();
+    assert_eq!(got.iter().map(|d| d.id).collect::<Vec<_>>(), vec![199, 200]);
+}
+
+/// The walk is bounded, so a backlog deeper than `max_scan` costs one tick a fixed
+/// amount of work and is stepped through over several. Nothing is lost: the
+/// deposits ahead stay excluded, so the next tick starts from the same head.
+#[tokio::test]
+async fn a_scan_bound_stops_the_walk() {
+    let (pool, _guard) = fresh_pool().await;
+    insert(&pool, (1..=200).map(deposit).collect()).await;
+    let mempool = DepositMempool::new(pool, CHAIN);
+
+    let blocked = excluding(&(1..=198).collect::<Vec<_>>());
+    let got = mempool.pop_pending(2, &blocked, 100).await.unwrap();
+    assert!(
+        got.is_empty(),
+        "the flushable deposits are past the scan bound, got {:?}",
+        got.iter().map(|d| d.id).collect::<Vec<_>>()
     );
 }
 
@@ -118,7 +169,7 @@ async fn one_unreadable_row_does_not_fail_the_query() {
     insert(&pool, rows).await;
     let mempool = DepositMempool::new(pool, CHAIN);
 
-    let got = mempool.pop_pending(8, &[]).await.unwrap();
+    let got = mempool.pop_pending(8, &excluding(&[]), SCAN).await.unwrap();
     assert_eq!(
         got.iter().map(|d| d.id).collect::<Vec<_>>(),
         vec![1, 3],
@@ -145,6 +196,6 @@ async fn flushed_and_canceled_deposits_are_not_pending() {
     drop(conn);
 
     let mempool = DepositMempool::new(pool, CHAIN);
-    let got = mempool.pop_pending(8, &[]).await.unwrap();
+    let got = mempool.pop_pending(8, &excluding(&[]), SCAN).await.unwrap();
     assert_eq!(got.iter().map(|d| d.id).collect::<Vec<_>>(), vec![3]);
 }

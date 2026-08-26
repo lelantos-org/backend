@@ -3,6 +3,14 @@
 //!
 //! A deposit is pending when it is neither flushed nor canceled. Ordering by
 //! `submitted_at_block` drains older deposits first.
+//!
+//! The flush worker cannot batch every pending deposit — some are quarantined,
+//! some deferred (see `DepositFailures`) — so [`DepositMempool::pop_pending`]
+//! scans forward past those rather than taking the oldest `limit` rows and
+//! filtering afterwards. Filtering afterwards is what starves a chain: the
+//! unbatchable deposits are the oldest by construction, so they would fill the
+//! window every tick and the payable deposits behind them would never be
+//! reached.
 
 use crate::adapters::calldata::LEAVES_PER_DEPOSIT;
 use crate::adapters::numeric::{bigdecimal_to_u64, bigdecimal_to_u256};
@@ -15,7 +23,13 @@ use database::schema::deposit_escrowed_events;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 use tracing::warn;
+
+/// Rows one `pop_pending` page reads. Large enough that the usual tick — nothing
+/// excluded — takes a single query, small enough that a backlog of excluded
+/// deposits is walked in bounded steps.
+const SCAN_PAGE_ROWS: usize = 64;
 
 /// One escrowed deposit awaiting a flush.
 ///
@@ -176,16 +190,26 @@ impl DepositMempool {
         Self { pool, chain_id }
     }
 
-    /// Return up to `limit` oldest pending deposits on this chain, skipping
-    /// `exclude`.
+    /// Return up to `limit` batchable pending deposits on this chain, oldest
+    /// first, looking past every id in `exclude`.
     ///
-    /// Exclusion happens in SQL rather than afterwards: quarantined deposits are
-    /// the oldest by construction, so post-filtering would let them consume the
-    /// whole `LIMIT` window and starve the batch.
+    /// `max_scan` bounds the work: at most that many pending rows are read, so a
+    /// chain whose head is a long run of excluded deposits costs a fixed number
+    /// of paged queries per tick rather than a full table scan. Returning fewer
+    /// than `limit` after `max_scan` rows is normal — the next tick resumes from
+    /// the head and the excluded ones are gone by then, since a deferral that has
+    /// not come due is excluded and a quarantine is permanent.
+    ///
+    /// The scan pages by `(submitted_at_block, deposit_id)`, the same key it
+    /// orders on, so no row is read twice and none is stepped over. Excluded ids
+    /// are filtered here rather than in SQL: the set is unbounded — one entry per
+    /// deposit this relayer will not currently flush — and a `NOT IN` of that
+    /// width would be re-planned every tick.
     pub async fn pop_pending(
         &self,
         limit: usize,
-        exclude: &[u64],
+        exclude: &HashSet<u64>,
+        max_scan: usize,
     ) -> AppResult<Vec<PendingDeposit>> {
         let mut conn = self
             .pool
@@ -193,42 +217,70 @@ impl DepositMempool {
             .await
             .map_err(|e| AppError::Db(e.to_string()))?;
 
-        let mut query = deposit_escrowed_events::table
-            .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
-            .filter(deposit_escrowed_events::flushed_at_block.is_null())
-            .filter(deposit_escrowed_events::canceled_at_block.is_null())
-            .into_boxed();
-        if !exclude.is_empty() {
-            query = query.filter(deposit_escrowed_events::deposit_id.ne_all(to_id_bds(exclude)?));
-        }
-        let rows: Vec<DepositRow> = query
-            // `deposit_id` breaks ties inside a block. Without it, the subset a
-            // limited flush picks, and the leaf order it commits, would be whatever
-            // the planner returned.
-            .order((
-                deposit_escrowed_events::submitted_at_block.asc(),
-                deposit_escrowed_events::deposit_id.asc(),
-            ))
-            .limit(limit as i64)
-            .select(DepositRow::as_select())
-            .load(&mut conn)
-            .await
-            .map_err(|e| AppError::Db(e.to_string()))?;
+        let mut out: Vec<PendingDeposit> = Vec::with_capacity(limit);
+        let mut scanned = 0usize;
+        // Exclusive lower bound on the order key, advanced to the last row of each
+        // page.
+        let mut after: Option<(i64, BigDecimal)> = None;
 
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id_bd = row.deposit_id.clone();
-            match PendingDeposit::try_from(row) {
-                Ok(d) => out.push(d),
-                // One unreadable row must not fail the query: the flush worker
-                // re-runs the same query every tick, so a single malformed row
-                // would stop the chain from flushing at all.
-                Err(e) => warn!(
-                    chain_id = self.chain_id,
-                    deposit_id = %id_bd,
-                    error = %e,
-                    "skipping unreadable pending deposit row"
-                ),
+        while out.len() < limit && scanned < max_scan {
+            let page = SCAN_PAGE_ROWS.max(limit).min(max_scan - scanned);
+            let mut query = deposit_escrowed_events::table
+                .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
+                .filter(deposit_escrowed_events::flushed_at_block.is_null())
+                .filter(deposit_escrowed_events::canceled_at_block.is_null())
+                .into_boxed();
+            if let Some((block, id)) = after.as_ref() {
+                query = query.filter(
+                    deposit_escrowed_events::submitted_at_block.gt(block).or(
+                        deposit_escrowed_events::submitted_at_block
+                            .eq(block)
+                            .and(deposit_escrowed_events::deposit_id.gt(id)),
+                    ),
+                );
+            }
+            let rows: Vec<DepositRow> = query
+                // `deposit_id` breaks ties inside a block. Without it, the subset a
+                // limited flush picks, and the leaf order it commits, would be whatever
+                // the planner returned — and the scan key below would not be unique.
+                .order((
+                    deposit_escrowed_events::submitted_at_block.asc(),
+                    deposit_escrowed_events::deposit_id.asc(),
+                ))
+                .limit(page as i64)
+                .select(DepositRow::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Db(e.to_string()))?;
+
+            let exhausted = rows.len() < page;
+            for row in rows {
+                scanned += 1;
+                after = Some((row.submitted_at_block, row.deposit_id.clone()));
+                let id_bd = row.deposit_id.clone();
+                match PendingDeposit::try_from(row) {
+                    Ok(d) => {
+                        if exclude.contains(&d.id) {
+                            continue;
+                        }
+                        out.push(d);
+                        if out.len() == limit {
+                            break;
+                        }
+                    }
+                    // One unreadable row must not fail the query: the flush worker
+                    // re-runs the same query every tick, so a single malformed row
+                    // would stop the chain flushing at all.
+                    Err(e) => warn!(
+                        chain_id = self.chain_id,
+                        deposit_id = %id_bd,
+                        error = %e,
+                        "skipping unreadable pending deposit row"
+                    ),
+                }
+            }
+            if exhausted {
+                break;
             }
         }
         Ok(out)

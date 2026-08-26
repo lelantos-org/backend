@@ -25,6 +25,14 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info, instrument, warn};
 
+/// Pending rows one tick reads while looking for deposits it can batch.
+///
+/// Only a chain whose oldest deposits are quarantined or deferred scans past the
+/// first page, and this bounds what that costs. A backlog deeper than this is
+/// walked over successive ticks, oldest first, since the deposits ahead of it
+/// stay excluded.
+const MAX_SCAN_PER_TICK: usize = 512;
+
 pub struct FlushPipeline {
     pub chain_id: i64,
     pub mirror: Arc<Mutex<TreeMirror>>,
@@ -81,9 +89,13 @@ impl FlushPipeline {
         }
 
         let limit = self.failures.batch_limit(self.max_n);
+        self.failures.begin_tick();
+        // Quarantined and deferred deposits are the oldest pending rows, so the
+        // query looks past them rather than letting them fill the window; see
+        // `DepositMempool::pop_pending`.
         let pending = self
             .mempool
-            .pop_pending(limit, &self.failures.quarantined_ids())
+            .pop_pending(limit, &self.failures.excluded_ids(), MAX_SCAN_PER_TICK)
             .await?;
         if pending.is_empty() {
             return Ok(None);
@@ -308,13 +320,21 @@ impl FlushPipeline {
             // redundant work is bounded.
             let gate = self.fee_gate(&deposit).await?;
             match classify(&deposit, stored, masp, chain_id, &gate) {
-                Verdict::Flushable => flushable.push(deposit),
+                Verdict::Flushable => {
+                    // Clears any backoff it accumulated while it was underpaid.
+                    self.failures.note_flushable(deposit.id);
+                    flushable.push(deposit);
+                }
                 Verdict::Skip(why) => warn!(
                     chain_id = self.chain_id,
                     deposit_id = deposit.id,
                     why,
                     "deposit left for a later tick"
                 ),
+                // Its own fee leaf is the reason, so re-judging it every tick would
+                // reach the same verdict while keeping payable deposits out of the
+                // window behind it.
+                Verdict::Defer(why) => self.failures.defer(deposit.id, why),
                 Verdict::Reject(why) => self.failures.quarantine(deposit.id, why),
                 Verdict::DigestMismatch => mismatched.push(deposit.id),
             }

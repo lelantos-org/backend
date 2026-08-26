@@ -36,7 +36,24 @@ pub enum Verdict {
     Flushable,
     /// Not the deposit's fault: leave it out of this batch and reconsider next
     /// tick, charging and remembering nothing.
+    ///
+    /// For conditions that clear on their own within a few blocks, or that are
+    /// this relayer's to fix. Reconsidering every tick is the point: the next
+    /// one may well flush it.
     Skip(&'static str),
+    /// The deposit's own fields are the reason, and only the payer or a change
+    /// in what a flush costs can alter it. Leave it out and wait several ticks
+    /// before asking again.
+    ///
+    /// Separate from [`Verdict::Skip`] because of what `pop_pending` does: it
+    /// returns the oldest pending deposits up to the batch size, so a deposit
+    /// re-judged and re-skipped every tick sits in that window and pushes newer,
+    /// payable deposits out of it. Backing off is what lets the window slide
+    /// past. Never [`Verdict::Reject`]: the fee is a matter between this relayer
+    /// and this payer, and `flushBatch` is permissionless, so the deposit
+    /// remains flushable by the relayer it does pay and by the payer
+    /// themselves.
+    Defer(&'static str),
     /// It can never land, and the deposit's own fields prove it.
     Reject(&'static str),
     /// The replayed fields do not hash to the escrow slot. Conclusive only once
@@ -104,18 +121,19 @@ pub fn classify(
         return Verdict::Reject("fee_rcv exceeds the circuit's 252-bit blinder");
     }
 
-    // Every fee outcome is a `Skip` rather than a `Reject`. A deposit this relayer
-    // will not flush is still flushable by the relayer it pays and by the payer
-    // themselves, since `flushBatch` is permissionless, and `Reject` is remembered
-    // where `Skip` is not.
+    // No fee outcome is a `Reject`, and the two kinds of "not this batch" are told
+    // apart by whose fault they are. A fee leaf that does not pay this relayer is
+    // the deposit's own and holds until the payer acts or gas moves, so it defers.
+    // A relayer-side pricing fault says nothing about the deposit and clears
+    // without anyone doing anything, so it skips and is asked again next tick.
     match fee {
         FeeGate::Subsidised => Verdict::Flushable,
         FeeGate::Unpriceable => Verdict::Skip("cannot price the flush for this asset"),
         FeeGate::Charged { note, required } => match note {
-            FeeNote::NotOurs => Verdict::Skip("fee note is not addressed to this relayer"),
-            FeeNote::Malformed(why) => Verdict::Skip(why),
+            FeeNote::NotOurs => Verdict::Defer("fee note is not addressed to this relayer"),
+            FeeNote::Malformed(why) => Verdict::Defer(why),
             FeeNote::Paid { paid } if paid < required => {
-                Verdict::Skip("fee note does not cover the flush")
+                Verdict::Defer("fee note does not cover the flush")
             }
             FeeNote::Paid { .. } => Verdict::Flushable,
         },
@@ -282,9 +300,11 @@ mod tests {
     }
 
     /// Not this relayer's note. Another relayer can flush it and the payer can
-    /// cancel it, so it is never quarantined.
+    /// cancel it, so it is never quarantined — but nothing this relayer does will
+    /// change the verdict either, so it defers rather than being re-judged every
+    /// tick.
     #[test]
-    fn a_fee_note_addressed_elsewhere_is_skipped_not_rejected() {
+    fn a_fee_note_addressed_elsewhere_is_deferred_not_rejected() {
         let d = deposit();
         let gate = FeeGate::Charged {
             note: FeeNote::NotOurs,
@@ -292,14 +312,14 @@ mod tests {
         };
         assert!(matches!(
             classify(&d, escrowed(&d), MASP, CHAIN, &gate),
-            Verdict::Skip(_)
+            Verdict::Defer(_)
         ));
     }
 
     /// An underpaid deposit is left in place rather than flushed at a loss or
     /// quarantined.
     #[test]
-    fn a_fee_note_that_does_not_cover_the_flush_is_skipped() {
+    fn a_fee_note_that_does_not_cover_the_flush_is_deferred() {
         let d = deposit();
         let gate = FeeGate::Charged {
             note: FeeNote::Paid { paid: 249 },
@@ -307,7 +327,7 @@ mod tests {
         };
         assert!(matches!(
             classify(&d, escrowed(&d), MASP, CHAIN, &gate),
-            Verdict::Skip(_)
+            Verdict::Defer(_)
         ));
     }
 
@@ -326,11 +346,11 @@ mod tests {
         );
     }
 
-    /// A payload that decrypts for us but describes a different leaf. Skipped
+    /// A payload that decrypts for us but describes a different leaf. Deferred
     /// rather than rejected, as with `NotOurs`: the payer can still cancel and
     /// another relayer is unaffected.
     #[test]
-    fn a_malformed_fee_note_is_skipped() {
+    fn a_malformed_fee_note_is_deferred() {
         let d = deposit();
         let gate = FeeGate::Charged {
             note: FeeNote::Malformed("fee note rcv_dep is not the escrowed feeRcv"),
@@ -338,14 +358,15 @@ mod tests {
         };
         assert!(matches!(
             classify(&d, escrowed(&d), MASP, CHAIN, &gate),
-            Verdict::Skip(_)
+            Verdict::Defer(_)
         ));
     }
 
-    /// A pricing failure is the relayer's problem rather than the deposit's, so no
-    /// deposit is quarantined over one.
+    /// A pricing failure is the relayer's problem rather than the deposit's: no
+    /// deposit is quarantined over one, and none is backed off over one either,
+    /// since the next tick may price it fine.
     #[test]
-    fn a_deposit_whose_flush_cannot_be_priced_is_skipped() {
+    fn a_deposit_whose_flush_cannot_be_priced_is_skipped_not_deferred() {
         let d = deposit();
         assert!(matches!(
             classify(&d, escrowed(&d), MASP, CHAIN, &FeeGate::Unpriceable),
