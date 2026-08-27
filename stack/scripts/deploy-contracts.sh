@@ -128,7 +128,7 @@ deploy_core() {
 # UniV3Adapter + SwapWrapper + swap mocks. DeployTestSwap reads the core
 # addresses from the environment.
 deploy_swap() {
-    step "deploy swap stack (UniV3Adapter + SwapWrapper)"
+    step "deploy swap stack (UniV3Adapter + UniV4Adapter + SwapWrapper)"
     # Exported rather than prefixed onto the call: a `VAR=x func` prefix on a
     # shell *function* has implementation-defined persistence in POSIX sh.
     export MASP PERMIT2 TOKEN_1 TOKEN_2 TOKEN_3
@@ -139,6 +139,9 @@ deploy_swap() {
     UNIV3_ADAPTER=$(addr_req UNIV3_ADAPTER)
     UNIV3_QUOTER=$(addr_req UNIV3_QUOTER)
     MOCK_SWAP_ROUTER=$(addr_req MOCK_SWAP_ROUTER)
+    UNIV4_ADAPTER=$(addr_req UNIV4_ADAPTER)
+    UNIV4_QUOTER=$(addr_req UNIV4_QUOTER)
+    MOCK_UNIVERSAL_ROUTER=$(addr_req MOCK_UNIVERSAL_ROUTER)
 
     log "SWAP_WRAPPER=${SWAP_WRAPPER}"
     # Swap rates are seeded inside DeployTest._deploySwap (its `setRate`
@@ -146,6 +149,7 @@ deploy_swap() {
     # inventory to seed and no `setNextOut` needed for the dev flow; e2e
     # tests that want a fixed output still call `setNextOut` themselves.
     debug "MOCK_SWAP_ROUTER=${MOCK_SWAP_ROUTER} (rates seeded by DeployTest)"
+    debug "MOCK_UNIVERSAL_ROUTER=${MOCK_UNIVERSAL_ROUTER} (rates seeded by DeployTest)"
 }
 
 fund_recipient() {
@@ -215,6 +219,10 @@ write_env_file() {
         _emit METAQUOTER RPC_URL "$RPC_URL"
         _emit METAQUOTER UNIV3_QUOTER "$UNIV3_QUOTER"
         _emit METAQUOTER UNIV3_ADAPTER "$UNIV3_ADAPTER"
+        # Only take effect because config/dev/metaquoter.toml declares these
+        # keys on the 31337 chain; the overlay cannot introduce a chain or a key.
+        _emit METAQUOTER UNIV4_QUOTER "$UNIV4_QUOTER"
+        _emit METAQUOTER UNIV4_ADAPTER "$UNIV4_ADAPTER"
 
         # Every raw KEY=0x… pair from the deploy logs, for tests and manual
         # poking (TOKEN_1, VERIFIER, MOCK_SWAP_ROUTER, …).
@@ -231,6 +239,8 @@ print_summary() {
         SWAP_WRAPPER   "$SWAP_WRAPPER" \
         UNIV3_ADAPTER  "$UNIV3_ADAPTER" \
         UNIV3_QUOTER   "$UNIV3_QUOTER" \
+        UNIV4_ADAPTER  "$UNIV4_ADAPTER" \
+        UNIV4_QUOTER   "$UNIV4_QUOTER" \
         NATIVE_ADAPTER "$NATIVE_ADAPTER" \
         WRAPPED_NATIVE "$WETH" \
         funded         "$FUND_RECIPIENT" >&2

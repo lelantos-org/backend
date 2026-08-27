@@ -1,28 +1,13 @@
+use crate::adapters::chain_setup::ChainSetup;
 use crate::adapters::univ3::abi::{FEE_TIERS, IQuoterV2};
 use crate::domain::error::AppError;
 use crate::domain::models::{Quote, QuoteRequest, Venue};
-use crate::domain::time::now_secs;
 use crate::repositories::quoter::Quoter;
+use alloy::primitives::U256;
 use alloy::primitives::aliases::{U24, U160};
-use alloy::primitives::{Address, U256};
-use alloy::providers::RootProvider;
 use alloy::sol_types::SolValue;
-use alloy::transports::http::{Client, Http};
 use async_trait::async_trait;
 use std::collections::HashMap;
-
-/// Wrapper overhead added on top of the venue's reported `gasEstimate`: two
-/// MASP transacts (~250k each, inline verifier) plus ~85k wrapper bookkeeping.
-const WRAPPER_OVERHEAD_GAS: u64 = 585_000;
-
-/// Per-chain config wired by `main.rs`.
-pub struct ChainSetup {
-    pub provider: RootProvider<Http<Client>>,
-    pub quoter_addr: Address,
-    pub adapter_addr: Address,
-    /// MASP fee bps deducted from the venue's gross output before slippage.
-    pub masp_fee_bps: u16,
-}
 
 pub struct UniV3Quoter {
     chains: HashMap<u64, ChainSetup>,
@@ -51,36 +36,13 @@ impl Quoter for UniV3Quoter {
             .ok_or(AppError::UnsupportedChain(req.chain_id))?;
 
         let best = best_tier(setup, req).await?;
-        // MASP charges its fee on top of `expected_out` (see
-        // `MASP._computeAmounts`), so `expected_out` is the reciprocal of the
-        // fee applied to gross rather than gross minus fee.
-        let expected_out = max_deposit(best.amount_out, setup.masp_fee_bps);
-        let masp_fee = best.amount_out.saturating_sub(expected_out);
+        // Single-hop route layout: abi.encode(uint24 fee, uint160
+        // sqrtPriceLimitX96). Zero disables the pool's slippage guard;
+        // `min_out` provides sandwich protection at this layer.
+        let route = (U24::from(best.fee), U160::ZERO).abi_encode().into();
 
-        Ok(Quote {
-            venue: Venue::UniV3,
-            adapter: setup.adapter_addr,
-            // Single-hop route layout: abi.encode(uint24 fee, uint160
-            // sqrtPriceLimitX96). Zero disables the pool's slippage guard;
-            // `min_out` provides sandwich protection at this layer.
-            route: (U24::from(best.fee), U160::ZERO).abi_encode().into(),
-            min_out: req.apply_slippage(expected_out),
-            expected_out,
-            gas_estimate: best.gas_estimate.saturating_add(WRAPPER_OVERHEAD_GAS),
-            quoted_at: now_secs(),
-            masp_fee,
-            masp_fee_bps: setup.masp_fee_bps,
-        })
+        Ok(setup.build_quote(Venue::UniV3, req, best.amount_out, best.gas_estimate, route))
     }
-}
-
-/// Largest `expected_out` such that
-/// `expected_out + expected_out * bps / 10_000 <= gross`, equivalent to
-/// `gross * 10_000 / (10_000 + bps)`. `bps` is clamped to 10_000.
-fn max_deposit(gross: U256, bps: u16) -> U256 {
-    let bps = u32::from(bps).min(10_000);
-    let denom = U256::from(10_000u32 + bps);
-    gross.saturating_mul(U256::from(10_000u32)) / denom
 }
 
 struct TierQuote {
@@ -143,27 +105,5 @@ mod tests {
         assert_eq!(req(50).apply_slippage(expected), U256::from(995_000u64));
         assert_eq!(req(0).apply_slippage(expected), expected);
         assert_eq!(req(10_000).apply_slippage(expected), U256::ZERO);
-    }
-
-    #[test]
-    fn max_deposit_reciprocal_fee() {
-        assert_eq!(
-            max_deposit(U256::from(1_000_000u64), 0),
-            U256::from(1_000_000u64)
-        );
-
-        // 50 bps fee: expected_out = gross * 10_000 / 10_050 ≈ 995_024, so
-        // masp_fee = gross - expected_out ≈ 4_975 ≈ expected_out * 50/10_000.
-        let gross = U256::from(1_000_000u64);
-        let expected = max_deposit(gross, 50);
-        let fee = gross - expected;
-        assert_eq!(expected, U256::from(995_024u64));
-        // Fee on expected_out, rounded down to match integer arithmetic.
-        assert_eq!(
-            fee,
-            expected * U256::from(50u32) / U256::from(10_000u32) + U256::from(1u8)
-        );
-
-        assert_eq!(max_deposit(gross, u16::MAX), max_deposit(gross, 10_000));
     }
 }

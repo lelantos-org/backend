@@ -24,6 +24,8 @@ chain_id      = 31337
 rpc_url       = "http://anvil:8545"
 univ3_quoter  = "0x…"            # UniV3 QuoterV2
 univ3_adapter = "0x…"            # deployed UniV3Adapter, returned to the SDK
+univ4_quoter  = "0x…"            # optional, UniV4 V4Quoter
+univ4_adapter = "0x…"            # optional, deployed UniV4Adapter
 masp_fee_bps  = 0                # optional
 ```
 
@@ -35,10 +37,16 @@ masp_fee_bps  = 0                # optional
 | `chains[].rpc_url` | yes | — | HTTP RPC endpoint |
 | `chains[].univ3_quoter` | yes | — | UniV3 `QuoterV2` address, called with `eth_call` |
 | `chains[].univ3_adapter` | yes | — | Deployed `UniV3Adapter`; returned as `adapter` so the SDK knows which `ISwapAdapter` the route binds to |
+| `chains[].univ4_quoter` | no | — | UniV4 `V4Quoter` lens address |
+| `chains[].univ4_adapter` | no | — | Deployed `UniV4Adapter` |
 | `chains[].masp_fee_bps` | no | 0 | MASP wrapper fee on the output, in bps |
 
 Per-chain env overlay, same convention as the other binaries:
-`METAQUOTER_CHAIN_<id>_{RPC_URL,UNIV3_QUOTER,UNIV3_ADAPTER,MASP_FEE_BPS}`.
+`METAQUOTER_CHAIN_<id>_{RPC_URL,UNIV3_QUOTER,UNIV3_ADAPTER,UNIV4_QUOTER,UNIV4_ADAPTER,MASP_FEE_BPS}`.
+
+A chain joins the UniV4 race only when **both** `univ4_quoter` and
+`univ4_adapter` are set; with either missing it stays UniV3-only rather than
+erroring. When no chain configures V4 the quoter is not constructed at all.
 
 ⚠️ The overlay only rewrites chains **already declared** in the TOML. A variable
 naming a chain with no `[[chains]]` block is silently discarded.
@@ -77,8 +85,9 @@ slow venue must not fail a request another venue could answer. If every quoter
 drops out, the answer is `all venues failed` rather than a stale or partial
 quote.
 
-Today there is exactly one quoter (Uniswap V3), so the race is a race of one;
-the shape is what lets a second venue be added without touching the handler.
+Uniswap V3 and Uniswap V4 both implement `Quoter`, and neither the handler nor
+`RacingQuoteService` knows anything venue-specific — adding the second venue
+touched only the wiring in `app/state.rs` and the `Venue` enum.
 
 ## UniV3 quoter
 
@@ -95,6 +104,29 @@ limit would instead revert the whole shielded transaction.
 `gas_estimate` is the venue's own estimate plus a fixed 585k of wrapper
 overhead — two MASP transacts at roughly 250k each, plus about 85k of wrapper
 bookkeeping.
+
+## UniV4 quoter
+
+Each request fans out over the four canonical `(fee, tickSpacing)` pairs —
+`(100,1)`, `(500,10)`, `(3000,60)`, `(10000,200)` — with one `eth_call` to
+`quoteExactInputSingle` per pair, keeping the highest output. Pairs with no
+initialized pool revert at the lens and are dropped; every pair failing is
+`NoLiquidity`.
+
+`hooks` is pinned to the zero address, so only vanilla pools are quoted. A hook
+pool can charge a dynamic fee or run arbitrary logic during the swap, and
+`UniV4Adapter` refuses to execute against one, so quoting it would hand back an
+unexecutable route.
+
+The route blob is `abi.encode(uint24 fee, int24 tickSpacing)`. Currency ordering
+is derived from the token addresses by the adapter rather than encoded, so the
+route cannot disagree with `token_in`/`token_out`.
+
+V4 takes the input amount as a `uint128` where V3 takes a `uint256`, so an
+`amount_in` above `2^128 - 1` is a 400 rather than a silent truncation.
+
+Native-ETH V4 pools (`currency0 == address(0)`) are **not** quoted; only the
+WETH-side pools are reachable today.
 
 ### The MASP fee is a reciprocal, not a subtraction
 

@@ -71,6 +71,7 @@ pub struct Quote {
 #[serde(rename_all = "lowercase")]
 pub enum Venue {
     UniV3,
+    UniV4,
 }
 
 /// Wire format for [`U256`] is a decimal string, mirroring how the relayer SDK
