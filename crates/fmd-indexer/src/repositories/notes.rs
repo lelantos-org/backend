@@ -41,9 +41,10 @@ pub trait NotesRepo: Send + Sync {
 
     /// Wake the filter loop after a commit.
     ///
-    /// Best-effort by contract: the filter's cursor finds these rows on its next
-    /// poll, so a failed notify costs latency rather than correctness.
-    async fn notify_appended(&self, chain_id: i64) -> Result<()>;
+    /// Infallible by contract: the notes are already committed on connections
+    /// this call cannot roll back, and the filter's cursor finds them on its next
+    /// poll regardless, so a failed wake is logged rather than surfaced.
+    async fn notify_appended(&self, chain_id: i64);
 }
 
 /// Rows per INSERT. Postgres caps a statement at 65535 bind parameters and
@@ -127,9 +128,7 @@ impl NotesRepo for PostgresNotesRepo {
         Ok(max.unwrap_or(0))
     }
 
-    async fn notify_appended(&self, chain_id: i64) -> Result<()> {
-        let mut conn = super::conn(&self.pool).await?;
-        listen::notify(&mut conn, CHANNEL_NOTES_APPENDED, &chain_id.to_string()).await?;
-        Ok(())
+    async fn notify_appended(&self, chain_id: i64) {
+        listen::notify_best_effort(&self.pool, CHANNEL_NOTES_APPENDED, &chain_id.to_string()).await;
     }
 }

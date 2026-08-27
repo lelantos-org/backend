@@ -1,0 +1,31 @@
+-- Drop the redundant `raw_events` write-path index.
+--
+-- `raw_events` is the ingester's hot write path and carried six index entries
+-- per inserted row. One of them earns nothing.
+--
+-- Same reasoning as `asset_locked_chain_idx` in migration 29: a left prefix of
+-- an existing index can serve no query the longer index does not already serve.
+--
+-- On a deployment where this table is already large, drop it out of band first:
+--
+--     DROP INDEX CONCURRENTLY raw_events_chain_block_idx;
+--
+-- and this migration then no-ops. It runs at process startup behind the
+-- migration advisory lock, and a standby gives up on that lock after 120s, so a
+-- long in-migration operation would fail the deploy rather than block on it. A
+-- plain `DROP INDEX` takes a brief ACCESS EXCLUSIVE lock on `raw_events`, which
+-- blocks the ingester's inserts for the duration.
+
+-- `raw_events_chain_block_idx (chain_id, block_number)` is a left prefix of the
+-- unique index on (chain_id, block_number, log_index).
+--
+-- Both readers of that shape are the ingester's own and are covered by the
+-- unique index: `block_hashes_desc`, which filters `chain_id` with
+-- `block_number BETWEEN` and takes `DISTINCT ON (block_number)` in descending
+-- order, and the rewind `DELETE` on `block_number >= $1`.
+--
+-- The consumers read other shapes entirely and keep their own indexes:
+-- `batch_after` filters (chain_id, id, event_kind) via
+-- `raw_events_chain_kind_id_idx`, and `siblings_by_tx` filters
+-- (chain_id, tx_hash) via `raw_events_chain_tx_idx`.
+DROP INDEX IF EXISTS raw_events_chain_block_idx;

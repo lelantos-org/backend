@@ -41,21 +41,48 @@ pub const CHANNEL_RAW_EVENTS_REORG: &str = "raw_events_reorg";
 /// in decimal.
 pub const CHANNEL_NOTES_APPENDED: &str = "notes_appended";
 
-/// Publish on `channel`, waking every listener subscribed to it.
+/// Publish on `channel` over `conn`, waking every listener subscribed to it.
 ///
-/// Best-effort by contract at every call site: the rows are already committed
-/// and the consumer's durable cursor finds them on its next poll, so callers
-/// log a failure and continue rather than failing the batch.
+/// Mechanism only, no policy: Postgres queues a `NOTIFY` until its transaction
+/// commits, so calling this inside the transaction that writes the rows makes
+/// the wake exactly as durable as the rows it announces, and a rollback
+/// announces nothing. That is the preferred shape, and it costs no connection of
+/// its own.
 ///
-/// Takes a connection rather than the pool so the caller keeps its own error
-/// mapping and can publish inside its own transaction.
+/// Use [`notify_best_effort`] when the write has already committed — on separate
+/// connections, or across several of them — and there is no transaction left to
+/// ride.
 pub async fn notify(conn: &mut AsyncPgConnection, channel: &str, payload: &str) -> QueryResult<()> {
     sql_query("SELECT pg_notify($1, $2)")
-        .bind::<Text, _>(channel.to_string())
-        .bind::<Text, _>(payload.to_string())
+        .bind::<Text, _>(channel)
+        .bind::<Text, _>(payload)
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Publish on `channel` from the pool, logging rather than returning a failure.
+///
+/// For producers whose rows are already committed, where returning an error
+/// would ask the caller to fail a batch it cannot roll back. Every consumer's
+/// cursor is durable, so a wake that never arrives costs latency and nothing
+/// else — which is what makes swallowing the error correct here and wrong
+/// inside a transaction.
+///
+/// Takes the pool rather than a connection: this shape needs a checkout of its
+/// own, and having it here keeps the checkout and the "log and continue" from
+/// being restated at each producer.
+pub async fn notify_best_effort(pool: &crate::DbPool, channel: &str, payload: &str) {
+    let result = match pool.get().await {
+        Ok(mut conn) => notify(&mut conn, channel, payload)
+            .await
+            .err()
+            .map(|e| e.to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(error) = result {
+        warn!(channel, payload, %error, "notify failed after a successful commit");
+    }
 }
 
 /// Floor of the reconnect backoff.

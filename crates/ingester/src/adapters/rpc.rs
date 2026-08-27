@@ -6,10 +6,12 @@ use alloy::rpc::types::eth::{Filter, Log};
 use alloy::transports::http::{Client, Http};
 use async_trait::async_trait;
 use chain_types::decode::known_signatures;
+use shared::metrics::{record_rpc_call, record_rpc_error};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use url::Url;
 
 #[async_trait]
@@ -47,30 +49,53 @@ pub struct BlockMeta {
 
 pub type DynRpc = Arc<dyn ChainRpc>;
 
+/// What [`HttpRpc`] needs to reach one chain.
+///
+/// Declared here rather than taking the binary's `ChainConfig`: an adapter sits
+/// below `app/`, so pointing it at the TOML schema would make a serde rename a
+/// compile break in the RPC client and would leave a second provider no way to
+/// be built from anything else. `app::config` owns the conversion.
+#[derive(Debug, Clone)]
+pub struct RpcConfig {
+    pub url: String,
+    pub request_timeout: Duration,
+    pub connect_timeout: Duration,
+    /// Cap on in-flight `eth_getBlockByNumber` calls.
+    pub meta_concurrency: usize,
+    /// Labels this provider's call and error counters.
+    pub chain_id: i64,
+}
+
 pub struct HttpRpc {
     inner: RootProvider<Http<Client>>,
-    /// Cap on in-flight `eth_getBlockByNumber` calls in `fetch_block_meta`.
-    meta_concurrency: usize,
+    /// Cap on in-flight `eth_getBlockByNumber` calls, held per provider rather
+    /// than per call.
+    ///
+    /// A per-call `buffer_unordered` bounds one `fetch_block_meta`, not the
+    /// chain: the backfill runs `backfill_concurrency` chunks at once, each
+    /// entering `fetch_block_meta`, so a per-call cap is silently multiplied by
+    /// the chunk concurrency. A semaphore on the provider is the cap the config
+    /// actually promises.
+    meta_permits: Arc<Semaphore>,
+    /// Labels this provider's call and error counters. Carried here rather than
+    /// threaded through every method: one `HttpRpc` serves exactly one chain.
+    chain_id: i64,
 }
 
 impl HttpRpc {
-    /// Build a provider with explicit timeouts.
+    /// Build a provider for one chain, with explicit timeouts.
     ///
     /// reqwest's default client has no request timeout, so a half-open socket
     /// would park the worker indefinitely while it holds its advisory lock,
     /// preventing any standby from taking over.
-    pub fn build(
-        rpc_url: &str,
-        request_timeout: Duration,
-        connect_timeout: Duration,
-        meta_concurrency: usize,
-    ) -> Result<Arc<Self>, IngesterError> {
-        let url: Url = rpc_url
+    pub fn build(cfg: &RpcConfig) -> Result<Arc<Self>, IngesterError> {
+        let url: Url = cfg
+            .url
             .parse()
             .map_err(|e: url::ParseError| IngesterError::Config(format!("rpc_url: {}", e)))?;
         let http_client = Client::builder()
-            .timeout(request_timeout)
-            .connect_timeout(connect_timeout)
+            .timeout(cfg.request_timeout)
+            .connect_timeout(cfg.connect_timeout)
             .build()
             .map_err(|e| IngesterError::Config(format!("http client: {}", e)))?;
         let is_local = matches!(url.host_str(), Some("localhost") | Some("127.0.0.1"));
@@ -78,7 +103,8 @@ impl HttpRpc {
         let inner = ProviderBuilder::new().on_client(RpcClient::new(transport, is_local));
         Ok(Arc::new(Self {
             inner,
-            meta_concurrency: meta_concurrency.max(1),
+            meta_permits: Arc::new(Semaphore::new(cfg.meta_concurrency.max(1))),
+            chain_id: cfg.chain_id,
         }))
     }
 }
@@ -106,6 +132,18 @@ const RANGE_MARKERS: &[&str] = &[
 
 const RATE_LIMIT_MARKERS: &[&str] = &["429", "rate limit", "too many requests"];
 
+/// How many block-metadata futures are polled at once.
+///
+/// Not the request cap — that is [`HttpRpc::meta_permits`], which is shared
+/// across concurrent chunks. This only bounds how many futures are parked on the
+/// semaphore, so it is generous.
+const META_POLL_WIDTH: usize = 256;
+
+/// Wire method names, used for both the request and its counter label.
+const M_BLOCK_NUMBER: &str = "eth_blockNumber";
+const M_GET_LOGS: &str = "eth_getLogs";
+const M_GET_BLOCK: &str = "eth_getBlockByNumber";
+
 /// `-32602` is a generic "invalid params". It is read as a range problem only
 /// when the message also mentions the range or the result set; otherwise a
 /// malformed filter would be halved indefinitely instead of surfacing.
@@ -127,13 +165,31 @@ fn classify<E: std::fmt::Display>(err: E) -> RpcError {
     }
 }
 
+/// Count one call and map its failure onto the taxonomy the callers act on.
+///
+/// A free function rather than a method: `fetch_block_meta` fans out over clones
+/// of the inner provider and has no `&self` to reach for inside the stream.
+fn observe<T, E: std::fmt::Display>(
+    method: &'static str,
+    chain_id: i64,
+    r: Result<T, E>,
+) -> Result<T, IngesterError> {
+    record_rpc_call(method, chain_id);
+    r.map_err(|e| {
+        let class = classify(e);
+        record_rpc_error(class.label(), chain_id);
+        IngesterError::from(class)
+    })
+}
+
 #[async_trait]
 impl ChainRpc for HttpRpc {
     async fn tip(&self) -> Result<u64, IngesterError> {
-        self.inner
-            .get_block_number()
-            .await
-            .map_err(|e| IngesterError::from(classify(e)))
+        observe(
+            M_BLOCK_NUMBER,
+            self.chain_id,
+            self.inner.get_block_number().await,
+        )
     }
 
     async fn fetch_logs(
@@ -148,10 +204,11 @@ impl ChainRpc for HttpRpc {
             .event_signature(sigs.to_vec())
             .from_block(from)
             .to_block(to);
-        self.inner
-            .get_logs(&filter)
-            .await
-            .map_err(|e| IngesterError::from(classify(e)))
+        observe(
+            M_GET_LOGS,
+            self.chain_id,
+            self.inner.get_logs(&filter).await,
+        )
     }
 
     async fn fetch_block_meta(
@@ -162,11 +219,18 @@ impl ChainRpc for HttpRpc {
 
         // Bounded fan-out. A large backfill chunk can touch thousands of distinct
         // blocks, and issuing one request per block at once invites rate limiting
-        // and socket exhaustion.
+        // and socket exhaustion. The bound is the provider's semaphore, so
+        // concurrent chunks share one budget instead of each getting their own.
+        let chain_id = self.chain_id;
+        let permits = &self.meta_permits;
         stream::iter(block_numbers.iter().copied().map(|n| {
             let p = self.inner.clone();
             async move {
-                let blk = raw_block(&p, n).await?;
+                let _permit = permits
+                    .acquire()
+                    .await
+                    .map_err(|e| IngesterError::Rpc(RpcError::Other(e.to_string())))?;
+                let blk = raw_block(&p, chain_id, n).await?;
                 let blk = blk.ok_or(IngesterError::Rpc(RpcError::BlockMissing(n)))?;
                 let timestamp = hex_u64(&blk, "timestamp")
                     .ok_or(IngesterError::Rpc(RpcError::BlockMissing(n)))?;
@@ -182,13 +246,13 @@ impl ChainRpc for HttpRpc {
                 ))
             }
         }))
-        .buffer_unordered(self.meta_concurrency)
+        .buffer_unordered(META_POLL_WIDTH)
         .try_collect()
         .await
     }
 
     async fn block_hash_at(&self, n: u64) -> Result<Option<B256>, IngesterError> {
-        let Some(blk) = raw_block(&self.inner, n).await? else {
+        let Some(blk) = raw_block(&self.inner, self.chain_id, n).await? else {
             return Ok(None);
         };
         let Some(h) = blk.get("hash").and_then(|v| v.as_str()) else {
@@ -206,12 +270,16 @@ impl ChainRpc for HttpRpc {
 /// Arbitrum extension that alloy's `Header` drops.
 async fn raw_block(
     provider: &RootProvider<Http<Client>>,
+    chain_id: i64,
     n: u64,
 ) -> Result<Option<serde_json::Value>, IngesterError> {
-    provider
-        .raw_request("eth_getBlockByNumber".into(), (format!("0x{n:x}"), false))
-        .await
-        .map_err(|e| IngesterError::from(classify(e)))
+    observe(
+        M_GET_BLOCK,
+        chain_id,
+        provider
+            .raw_request(M_GET_BLOCK.into(), (format!("0x{n:x}"), false))
+            .await,
+    )
 }
 
 /// Read a `0x`-prefixed quantity from a JSON block object.

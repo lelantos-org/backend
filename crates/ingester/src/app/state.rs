@@ -3,6 +3,7 @@ use crate::app::config::ChainConfig;
 use crate::repositories::ChainStateRepo;
 use crate::services::backfill::BackfillService;
 use crate::services::ingest::IngestService;
+use crate::services::log_range::LogWindow;
 use crate::services::reorg::ReorgService;
 use std::sync::Arc;
 
@@ -18,6 +19,9 @@ pub struct WorkerDeps {
     pub ingest: Arc<IngestService>,
     pub reorg: Arc<ReorgService>,
     pub backfill: Arc<BackfillService>,
+    /// The provider's `eth_getLogs` cap, learned once and shared by the live tail
+    /// and the backfill. One per chain, since it describes one provider.
+    pub log_window: Arc<LogWindow>,
     /// For the advisory lock's dedicated connection, which must not come from the
     /// shared pool: `idle_timeout` would reap it and release the lock. See
     /// `database::advisory`.

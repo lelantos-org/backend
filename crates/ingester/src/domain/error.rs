@@ -21,6 +21,23 @@ pub enum RpcError {
     Other(String),
 }
 
+impl RpcError {
+    /// Stable label value for the `class` metric dimension.
+    ///
+    /// Spelled out rather than derived from `Debug` so renaming a variant does
+    /// not rename a time series, and so `Other`'s free-text payload never
+    /// reaches a label: provider wording is unbounded and would mint a series
+    /// per phrasing.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::RangeTooLarge => "range_too_large",
+            Self::RateLimited => "rate_limited",
+            Self::BlockMissing(_) => "block_missing",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum IngesterError {
     #[error("config: {0}")]

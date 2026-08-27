@@ -1,7 +1,9 @@
+use crate::adapters::rpc::RpcConfig;
 use crate::domain::error::IngesterError;
 use crate::domain::models::parse_address;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IngesterConfig {
@@ -12,6 +14,17 @@ pub struct IngesterConfig {
     /// restricts it (see `shared::metrics::init`).
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
+    /// Override the shared bb8 pool's size. `None` keeps
+    /// [`database::PoolCfg::indexer`].
+    ///
+    /// One pool serves every chain worker, so on a deployment with many chains a
+    /// checkout can block for the pool's timeout and then fail into the retry
+    /// policy, turning contention into minutes of stall. This is the escape
+    /// hatch for that; note the real ceiling behind a transaction pooler is
+    /// simultaneously executing queries, not connections, so raising it past the
+    /// pooler's own size moves the queue rather than removing it.
+    #[serde(default)]
+    pub db_pool_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,12 +35,21 @@ pub struct ChainConfig {
     pub start_block: i64,
     #[serde(default = "default_reorg_depth")]
     pub reorg_depth: u64,
+    /// Ceiling of the live tail's idle backoff, not a fixed period. A tick that
+    /// committed rows or rewound a fork loops straight back; only an idle tick
+    /// waits, starting at 50ms and doubling up to this.
     #[serde(default = "default_block_poll_ms")]
     pub block_poll_ms: u64,
     #[serde(default = "default_backfill_threshold")]
     pub backfill_threshold: u64,
     #[serde(default = "default_backfill_concurrency")]
     pub backfill_concurrency: usize,
+    /// Block range per backfill chunk, and the cap on one live tick's span.
+    ///
+    /// Also the memory bound: the backfill decodes `backfill_concurrency` chunks
+    /// at once, so peak resident rows are the product of the two. It no longer
+    /// needs to be tuned below the provider's `eth_getLogs` cap — the adaptive
+    /// window learns that once and remembers it — so this is commit granularity.
     #[serde(default = "default_chunk_blocks")]
     pub chunk_blocks: u64,
     /// Cap on simultaneous `eth_getBlockByNumber` calls when resolving block
@@ -60,7 +82,7 @@ fn default_backfill_concurrency() -> usize {
     8
 }
 fn default_chunk_blocks() -> u64 {
-    50_000
+    10_000
 }
 fn default_meta_concurrency() -> usize {
     16
@@ -88,6 +110,15 @@ pub fn redact_url(raw: &str) -> String {
 }
 
 impl IngesterConfig {
+    /// The pool to open: the shared indexer preset, resized if an operator asked.
+    pub fn pool(&self) -> database::PoolCfg {
+        let base = database::PoolCfg::indexer();
+        match self.db_pool_size {
+            Some(n) => base.with_max_size(n),
+            None => base,
+        }
+    }
+
     /// Overlay env vars on top of TOML defaults, per chain. Convention:
     ///   INGESTER_CHAIN_<id>_POOL_ADDRESS=0x…
     ///   INGESTER_CHAIN_<id>_RPC_URL=http://…
@@ -100,6 +131,11 @@ impl IngesterConfig {
         // Chain-independent, so it does not go through `config_env::lookup`.
         if let Ok(v) = std::env::var("METRICS_ADDR") {
             self.metrics_addr = v;
+        }
+        if let Ok(v) = std::env::var("INGESTER_DB_POOL_SIZE") {
+            self.db_pool_size = Some(v.parse::<u32>().map_err(|e| {
+                IngesterError::Config(format!("INGESTER_DB_POOL_SIZE={:?}: {}", v, e))
+            })?);
         }
         for c in &mut self.chains {
             if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "POOL_ADDRESS") {
@@ -131,6 +167,11 @@ impl IngesterConfig {
         if self.chains.is_empty() {
             return Err(IngesterError::config("no chains configured"));
         }
+        // bb8 rejects a zero pool at build time, well after a standby has waited
+        // out the advisory lock.
+        if self.db_pool_size == Some(0) {
+            return Err(IngesterError::config("db_pool_size must be > 0"));
+        }
         let mut seen: HashSet<i64> = HashSet::new();
         for c in &self.chains {
             // Two workers on one chain do not race, since the advisory lock
@@ -146,6 +187,18 @@ impl IngesterConfig {
                 .map_err(|e| IngesterError::config(format!("chain {}: {}", c.chain_id, e)))?;
         }
         Ok(())
+    }
+}
+
+impl From<&ChainConfig> for RpcConfig {
+    fn from(c: &ChainConfig) -> Self {
+        Self {
+            url: c.rpc_url.clone(),
+            request_timeout: Duration::from_millis(c.rpc_timeout_ms),
+            connect_timeout: Duration::from_millis(c.rpc_connect_timeout_ms),
+            meta_concurrency: c.meta_concurrency,
+            chain_id: c.chain_id,
+        }
     }
 }
 
@@ -219,6 +272,7 @@ mod tests {
             database_url: "postgres://localhost/db".into(),
             chains,
             metrics_addr: default_metrics_addr(),
+            db_pool_size: None,
         }
     }
 
@@ -288,5 +342,46 @@ mod tests {
             redact_url("https://user:pw@node.example:8545/path?key=SECRET"),
             "https://node.example"
         );
+    }
+
+    /// Leaving the knob unset must not silently change the pool a deployment
+    /// already runs on.
+    #[test]
+    fn an_unset_pool_size_keeps_the_shared_preset() {
+        let got = cfg(vec![chain(1)]).pool();
+        assert_eq!(got.max_size, database::PoolCfg::indexer().max_size);
+        assert_eq!(got.min_idle, database::PoolCfg::indexer().min_idle);
+    }
+
+    #[test]
+    fn an_explicit_pool_size_resizes_the_preset() {
+        let mut c = cfg(vec![chain(1)]);
+        c.db_pool_size = Some(32);
+        assert_eq!(c.pool().max_size, 32);
+    }
+
+    /// bb8 rejects a zero pool when it builds, long after a standby has waited
+    /// out the advisory lock.
+    #[test]
+    fn a_zero_pool_size_fails_validation() {
+        let mut c = cfg(vec![chain(1)]);
+        c.db_pool_size = Some(0);
+        assert!(c.validate().is_err());
+    }
+
+    /// The adapter takes its own config so a TOML rename cannot break it; this
+    /// is the one place the two are tied together.
+    #[test]
+    fn rpc_config_carries_the_timeouts_and_the_chain_id() {
+        let c = chain(42161);
+        let got = RpcConfig::from(&c);
+        assert_eq!(got.chain_id, 42161);
+        assert_eq!(got.url, c.rpc_url);
+        assert_eq!(got.request_timeout.as_millis() as u64, c.rpc_timeout_ms);
+        assert_eq!(
+            got.connect_timeout.as_millis() as u64,
+            c.rpc_connect_timeout_ms
+        );
+        assert_eq!(got.meta_concurrency, c.meta_concurrency);
     }
 }

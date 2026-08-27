@@ -17,13 +17,14 @@ use crate::app::config::ChainConfig;
 use crate::domain::error::IngesterError;
 use crate::domain::models::TickOutcome;
 use crate::repositories::ChainStateRepo;
-use crate::services::decode::{distinct_blocks, logs_to_rows};
 use crate::services::ingest::IngestService;
-use crate::services::log_range::fetch_adaptive;
-use crate::services::reorg::ReorgService;
-use alloy::primitives::Address;
+use crate::services::log_range::{LogWindow, fetch_rows};
+use crate::services::reorg::{Checkpoint, ReorgService, anchor_of};
+use alloy::primitives::{Address, B256};
 use async_trait::async_trait;
-use shared::metrics::{record_event_age, stage};
+use shared::metrics::{
+    ingest_stage, record_chain_lag, record_event_age, stage, timed_ingest_stage,
+};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -41,6 +42,24 @@ pub struct LiveServiceImpl {
     pub chain_state: Arc<dyn ChainStateRepo>,
     pub ingest: Arc<IngestService>,
     pub reorg: Arc<ReorgService>,
+    pub log_window: Arc<LogWindow>,
+}
+
+/// Everything one tick reads before it decides anything.
+///
+/// Holds what the tick uses, not what it read: the cursor is consumed into
+/// `last_scanned` and `anchor` at survey time, so no two fields here can
+/// disagree about it.
+struct Survey {
+    /// The cursor's watermark, defaulted for a chain that has committed nothing.
+    last_scanned: i64,
+    /// The cursor's verified anchor, absent on a chain that has committed nothing.
+    anchor: Option<Checkpoint>,
+    /// What the chain reports at the anchor's height. `None` when there is no
+    /// anchor to check, and also when the chain no longer has that block — both
+    /// mean the stored hash cannot be confirmed.
+    chain_hash: Option<B256>,
+    tip: i64,
 }
 
 /// What the next tick should scan, once the cursor is known to be sound.
@@ -58,12 +77,60 @@ enum Plan {
 }
 
 impl LiveServiceImpl {
-    /// Re-verify the anchor and rewind if the chain has moved under us.
+    /// Read the cursor, then ask the chain for the anchor's hash and the tip at
+    /// the same time.
+    ///
+    /// One DB round trip and one pair of overlapping RPC round trips, where the
+    /// obvious spelling costs five in series: the anchor check and the plan both
+    /// need the cursor, and neither RPC depends on the other's answer.
+    /// `catch_up` already overlaps its two the same way.
+    async fn survey(&self) -> Result<Survey, IngesterError> {
+        let chain_id = self.cfg.chain_id;
+        let cursor = timed_ingest_stage(
+            ingest_stage::PLAN,
+            chain_id,
+            self.chain_state.fetch(chain_id),
+        )
+        .await?;
+        let last_scanned = cursor
+            .as_ref()
+            .map(|c| c.last_scanned_block)
+            .unwrap_or(self.cfg.start_block - 1);
+        let anchor = cursor.as_ref().and_then(anchor_of);
+        let anchor_block = anchor.as_ref().map(|(b, _)| *b as u64);
+
+        // A chain with no anchor still needs the tip, so the hash lookup
+        // resolves to `None` rather than becoming a second call shape.
+        let (chain_hash, tip) = timed_ingest_stage(ingest_stage::ANCHOR, chain_id, async {
+            tokio::try_join!(
+                async {
+                    match anchor_block {
+                        Some(n) => self.rpc.block_hash_at(n).await,
+                        None => Ok(None),
+                    }
+                },
+                self.rpc.tip(),
+            )
+        })
+        .await?;
+
+        Ok(Survey {
+            last_scanned,
+            anchor,
+            chain_hash,
+            tip: tip as i64,
+        })
+    }
+
+    /// Rewind if the chain has moved under the cursor.
     ///
     /// Returns `Some` when a rewind happened, in which case the tick stops: the
     /// cursor has changed and the next tick re-derives from it.
-    async fn settle_reorg(&self) -> Result<Option<TickOutcome>, IngesterError> {
+    async fn settle_reorg(&self, survey: &Survey) -> Result<Option<TickOutcome>, IngesterError> {
         let chain_id = self.cfg.chain_id;
+        let Some(anchor) = survey.anchor.as_ref() else {
+            return Ok(None);
+        };
         let Some(divergence) = self
             .reorg
             .check_anchor(
@@ -71,6 +138,8 @@ impl LiveServiceImpl {
                 &self.rpc,
                 self.cfg.start_block,
                 self.cfg.reorg_depth,
+                anchor,
+                survey.chain_hash,
             )
             .await?
         else {
@@ -83,42 +152,49 @@ impl LiveServiceImpl {
         }))
     }
 
-    async fn plan(&self) -> Result<Plan, IngesterError> {
-        let cursor = self.chain_state.fetch(self.cfg.chain_id).await?;
-        let last_scanned = cursor
-            .as_ref()
-            .map(|c| c.last_scanned_block)
-            .unwrap_or(self.cfg.start_block - 1);
-        let tip = self.rpc.tip().await? as i64;
+    fn plan(&self, survey: &Survey) -> Plan {
+        let last_scanned = survey.last_scanned;
+        let tip = survey.tip;
         let from = last_scanned + 1;
+        record_chain_lag(self.cfg.chain_id, tip - last_scanned);
         if from > tip {
-            return Ok(Plan::UpToDate);
+            return Plan::UpToDate;
         }
         // Far enough behind that chunked, parallel backfill applies. Handing
         // control back lets the worker re-enter it rather than closing the gap one
         // poll interval at a time.
         let lag = tip - last_scanned;
         if lag > self.cfg.backfill_threshold as i64 {
-            return Ok(Plan::Lagging { lag });
+            return Plan::Lagging { lag };
         }
         // Cap the span even inside the threshold: after a stall the gap can still
         // exceed what a provider serves in one `eth_getLogs`.
         let to = tip.min(from + self.cfg.chunk_blocks as i64 - 1);
-        Ok(Plan::Scan { from, to })
+        Plan::Scan { from, to }
     }
 
-    async fn scan(&self, from: i64, to: i64) -> Result<TickOutcome, IngesterError> {
+    async fn scan(
+        &self,
+        from: i64,
+        to: i64,
+        reached_tip: bool,
+    ) -> Result<TickOutcome, IngesterError> {
         let chain_id = self.cfg.chain_id;
         // The same adaptive fetcher the backfill uses, so a provider-side range
         // cap narrows the window rather than failing the tick.
-        let logs = fetch_adaptive(&self.rpc, self.pool_addr, from as u64, to as u64).await?;
-        if logs.is_empty() {
+        let rows = fetch_rows(
+            &self.rpc,
+            &self.log_window,
+            chain_id,
+            self.pool_addr,
+            from as u64,
+            to as u64,
+        )
+        .await?;
+        if rows.is_empty() {
             self.ingest.advance_empty(chain_id, to).await?;
-            return Ok(TickOutcome::Empty { to });
+            return Ok(TickOutcome::Empty { to, reached_tip });
         }
-
-        let block_meta = self.rpc.fetch_block_meta(&distinct_blocks(&logs)).await?;
-        let rows = logs_to_rows(chain_id, logs, &block_meta)?;
         let inserted = self.ingest.commit_batch(chain_id, &rows, to).await?;
 
         // Live path only. `commit_batch` also serves the backfill, where the age
@@ -135,6 +211,7 @@ impl LiveServiceImpl {
         Ok(TickOutcome::Committed {
             count: inserted,
             to,
+            reached_tip,
         })
     }
 }
@@ -149,16 +226,18 @@ impl LiveService for LiveServiceImpl {
     }
 
     async fn tick(&self) -> Result<TickOutcome, IngesterError> {
+        let survey = self.survey().await?;
         // Reorg check first. The cursor is only meaningful while the block it
         // anchors to is canonical, so scanning forward from an unverified cursor
-        // would extend an abandoned branch.
-        if let Some(outcome) = self.settle_reorg().await? {
+        // would extend an abandoned branch. A rewind invalidates the surveyed
+        // tip's usefulness too, which is why it ends the tick.
+        if let Some(outcome) = self.settle_reorg(&survey).await? {
             return Ok(outcome);
         }
-        match self.plan().await? {
+        match self.plan(&survey) {
             Plan::UpToDate => Ok(TickOutcome::Idle),
             Plan::Lagging { lag } => Ok(TickOutcome::Lagging { lag }),
-            Plan::Scan { from, to } => self.scan(from, to).await,
+            Plan::Scan { from, to } => self.scan(from, to, to == survey.tip).await,
         }
     }
 }

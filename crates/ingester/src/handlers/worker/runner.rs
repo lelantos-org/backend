@@ -12,6 +12,7 @@ use crate::services::live::{LiveService, LiveServiceImpl};
 use crate::services::retry::{Policy, retrying};
 use alloy::primitives::Address;
 use database::advisory::{ChainLock, NS_INGESTER, chain_key};
+use shared::metrics::{record_chain_lag, record_chain_leader};
 use shared::shutdown::Shutdown;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,6 +74,7 @@ pub async fn run_inner(
         Some(lock) => tokio::select! {
             r = body => r.map(|()| WorkerExit::Shutdown),
             () = until_lock_lost(lock, lock_poll) => {
+                record_chain_leader(chain_id, false);
                 error!(chain_id, "advisory lock lost; stopping worker to avoid two writers");
                 Ok(WorkerExit::LockLost)
             }
@@ -105,10 +107,12 @@ async fn acquire(
     loop {
         match ChainLock::try_acquire(database_url, key).await {
             Ok(Some(lock)) => {
+                record_chain_leader(chain_id, true);
                 info!(chain_id, "advisory lock acquired; ingesting");
                 return Ok(Some(lock));
             }
             Ok(None) => {
+                record_chain_leader(chain_id, false);
                 debug!(
                     chain_id,
                     "advisory lock held by another process; standing by"
@@ -154,6 +158,7 @@ impl Chain {
             ingest,
             reorg,
             backfill,
+            log_window,
             database_url: _,
         } = deps;
         let pool_addr = parse_address(&cfg.pool_address)?;
@@ -164,6 +169,7 @@ impl Chain {
             chain_state: chain_state.clone(),
             ingest,
             reorg,
+            log_window,
         }) as Arc<dyn LiveService>;
         Ok(Self {
             cfg,
@@ -205,6 +211,7 @@ impl Chain {
         // commit, and casting that to u64 would make the lag `u64::MAX` and skip
         // backfill.
         let lag = tip - last_scanned;
+        record_chain_lag(chain_id, lag);
         info!(chain_id, last_scanned, tip, lag, "chain state resolved");
 
         if lag <= self.cfg.backfill_threshold as i64 {

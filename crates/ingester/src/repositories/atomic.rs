@@ -3,12 +3,21 @@
 //! Rows and the cursor describing them live in two tables, so committing them on
 //! two pooled connections would leave a window where one is written and the other
 //! is not. Both composites here run in a single transaction on one connection.
+//!
+//! The wake-up `NOTIFY` rides the same transaction. Postgres queues a `NOTIFY`
+//! until its transaction commits, so publishing inside is not a durability
+//! hazard: a rolled-back batch announces nothing. Doing it afterwards on a
+//! second pooled connection cost an extra checkout per commit — and under a
+//! transaction pooler, a second pooled transaction — while also leaving a
+//! window where rows were visible but unannounced. The statement itself is one
+//! round trip either way; it has moved, not disappeared.
 
 use crate::domain::error::IngesterError;
 use crate::domain::models::{BlockCursor, RawEvent};
 use crate::repositories::checkout;
 use async_trait::async_trait;
 use database::DbPool;
+use database::listen::{self, CHANNEL_RAW_EVENTS_APPENDED, CHANNEL_RAW_EVENTS_REORG};
 use database::schema::{chain_state, raw_events};
 use diesel::prelude::*;
 use diesel_async::scoped_futures::ScopedFutureExt;
@@ -17,13 +26,14 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 /// Rows per `INSERT` statement.
 ///
 /// Postgres caps a statement at 65535 bind parameters and each row binds 10, so
-/// the hard ceiling is 6553 rows. A single backfill chunk over the default 50k
-/// blocks can exceed that on a busy pool.
+/// the hard ceiling is 6553 rows. A single backfill chunk can exceed that on a
+/// busy pool.
 const INSERT_CHUNK_ROWS: usize = 1_000;
 
 #[async_trait]
 pub trait AtomicWriteRepo: Send + Sync {
-    /// Insert `rows` and move the cursor to `cursor`, atomically.
+    /// Insert `rows`, move the cursor to `cursor` and announce the append,
+    /// atomically.
     ///
     /// Returns the number of rows inserted; duplicates absorbed by the unique
     /// index do not count.
@@ -33,8 +43,8 @@ pub trait AtomicWriteRepo: Send + Sync {
         cursor: &BlockCursor,
     ) -> Result<usize, IngesterError>;
 
-    /// Delete every row at or above `from_block`, reset the cursor and record the
-    /// rewind in the reorg log, all in one transaction.
+    /// Delete every row at or above `from_block`, reset the cursor, record the
+    /// rewind in the reorg log and announce it, all in one transaction.
     ///
     /// The log entry must be atomic with the delete: consumers use it to retract
     /// state derived from the removed rows, so the marker and the delete have to
@@ -157,6 +167,12 @@ impl AtomicWriteRepo for PostgresAtomicWriteRepo {
             async move {
                 let n = insert_rows(conn, rows).await?;
                 upsert_cursor(conn, cursor).await?;
+                listen::notify(
+                    conn,
+                    CHANNEL_RAW_EVENTS_APPENDED,
+                    &cursor.chain_id.to_string(),
+                )
+                .await?;
                 Ok(n)
             }
             .scope_boxed()
@@ -183,6 +199,12 @@ impl AtomicWriteRepo for PostgresAtomicWriteRepo {
                 .await?;
                 upsert_cursor(conn, cursor).await?;
                 database::reorg::record(conn, chain_id, from_block).await?;
+                listen::notify(
+                    conn,
+                    CHANNEL_RAW_EVENTS_REORG,
+                    &format!("{}:{}", chain_id, from_block),
+                )
+                .await?;
                 Ok(deleted)
             }
             .scope_boxed()

@@ -1,10 +1,10 @@
 pub mod atomic;
+pub mod block_hashes;
 pub mod chain_state;
-pub mod raw_events;
 
 pub use atomic::{AtomicWriteRepo, PostgresAtomicWriteRepo};
+pub use block_hashes::{BlockHashRepo, PostgresBlockHashRepo};
 pub use chain_state::{ChainStateRepo, PostgresChainStateRepo};
-pub use raw_events::{PostgresRawEventRepo, RawEventRepo};
 
 use crate::domain::error::IngesterError;
 use database::DbPool;

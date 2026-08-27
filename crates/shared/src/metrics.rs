@@ -43,6 +43,13 @@ pub mod name {
     pub const NOTES_MAX_ID: &str = "notes_max_id";
     pub const CONSUMER_CURSOR_NOTE_ID: &str = "consumer_cursor_note_id";
 
+    // ingester
+    pub const INGESTER_STAGE_DURATION: &str = "ingester_stage_seconds";
+    pub const INGESTER_RPC_CALLS: &str = "ingester_rpc_calls_total";
+    pub const INGESTER_RPC_ERRORS: &str = "ingester_rpc_errors_total";
+    pub const INGESTER_CHAIN_LAG: &str = "ingester_chain_lag_blocks";
+    pub const INGESTER_RETRIES: &str = "ingester_retries_total";
+
     // Cross-service. Emitted by every stage that commits derived state; the
     // `stage` label makes one pipeline's latency readable end to end.
     pub const EVENT_AGE: &str = "event_age_seconds";
@@ -58,6 +65,26 @@ pub mod stage {
     pub const INGEST: &str = "ingest";
     /// `raw_events` -> `notes`, recorded by fmd-indexer's consume loop.
     pub const CONSUME: &str = "consume";
+}
+
+/// Steps of one ingester tick or backfill chunk, reported by
+/// [`name::INGESTER_STAGE_DURATION`].
+///
+/// A separate closed set from [`stage`]: that one names whole pipeline hops for
+/// [`name::EVENT_AGE`], these name the round trips inside a single hop. Sharing
+/// one module would let an `EVENT_AGE` call site pass `GET_LOGS` and mint a
+/// series no dashboard reads.
+pub mod ingest_stage {
+    /// Asking the chain for the anchor's hash and the tip.
+    pub const ANCHOR: &str = "anchor";
+    /// Reading the cursor the tick plans from.
+    pub const PLAN: &str = "plan";
+    /// `eth_getLogs`, including the adaptive window's shrink/grow search.
+    pub const GET_LOGS: &str = "get_logs";
+    /// Resolving per-block metadata for the blocks the logs touched.
+    pub const BLOCK_META: &str = "block_meta";
+    /// The insert-and-advance transaction, including the `pg_notify` it carries.
+    pub const COMMIT: &str = "commit";
 }
 
 /// Label value for a request that matched no route.
@@ -235,6 +262,34 @@ fn describe() {
     );
 
     describe_histogram!(
+        name::INGESTER_STAGE_DURATION,
+        Unit::Seconds,
+        "one round trip inside an ingester tick or backfill chunk, by stage"
+    );
+    describe_counter!(
+        name::INGESTER_RPC_CALLS,
+        Unit::Count,
+        "JSON-RPC calls issued, by method; divided by blocks ingested this is the \
+         per-block provider cost"
+    );
+    describe_counter!(
+        name::INGESTER_RPC_ERRORS,
+        Unit::Count,
+        "JSON-RPC failures by the class the ingester acts on: a range cap narrows \
+         the window, a rate limit backs off"
+    );
+    describe_gauge!(
+        name::INGESTER_CHAIN_LAG,
+        Unit::Count,
+        "blocks between the chain tip and last_scanned_block"
+    );
+    describe_counter!(
+        name::INGESTER_RETRIES,
+        Unit::Count,
+        "retried operations, by what was being retried"
+    );
+
+    describe_histogram!(
         name::EVENT_AGE,
         Unit::Seconds,
         "wall-clock age of the freshest event a stage just committed, from its \
@@ -259,6 +314,90 @@ pub fn record_event_age(stage: &'static str, chain_id: i64, block_ts: i64) {
         "chain_id" => chain_id.to_string(),
     )
     .record(age.max(0) as f64);
+}
+
+/// Time one step of an ingester tick and record it under [`name::INGESTER_STAGE_DURATION`].
+///
+/// Wraps the future rather than exposing a start/stop pair so a stage cannot be
+/// started and never recorded, and so an early `?` inside the awaited operation
+/// still reports the time it consumed: a stage that fails slowly is exactly what
+/// the histogram is for.
+///
+/// `stage` must come from [`ingest_stage`].
+pub async fn timed_ingest_stage<T>(
+    stage: &'static str,
+    chain_id: i64,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    let started = std::time::Instant::now();
+    let out = fut.await;
+    ::metrics::histogram!(
+        name::INGESTER_STAGE_DURATION,
+        "stage" => stage,
+        "chain_id" => chain_id.to_string(),
+    )
+    .record(started.elapsed().as_secs_f64());
+    out
+}
+
+/// Count one outbound JSON-RPC call.
+///
+/// `method` is the wire method name. Closed by construction: the ingester's RPC
+/// adapter calls a fixed handful of methods, so this never carries provider text.
+pub fn record_rpc_call(method: &'static str, chain_id: i64) {
+    ::metrics::counter!(
+        name::INGESTER_RPC_CALLS,
+        "method" => method,
+        "chain_id" => chain_id.to_string(),
+    )
+    .increment(1);
+}
+
+/// Count one JSON-RPC failure by the class the caller acts on.
+///
+/// `class` is the discriminant of the error taxonomy, never the provider's
+/// message: those are unbounded free text and would mint a series per wording.
+pub fn record_rpc_error(class: &'static str, chain_id: i64) {
+    ::metrics::counter!(
+        name::INGESTER_RPC_ERRORS,
+        "class" => class,
+        "chain_id" => chain_id.to_string(),
+    )
+    .increment(1);
+}
+
+/// Report how far behind the chain tip this chain's cursor is.
+pub fn record_chain_lag(chain_id: i64, lag: i64) {
+    ::metrics::gauge!(
+        name::INGESTER_CHAIN_LAG,
+        "chain_id" => chain_id.to_string(),
+    )
+    .set(lag as f64);
+}
+
+/// Count one retried operation.
+///
+/// `what` names the operation being retried, matching the string the retry layer
+/// already logs, so a spike in the counter and the corresponding warnings line up.
+pub fn record_retry(what: &'static str, chain_id: i64) {
+    ::metrics::counter!(
+        name::INGESTER_RETRIES,
+        "what" => what,
+        "chain_id" => chain_id.to_string(),
+    )
+    .increment(1);
+}
+
+/// Report whether this replica currently holds `chain_id`'s advisory lock.
+///
+/// Gauged on both branches: failover would otherwise show up only as a replica
+/// going quiet, which is indistinguishable from a stall.
+pub fn record_chain_leader(chain_id: i64, leader: bool) {
+    ::metrics::gauge!(
+        name::CHAIN_LEADER,
+        "chain_id" => chain_id.to_string(),
+    )
+    .set(if leader { 1.0 } else { 0.0 });
 }
 
 /// HTTP middleware recording [`name::HTTP_REQUESTS`] and [`name::HTTP_DURATION`].

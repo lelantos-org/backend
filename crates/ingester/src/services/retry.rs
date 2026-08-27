@@ -6,6 +6,7 @@
 
 use crate::domain::error::IngesterError;
 use rand::Rng;
+use shared::metrics::record_retry;
 use std::future::Future;
 use std::time::Duration;
 use tracing::warn;
@@ -69,10 +70,11 @@ pub fn is_retryable(e: &IngesterError) -> bool {
 /// Run `op` until it succeeds, hits an unretryable error, or exhausts
 /// `policy.max_attempts`.
 ///
-/// `what` and `chain_id` shape the log line only; they carry no behaviour.
+/// `what` and `chain_id` label the log line and the retry counter only; they
+/// carry no behaviour.
 pub async fn retrying<T, F, Fut>(
     policy: Policy,
-    what: &str,
+    what: &'static str,
     chain_id: i64,
     mut op: F,
 ) -> Result<T, IngesterError>
@@ -91,6 +93,7 @@ where
                     return Err(e);
                 }
                 let delay = policy.delay(attempt - 1);
+                record_retry(what, chain_id);
                 warn!(
                     chain_id,
                     what,

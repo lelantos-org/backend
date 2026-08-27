@@ -30,15 +30,24 @@ pub struct BlockCursor {
     pub last_scanned_block: i64,
 }
 
-#[derive(Debug, Clone)]
+/// What one live tick accomplished.
+///
+/// `Copy` and comparable like the workspace's other outcome enums
+/// (`WorkerExit`, `shared::tick::TickProgress`): every field is a plain integer,
+/// and the handler pacing the loop needs to both test and forward the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickOutcome {
     Idle,
     Empty {
         to: i64,
+        /// Whether `to` was the tip the tick observed. A scan capped short of
+        /// the tip leaves known work behind; one that reached it does not.
+        reached_tip: bool,
     },
     Committed {
         count: usize,
         to: i64,
+        reached_tip: bool,
     },
     Reorg {
         rewind_to: i64,

@@ -24,12 +24,13 @@ use ingester::domain::error::IngesterError;
 use ingester::domain::models::RawEvent;
 use ingester::domain::models::{BlockCursor, TickOutcome, parse_address};
 use ingester::repositories::{
-    AtomicWriteRepo, ChainStateRepo, PostgresAtomicWriteRepo, PostgresChainStateRepo,
-    PostgresRawEventRepo,
+    AtomicWriteRepo, ChainStateRepo, PostgresAtomicWriteRepo, PostgresBlockHashRepo,
+    PostgresChainStateRepo,
 };
 use ingester::services::backfill::BackfillService;
 use ingester::services::ingest::IngestService;
 use ingester::services::live::{LiveService, LiveServiceImpl};
+use ingester::services::log_range::LogWindow;
 use ingester::services::reorg::ReorgService;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -209,14 +210,10 @@ async fn live_ctx(
 ) -> LiveServiceImpl {
     let pool_addr = parse_address(&cfg.pool_address).unwrap();
     let writes = Arc::new(PostgresAtomicWriteRepo::new(pool.clone()));
-    let raw_events = Arc::new(PostgresRawEventRepo::new(pool.clone()));
+    let raw_events = Arc::new(PostgresBlockHashRepo::new(pool.clone()));
     let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
-    let ingest = Arc::new(IngestService::new(
-        writes.clone(),
-        raw_events.clone(),
-        chain_state.clone(),
-    ));
-    let reorg = Arc::new(ReorgService::new(writes, raw_events, chain_state.clone()));
+    let ingest = Arc::new(IngestService::new(writes.clone(), chain_state.clone()));
+    let reorg = Arc::new(ReorgService::new(writes, raw_events));
     LiveServiceImpl {
         cfg,
         pool_addr,
@@ -224,6 +221,7 @@ async fn live_ctx(
         chain_state,
         ingest,
         reorg,
+        log_window: Arc::new(LogWindow::new()),
     }
 }
 
@@ -400,15 +398,16 @@ fn worker_deps(
     url: &str,
 ) -> WorkerDeps {
     let writes = Arc::new(PostgresAtomicWriteRepo::new(pool.clone()));
-    let raw_events = Arc::new(PostgresRawEventRepo::new(pool.clone()));
+    let raw_events = Arc::new(PostgresBlockHashRepo::new(pool.clone()));
     let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
-    let ingest = Arc::new(IngestService::new(
-        writes.clone(),
-        raw_events.clone(),
-        chain_state.clone(),
+    let ingest = Arc::new(IngestService::new(writes.clone(), chain_state.clone()));
+    let reorg = Arc::new(ReorgService::new(writes, raw_events));
+    let log_window = Arc::new(LogWindow::new());
+    let backfill = Arc::new(BackfillService::new(
+        rpc.clone() as DynRpc,
+        ingest.clone(),
+        log_window.clone(),
     ));
-    let reorg = Arc::new(ReorgService::new(writes, raw_events, chain_state.clone()));
-    let backfill = Arc::new(BackfillService::new(rpc.clone() as DynRpc, ingest.clone()));
     WorkerDeps {
         cfg,
         rpc: rpc.clone() as DynRpc,
@@ -416,6 +415,7 @@ fn worker_deps(
         ingest,
         reorg,
         backfill,
+        log_window,
         database_url: url.to_string(),
     }
 }
@@ -543,7 +543,7 @@ async fn advances_the_cursor_on_a_range_with_no_logs() {
 
     let first = ctx.tick().await.unwrap();
     assert!(
-        matches!(first, TickOutcome::Empty { to: 510 }),
+        matches!(first, TickOutcome::Empty { to: 510, .. }),
         "got {first:?}"
     );
 

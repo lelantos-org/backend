@@ -218,11 +218,7 @@ impl ConsumeServiceImpl {
             .set(max_leaf as f64);
         }
 
-        // The rows are committed at this point, so a failed wake must not fail
-        // the batch: the filter's own cursor finds them on its next poll.
-        if let Err(e) = self.notes.notify_appended(chain_id).await {
-            warn!(chain_id, "notify failed after a successful commit: {}", e);
-        }
+        self.notes.notify_appended(chain_id).await;
 
         let (notes, spent_nfs) = (plan.notes.len(), plan.spent_nfs.len());
         debug!(
@@ -268,13 +264,7 @@ impl ConsumeService for ConsumeServiceImpl {
         // A standby replica has nothing to do; idling lets the backoff grow
         // rather than polling the lock at full speed.
         let leader = self.locks.is_leader(chain_id).await?;
-        // Gauged on both branches: failover would otherwise appear only as a
-        // replica going quiet, which is indistinguishable from a stall.
-        metrics::gauge!(
-            shared::metrics::name::CHAIN_LEADER,
-            "chain_id" => chain_id.to_string(),
-        )
-        .set(if leader { 1.0 } else { 0.0 });
+        shared::metrics::record_chain_leader(chain_id, leader);
         if !leader {
             return Ok(TickProgress::Idle);
         }

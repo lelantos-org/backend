@@ -8,10 +8,11 @@ use ingester::build_info;
 use ingester::domain::error::IngesterError;
 use ingester::handlers::worker::{self, WorkerExit};
 use ingester::repositories::{
-    PostgresAtomicWriteRepo, PostgresChainStateRepo, PostgresRawEventRepo,
+    PostgresAtomicWriteRepo, PostgresBlockHashRepo, PostgresChainStateRepo,
 };
 use ingester::services::backfill::BackfillService;
 use ingester::services::ingest::IngestService;
+use ingester::services::log_range::LogWindow;
 use ingester::services::reorg::ReorgService;
 use ingester::services::retry::{Policy, is_retryable};
 use shared::shutdown::{self, Shutdown};
@@ -40,11 +41,15 @@ async fn main() -> Result<()> {
 
     migrate(&cfg.database_url).await?;
 
-    let pool_cfg = database::PoolCfg::indexer();
+    let pool_cfg = cfg.pool();
     let pool = database::build_pool(&cfg.database_url, pool_cfg)
         .await
         .context("build pool")?;
-    info!(pool_size = pool_cfg.max_size, "db pool built");
+    info!(
+        pool_size = pool_cfg.max_size,
+        chains = cfg.chains.len(),
+        "db pool built"
+    );
 
     let (trigger, shutdown) = shutdown::channel();
     tokio::spawn(shutdown::watch_signals(trigger));
@@ -78,22 +83,18 @@ fn load_config() -> Result<IngesterConfig> {
 
 /// Wire one chain's repositories, services and provider together.
 fn build_deps(pool: &DbPool, cfg: ChainConfig, database_url: &str) -> Result<WorkerDeps> {
-    let rpc: DynRpc = HttpRpc::build(
-        &cfg.rpc_url,
-        Duration::from_millis(cfg.rpc_timeout_ms),
-        Duration::from_millis(cfg.rpc_connect_timeout_ms),
-        cfg.meta_concurrency,
-    )?;
+    let rpc: DynRpc = HttpRpc::build(&(&cfg).into())?;
     let writes = Arc::new(PostgresAtomicWriteRepo::new(pool.clone()));
-    let raw_events = Arc::new(PostgresRawEventRepo::new(pool.clone()));
+    let raw_events = Arc::new(PostgresBlockHashRepo::new(pool.clone()));
     let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
-    let ingest = Arc::new(IngestService::new(
-        writes.clone(),
-        raw_events.clone(),
-        chain_state.clone(),
+    let ingest = Arc::new(IngestService::new(writes.clone(), chain_state.clone()));
+    let reorg = Arc::new(ReorgService::new(writes, raw_events));
+    let log_window = Arc::new(LogWindow::new());
+    let backfill = Arc::new(BackfillService::new(
+        rpc.clone(),
+        ingest.clone(),
+        log_window.clone(),
     ));
-    let reorg = Arc::new(ReorgService::new(writes, raw_events, chain_state.clone()));
-    let backfill = Arc::new(BackfillService::new(rpc.clone(), ingest.clone()));
 
     Ok(WorkerDeps {
         cfg,
@@ -102,6 +103,7 @@ fn build_deps(pool: &DbPool, cfg: ChainConfig, database_url: &str) -> Result<Wor
         ingest,
         reorg,
         backfill,
+        log_window,
         database_url: database_url.to_string(),
     })
 }

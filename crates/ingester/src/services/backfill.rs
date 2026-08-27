@@ -5,11 +5,9 @@
 use crate::adapters::DynRpc;
 use crate::app::config::ChainConfig;
 use crate::domain::error::IngesterError;
-use crate::services::decode::{distinct_blocks, logs_to_rows};
 use crate::services::ingest::IngestService;
-use crate::services::log_range::fetch_adaptive;
+use crate::services::log_range::{LogWindow, fetch_rows};
 use alloy::primitives::Address;
-use alloy::rpc::types::eth::Log;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use tracing::info;
@@ -17,6 +15,7 @@ use tracing::info;
 pub struct BackfillService {
     rpc: DynRpc,
     ingest: Arc<IngestService>,
+    log_window: Arc<LogWindow>,
 }
 
 /// One unit of catch-up work: an inclusive block range.
@@ -45,8 +44,12 @@ fn chunks(from: u64, to: u64, size: u64) -> Vec<Chunk> {
 }
 
 impl BackfillService {
-    pub fn new(rpc: DynRpc, ingest: Arc<IngestService>) -> Self {
-        Self { rpc, ingest }
+    pub fn new(rpc: DynRpc, ingest: Arc<IngestService>, log_window: Arc<LogWindow>) -> Self {
+        Self {
+            rpc,
+            ingest,
+            log_window,
+        }
     }
 
     pub async fn run(
@@ -71,21 +74,34 @@ impl BackfillService {
             "backfill start"
         );
 
-        let rpc = self.rpc.clone();
-        let mut fetches = stream::iter(chunks.into_iter().map(|chunk| {
-            let rpc = rpc.clone();
-            async move {
-                let logs = fetch_adaptive(&rpc, pool_addr, chunk.from, chunk.to).await?;
-                Ok::<_, IngesterError>((chunk, logs))
-            }
+        // Everything up to the write runs inside the concurrent stage. Resolving
+        // block metadata is one `eth_getBlockByNumber` per distinct block, so
+        // leaving it in the drain loop meant the dominant cost of a chunk ran
+        // strictly in series behind the log fetches, and the fetch stream was not
+        // polled forward while it did.
+        // Everything up to the write runs inside the concurrent stage. Resolving
+        // block metadata is one `eth_getBlockByNumber` per distinct block, so
+        // leaving it in the drain loop meant the dominant cost of a chunk ran
+        // strictly in series behind the log fetches, and the fetch stream was not
+        // polled forward while it did.
+        let rpc = &self.rpc;
+        let log_window = &self.log_window;
+        let mut prepared = stream::iter(chunks.into_iter().map(|chunk| async move {
+            let rows =
+                fetch_rows(rpc, log_window, chain_id, pool_addr, chunk.from, chunk.to).await?;
+            Ok::<_, IngesterError>((chunk, rows))
         }))
         .buffered(cfg.backfill_concurrency.max(1));
 
         // `buffered` yields in submission order, so the cursor moves only forward
-        // even though the fetches complete out of order.
-        while let Some(result) = fetches.next().await {
-            let (chunk, logs) = result?;
-            let inserted = self.commit(chain_id, chunk, logs).await?;
+        // even though the chunks complete out of order. The drain does nothing
+        // but write, which is the one step that must stay ordered.
+        while let Some(result) = prepared.next().await {
+            let (chunk, rows) = result?;
+            let inserted = self
+                .ingest
+                .commit_batch(chain_id, &rows, chunk.to as i64)
+                .await?;
             info!(
                 chain_id,
                 from = chunk.from,
@@ -96,19 +112,6 @@ impl BackfillService {
         }
         info!(chain_id, from, to, "backfill done");
         Ok(())
-    }
-
-    async fn commit(
-        &self,
-        chain_id: i64,
-        chunk: Chunk,
-        logs: Vec<Log>,
-    ) -> Result<usize, IngesterError> {
-        let block_meta = self.rpc.fetch_block_meta(&distinct_blocks(&logs)).await?;
-        let rows = logs_to_rows(chain_id, logs, &block_meta)?;
-        self.ingest
-            .commit_batch(chain_id, &rows, chunk.to as i64)
-            .await
     }
 }
 

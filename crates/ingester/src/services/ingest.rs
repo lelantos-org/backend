@@ -1,31 +1,26 @@
 use crate::domain::error::IngesterError;
 use crate::domain::models::{BlockCursor, RawEvent};
-use crate::repositories::{AtomicWriteRepo, ChainStateRepo, RawEventRepo};
+use crate::repositories::{AtomicWriteRepo, ChainStateRepo};
+use shared::metrics::{ingest_stage, timed_ingest_stage};
 use std::sync::Arc;
-use tracing::warn;
 
 pub struct IngestService {
     writes: Arc<dyn AtomicWriteRepo>,
-    raw_events: Arc<dyn RawEventRepo>,
     chain_state: Arc<dyn ChainStateRepo>,
 }
 
 impl IngestService {
-    pub fn new(
-        writes: Arc<dyn AtomicWriteRepo>,
-        raw_events: Arc<dyn RawEventRepo>,
-        chain_state: Arc<dyn ChainStateRepo>,
-    ) -> Self {
+    pub fn new(writes: Arc<dyn AtomicWriteRepo>, chain_state: Arc<dyn ChainStateRepo>) -> Self {
         Self {
             writes,
-            raw_events,
             chain_state,
         }
     }
 
-    /// Insert rows, advance the cursor and fire the notify. The single commit
-    /// path for both the live tick and the backfill. `last_scanned` is the upper
-    /// bound of what was scanned, whether or not any rows fell in that range.
+    /// Insert rows, advance the cursor and announce the append. The single
+    /// commit path for both the live tick and the backfill. `last_scanned` is the
+    /// upper bound of what was scanned, whether or not any rows fell in that
+    /// range.
     ///
     /// Returns the number of rows inserted rather than decoded. Replayed ranges
     /// hit the unique index and insert nothing, so reporting the decoded count
@@ -45,19 +40,24 @@ impl IngestService {
             return Ok(0);
         };
 
-        let inserted = self.writes.commit_batch(rows, &cursor).await?;
-
-        // The rows are committed at this point. Failing the batch because the
-        // wake-up failed would roll nothing back and would consume the chain's
-        // retry budget.
-        if let Err(e) = self.raw_events.notify_appended(chain_id).await {
-            warn!(chain_id, "notify failed after a successful commit: {}", e);
-        }
-        Ok(inserted)
+        // The wake-up rides the same transaction, so there is nothing to do
+        // after it: Postgres queues a NOTIFY until commit, which makes the
+        // announcement exactly as durable as the rows it announces.
+        timed_ingest_stage(
+            ingest_stage::COMMIT,
+            chain_id,
+            self.writes.commit_batch(rows, &cursor),
+        )
+        .await
     }
 
     pub async fn advance_empty(&self, chain_id: i64, scanned: i64) -> Result<(), IngesterError> {
-        self.chain_state.advance_scanned(chain_id, scanned).await
+        timed_ingest_stage(
+            ingest_stage::COMMIT,
+            chain_id,
+            self.chain_state.advance_scanned(chain_id, scanned),
+        )
+        .await
     }
 
     /// The cursor a batch justifies, or `None` when it verifies no block.

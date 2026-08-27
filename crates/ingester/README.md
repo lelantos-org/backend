@@ -10,6 +10,12 @@ The live tail scans all the way to `tip` — there is **no head buffer**. That
 keeps latency at zero and makes reorg detection load-bearing rather than a
 backstop, so every tick starts by re-verifying the cursor's anchor.
 
+A tick reads the cursor once, then asks the chain for the anchor's hash and the
+tip together: the two RPCs do not depend on each other, and the anchor check and
+the scan plan both derive from the same cursor read. The anchor walk through
+`raw_events` only runs once the anchor has actually failed — on the common path
+there is nothing to walk.
+
 `chain_state` records the highest block whose hash was verified
 (`last_block` + `last_block_hash`). A tick asks the chain for the hash at that
 height; if it still matches, nothing has moved and the tick scans forward. If
@@ -23,8 +29,9 @@ incoming logs. Comparing incoming logs to stored ones cannot work: a tick only
 fetches blocks above `last_scanned_block`, so the stored lookup always misses
 and the check always answers "no reorg".
 
-A rewind deletes `raw_events` at or above the fork, resets the cursor, and
-records the fork in `chain_reorgs` — all in one transaction.
+A rewind deletes `raw_events` at or above the fork, resets the cursor, records
+the fork in `chain_reorgs` and emits the retraction NOTIFY — all in one
+transaction.
 
 ### Downstream retraction
 
@@ -40,7 +47,10 @@ rows at or above the fork and rewinds their cursor to replay. `consumer_cursors.
 tracks how far each consumer has processed the log.
 
 A `raw_events_reorg` NOTIFY (`<chain_id>:<rewind_to>`) is also emitted for
-consumers that want to react promptly rather than on their next tick.
+consumers that want to react promptly rather than on their next tick. Like the
+append NOTIFY, it is published inside the write transaction: Postgres queues a
+`NOTIFY` until commit, so it announces only rewinds that actually happened and
+costs no extra connection.
 
 ## Failure handling
 
@@ -88,7 +98,8 @@ chain lock.
 ## Config (`ingester.toml`)
 
 ```toml
-database_url = "postgres://..."
+database_url  = "postgres://..."
+db_pool_size  = 8         # optional, overrides the shared indexer pool size
 
 [[chains]]
 chain_id      = 1
@@ -99,7 +110,7 @@ reorg_depth             = 32      # optional
 block_poll_ms           = 2000    # optional
 backfill_threshold      = 100     # optional, blocks behind tip to trigger backfill mode
 backfill_concurrency    = 8       # optional
-chunk_blocks            = 50_000  # optional, range size during backfill
+chunk_blocks            = 10_000  # optional, range size during backfill
 meta_concurrency        = 16      # optional
 rpc_timeout_ms          = 30_000  # optional
 rpc_connect_timeout_ms  = 10_000  # optional
@@ -108,15 +119,16 @@ rpc_connect_timeout_ms  = 10_000  # optional
 | Key | Required | Default | Notes |
 |-----|----------|---------|-------|
 | `database_url` | yes | — | Postgres URL |
+| `db_pool_size` | no | `PoolCfg::indexer()` | Resizes the shared bb8 pool, keeping `min_idle` in proportion. One pool serves every chain worker, so raise it when many chains contend. Override with `INGESTER_DB_POOL_SIZE`. Behind a transaction pooler the real ceiling is simultaneously executing queries, not connections |
 | `chains[].chain_id` | yes | — | EVM chain id; must be unique |
 | `chains[].rpc_url` | yes | — | HTTP RPC endpoint. Redacted to scheme+host in logs — provider API keys live in the path |
 | `chains[].pool_address` | yes | — | Contract address to follow |
 | `chains[].start_block` | yes | — | First block to ingest; must be >= 0 |
 | `chains[].reorg_depth` | no | 32 | How far back the anchor walk searches, and the backfill's safety margin below tip. Not a live head buffer |
-| `chains[].block_poll_ms` | no | 2000 | Tip poll cadence |
+| `chains[].block_poll_ms` | no | 2000 | Ceiling of the live tail's idle backoff, not a fixed cadence. A tick that committed or rewound loops straight back; an idle tick waits from 50ms, doubling up to this |
 | `chains[].backfill_threshold` | no | 100 | Lag (blocks) that flips the worker into backfill mode. Must exceed `reorg_depth`, or the worker oscillates between the two modes |
 | `chains[].backfill_concurrency` | no | 8 | Parallel range fetches in backfill |
-| `chains[].chunk_blocks` | no | 50000 | Block range per backfill chunk, and the cap on one live tick's span |
+| `chains[].chunk_blocks` | no | 10000 | Block range per backfill chunk, and the cap on one live tick's span. Also the memory bound: the backfill decodes `backfill_concurrency` chunks at once. Need not be tuned below the provider's `eth_getLogs` cap — the adaptive window learns that once and remembers it |
 | `chains[].meta_concurrency` | no | 16 | Cap on simultaneous `eth_getBlockByNumber` calls |
 | `chains[].rpc_timeout_ms` | no | 30000 | Whole-request RPC timeout |
 | `chains[].rpc_connect_timeout_ms` | no | 10000 | RPC connect timeout |

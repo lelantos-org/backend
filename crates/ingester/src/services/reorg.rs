@@ -14,12 +14,13 @@
 use crate::adapters::DynRpc;
 use crate::domain::error::IngesterError;
 use crate::domain::models::BlockCursor;
-use crate::repositories::{AtomicWriteRepo, ChainStateRepo, RawEventRepo};
+use crate::repositories::{AtomicWriteRepo, BlockHashRepo};
+use alloy::primitives::B256;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 /// A block height paired with the hash recorded for it.
-type Checkpoint = (i64, Vec<u8>);
+pub type Checkpoint = (i64, Vec<u8>);
 
 /// A confirmed fork: what to discard, and the last block known to survive it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,49 +35,70 @@ pub struct Divergence {
 
 pub struct ReorgService {
     writes: Arc<dyn AtomicWriteRepo>,
-    raw_events: Arc<dyn RawEventRepo>,
-    chain_state: Arc<dyn ChainStateRepo>,
+    raw_events: Arc<dyn BlockHashRepo>,
 }
 
 impl ReorgService {
-    pub fn new(
-        writes: Arc<dyn AtomicWriteRepo>,
-        raw_events: Arc<dyn RawEventRepo>,
-        chain_state: Arc<dyn ChainStateRepo>,
-    ) -> Self {
-        Self {
-            writes,
-            raw_events,
-            chain_state,
-        }
+    pub fn new(writes: Arc<dyn AtomicWriteRepo>, raw_events: Arc<dyn BlockHashRepo>) -> Self {
+        Self { writes, raw_events }
     }
 
     /// Check that the stored anchor is still on the canonical chain.
     ///
-    /// Costs one `eth_getBlockByNumber` in the common case, and walks back at
-    /// most `max_depth` blocks when that disagrees.
+    /// Takes the anchor and the chain's hash at that height rather than reading
+    /// them: the live tick fetches both already, overlapping the anchor lookup
+    /// with the tip lookup, and re-reading here would undo that.
     ///
-    /// `floor` is `start_block`: the ingester claims no knowledge below it, so
-    /// the walk stops there.
+    /// Costs nothing beyond the comparison in the common case. Only a mismatch
+    /// walks back, at most `max_depth` blocks. `floor` is `start_block`: the
+    /// ingester claims no knowledge below it, so the walk stops there.
     pub async fn check_anchor(
         &self,
         chain_id: i64,
         rpc: &DynRpc,
         floor: i64,
         max_depth: u64,
+        anchor: &Checkpoint,
+        chain_hash: Option<B256>,
     ) -> Result<Option<Divergence>, IngesterError> {
-        let Some(anchor) = self.stored_anchor(chain_id).await? else {
+        if hash_matches(chain_hash, &anchor.1) {
             return Ok(None);
-        };
-        let (anchor_block, _) = anchor;
+        }
+        self.locate_fork(chain_id, rpc, floor, max_depth, anchor)
+            .await
+            .map(Some)
+    }
+
+    /// Walk back from a known-bad anchor to the highest block the chain still
+    /// agrees with.
+    ///
+    /// Reached only once the anchor has already failed, which is what keeps
+    /// `block_hashes_desc` off the common path: it is a `DISTINCT ON` over the
+    /// last `max_depth` blocks of `raw_events`, and running it on every tick
+    /// scans thousands of rows to discard all of them.
+    async fn locate_fork(
+        &self,
+        chain_id: i64,
+        rpc: &DynRpc,
+        floor: i64,
+        max_depth: u64,
+        anchor: &Checkpoint,
+    ) -> Result<Divergence, IngesterError> {
+        let anchor_block = anchor.0;
         let limit = anchor_block.saturating_sub(max_depth as i64).max(floor);
 
-        for (block, stored) in self.checkpoints(chain_id, anchor, limit).await? {
+        // Starts below the anchor: it is the block that just failed.
+        let below = if anchor_block > limit {
+            self.raw_events
+                .block_hashes_desc(chain_id, limit, anchor_block - 1)
+                .await?
+        } else {
+            Vec::new()
+        };
+
+        for (block, stored) in below {
             if !still_canonical(rpc, block, &stored).await? {
                 continue;
-            }
-            if block == anchor_block {
-                return Ok(None);
             }
             warn!(
                 chain_id,
@@ -84,10 +106,10 @@ impl ReorgService {
                 survived = block,
                 "chain diverged above block {block}"
             );
-            return Ok(Some(Divergence {
+            return Ok(Divergence {
                 rewind_to: block + 1,
                 anchor: Some((block, stored)),
-            }));
+            });
         }
 
         // Nothing in the window survives, so discard it all and re-derive. The
@@ -97,45 +119,10 @@ impl ReorgService {
             chain_id,
             anchor_block, limit, "no verified block within reorg_depth; rewinding whole window"
         );
-        Ok(Some(Divergence {
+        Ok(Divergence {
             rewind_to: limit,
             anchor: None,
-        }))
-    }
-
-    /// The cursor's verified anchor, if it has one.
-    ///
-    /// An empty hash means no verified block yet: a fresh chain, or one whose
-    /// scanned range has produced no logs. It is not an anchor, and treating it as
-    /// one would compare against bytes that are not a hash.
-    async fn stored_anchor(&self, chain_id: i64) -> Result<Option<Checkpoint>, IngesterError> {
-        let Some(cursor) = self.chain_state.fetch(chain_id).await? else {
-            return Ok(None);
-        };
-        if cursor.last_block_hash.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some((cursor.last_block, cursor.last_block_hash)))
-    }
-
-    /// Heights to test, highest first: the anchor, then every stored hash down to
-    /// `limit`. The first that still matches the chain bounds the fork.
-    async fn checkpoints(
-        &self,
-        chain_id: i64,
-        anchor: Checkpoint,
-        limit: i64,
-    ) -> Result<Vec<Checkpoint>, IngesterError> {
-        let (anchor_block, _) = anchor;
-        let mut out = vec![anchor];
-        if anchor_block > limit {
-            out.extend(
-                self.raw_events
-                    .block_hashes_desc(chain_id, limit, anchor_block - 1)
-                    .await?,
-            );
-        }
-        Ok(out)
+        })
     }
 
     /// Discard the diverged suffix and reset the cursor to the surviving
@@ -155,6 +142,12 @@ impl ReorgService {
             new_scan,
             "rewinding chain state"
         );
+        // Consumers stream `raw_events` by ascending id and re-read the
+        // replacement rows on their own, but state derived from the deleted rows
+        // is invisible to that cursor. `chain_reorgs` is the durable record and
+        // the NOTIFY only reduces latency; both are written by the same
+        // transaction as the delete, so neither can describe a rewind that did
+        // not happen.
         let deleted = self
             .writes
             .rewind(
@@ -169,31 +162,37 @@ impl ReorgService {
             )
             .await?;
         info!(chain_id, deleted, new_scan, "rewind applied");
-
-        // Consumers stream `raw_events` by ascending id and re-read the
-        // replacement rows on their own, but state derived from the deleted rows
-        // is invisible to that cursor. The durable record lives in `chain_reorgs`,
-        // written in the same transaction; this notify only reduces latency.
-        if let Err(e) = self
-            .raw_events
-            .notify_reorg(chain_id, divergence.rewind_to)
-            .await
-        {
-            warn!(chain_id, "reorg notify failed: {}", e);
-        }
         Ok(deleted)
     }
 }
 
-/// Does the chain still report `stored` as the hash at `block`?
+/// The cursor's verified anchor, if it has one.
 ///
-/// A block the node no longer has counts as not canonical, since it was almost
-/// certainly orphaned.
+/// An empty hash means no verified block yet: a fresh chain, or one whose
+/// scanned range has produced no logs. It is not an anchor, and treating it as
+/// one would compare against bytes that are not a hash.
+///
+/// Free and pure so the live tick can derive the anchor from a cursor it already
+/// holds, without a second read.
+pub fn anchor_of(cursor: &BlockCursor) -> Option<Checkpoint> {
+    if cursor.last_block_hash.is_empty() {
+        return None;
+    }
+    Some((cursor.last_block, cursor.last_block_hash.clone()))
+}
+
+/// Does the chain's hash at some height match what was recorded for it?
+///
+/// A height the chain cannot produce (`None`) counts as a mismatch: the block
+/// was almost certainly orphaned, and treating it as a match would anchor onto a
+/// block the node cannot serve.
+fn hash_matches(chain: Option<B256>, stored: &[u8]) -> bool {
+    chain.is_some_and(|h| h.0.as_slice() == stored)
+}
+
+/// Does the chain still report `stored` as the hash at `block`?
 async fn still_canonical(rpc: &DynRpc, block: i64, stored: &[u8]) -> Result<bool, IngesterError> {
-    Ok(rpc
-        .block_hash_at(block as u64)
-        .await?
-        .is_some_and(|h| h.0.as_slice() == stored))
+    Ok(hash_matches(rpc.block_hash_at(block as u64).await?, stored))
 }
 
 #[cfg(test)]
@@ -206,6 +205,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn hash(byte: u8) -> Vec<u8> {
         vec![byte; 32]
@@ -257,6 +257,8 @@ mod tests {
         /// block → hash, as if read back out of `raw_events`.
         hashes: Mutex<Vec<Checkpoint>>,
         rewound: Mutex<Vec<(i64, i64)>>,
+        /// Times `block_hashes_desc` was issued. The happy path must not.
+        hash_queries: AtomicUsize,
     }
 
     impl FakeStore {
@@ -286,23 +288,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl ChainStateRepo for FakeStore {
-        async fn fetch(&self, _chain_id: i64) -> Result<Option<BlockCursor>, IngesterError> {
-            Ok(self.cursor.lock().unwrap().clone())
-        }
-        async fn advance_scanned(&self, _c: i64, _s: i64) -> Result<(), IngesterError> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl RawEventRepo for FakeStore {
+    impl BlockHashRepo for FakeStore {
         async fn block_hashes_desc(
             &self,
             _chain_id: i64,
             from_block: i64,
             to_block: i64,
         ) -> Result<Vec<Checkpoint>, IngesterError> {
+            self.hash_queries.fetch_add(1, Ordering::SeqCst);
             Ok(self
                 .hashes
                 .lock()
@@ -311,12 +304,6 @@ mod tests {
                 .filter(|(n, _)| *n >= from_block && *n <= to_block)
                 .cloned()
                 .collect())
-        }
-        async fn notify_appended(&self, _c: i64) -> Result<(), IngesterError> {
-            Ok(())
-        }
-        async fn notify_reorg(&self, _c: i64, _r: i64) -> Result<(), IngesterError> {
-            Ok(())
         }
     }
 
@@ -342,7 +329,23 @@ mod tests {
     }
 
     fn service(store: &Arc<FakeStore>) -> ReorgService {
-        ReorgService::new(store.clone(), store.clone(), store.clone())
+        ReorgService::new(store.clone(), store.clone())
+    }
+
+    /// Drive `check_anchor` the way the live tick does: read the cursor, derive
+    /// the anchor, ask the chain for its hash, then check.
+    ///
+    /// Kept in the tests rather than as a production convenience so there is
+    /// exactly one entry point to the anchor check, and it is the one the tick
+    /// executes.
+    async fn check(store: &Arc<FakeStore>, chain: &DynRpc, max_depth: u64) -> Option<Divergence> {
+        let cursor = store.cursor.lock().unwrap().clone();
+        let anchor = cursor.as_ref().and_then(anchor_of)?;
+        let chain_hash = chain.block_hash_at(anchor.0 as u64).await.unwrap();
+        service(store)
+            .check_anchor(1, chain, FLOOR, max_depth, &anchor, chain_hash)
+            .await
+            .unwrap()
     }
 
     const DEPTH: u64 = 32;
@@ -352,11 +355,37 @@ mod tests {
     async fn an_untouched_chain_reports_no_divergence() {
         let store = FakeStore::seeded(100..=110, 0xa0);
         let chain = FakeChain::new(100..=110, 0xa0) as DynRpc;
-        let got = service(&store)
-            .check_anchor(1, &chain, FLOOR, DEPTH)
-            .await
-            .unwrap();
+        let got = check(&store, &chain, DEPTH).await;
         assert!(got.is_none(), "same hashes, no reorg");
+    }
+
+    /// The anchor walk reads `raw_events` with a `DISTINCT ON` over the last
+    /// `reorg_depth` blocks. Issuing it when the anchor still matches scans
+    /// thousands of rows per tick and discards every one of them.
+    #[tokio::test]
+    async fn a_matching_anchor_does_not_query_the_stored_hashes() {
+        let store = FakeStore::seeded(100..=110, 0xa0);
+        let chain = FakeChain::new(100..=110, 0xa0) as DynRpc;
+
+        check(&store, &chain, DEPTH).await;
+
+        assert_eq!(
+            store.hash_queries.load(Ordering::SeqCst),
+            0,
+            "the happy path must not touch raw_events"
+        );
+    }
+
+    /// The mirror of the above: once the anchor fails, the walk is the only way
+    /// to bound the fork, so the query must fire.
+    #[tokio::test]
+    async fn a_diverged_anchor_does_query_the_stored_hashes() {
+        let store = FakeStore::seeded(100..=110, 0xa0);
+        let chain = FakeChain::new(100..=110, 0xff) as DynRpc;
+
+        check(&store, &chain, DEPTH).await.expect("fork detected");
+
+        assert_eq!(store.hash_queries.load(Ordering::SeqCst), 1);
     }
 
     /// The chain replaced the top few blocks. Rewinding must target the lowest
@@ -371,11 +400,7 @@ mod tests {
         blocks.extend((108..=110).map(|n| (n as u64, B256::repeat_byte(0xff ^ (n as u8)))));
         let chain = Arc::new(FakeChain(blocks)) as DynRpc;
 
-        let divergence = service(&store)
-            .check_anchor(1, &chain, FLOOR, DEPTH)
-            .await
-            .unwrap()
-            .expect("fork detected");
+        let divergence = check(&store, &chain, DEPTH).await.expect("fork detected");
 
         assert_eq!(divergence.rewind_to, 108);
         assert_eq!(divergence.anchor.expect("survivor").0, 107);
@@ -393,26 +418,14 @@ mod tests {
             last_scanned_block: 500,
         }));
         let chain = FakeChain::new(100..=110, 0xa0) as DynRpc;
-        assert!(
-            service(&store)
-                .check_anchor(1, &chain, FLOOR, DEPTH)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(check(&store, &chain, DEPTH).await.is_none());
     }
 
     #[tokio::test]
     async fn a_chain_with_no_cursor_is_not_a_divergence() {
         let store = FakeStore::with_cursor(None);
         let chain = FakeChain::new(100..=110, 0xa0) as DynRpc;
-        assert!(
-            service(&store)
-                .check_anchor(1, &chain, FLOOR, DEPTH)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(check(&store, &chain, DEPTH).await.is_none());
     }
 
     /// Deeper than `reorg_depth`: nothing in the window survives, so the whole
@@ -422,11 +435,7 @@ mod tests {
         let store = FakeStore::seeded(100..=110, 0xa0);
         let chain = FakeChain::new(100..=110, 0xff) as DynRpc;
 
-        let divergence = service(&store)
-            .check_anchor(1, &chain, FLOOR, 4)
-            .await
-            .unwrap()
-            .expect("fork detected");
+        let divergence = check(&store, &chain, 4).await.expect("fork detected");
 
         assert_eq!(divergence.rewind_to, 106, "anchor 110 minus depth 4");
         assert!(divergence.anchor.is_none(), "nothing survived to anchor on");
@@ -439,11 +448,7 @@ mod tests {
         let store = FakeStore::seeded(100..=110, 0xa0);
         let chain = FakeChain::new(100..=110, 0xff) as DynRpc;
 
-        let divergence = service(&store)
-            .check_anchor(1, &chain, FLOOR, 1_000)
-            .await
-            .unwrap()
-            .expect("fork detected");
+        let divergence = check(&store, &chain, 1_000).await.expect("fork detected");
 
         assert_eq!(divergence.rewind_to, FLOOR);
     }
@@ -456,10 +461,8 @@ mod tests {
         // Only 100..=105 remain visible; the anchor at 110 is gone.
         let chain = FakeChain::new(100..=105, 0xa0) as DynRpc;
 
-        let divergence = service(&store)
-            .check_anchor(1, &chain, FLOOR, DEPTH)
+        let divergence = check(&store, &chain, DEPTH)
             .await
-            .unwrap()
             .expect("missing anchor is a divergence");
 
         assert_eq!(divergence.rewind_to, 106);

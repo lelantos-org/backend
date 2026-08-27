@@ -12,15 +12,9 @@ use crate::backoff::Backoff;
 use crate::shutdown::Shutdown;
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, info, trace, warn};
-
-/// Floor of the idle backoff. The configured `tick_ms` is the ceiling.
-const TICK_MIN: Duration = Duration::from_millis(50);
-/// Growth factor of the idle backoff.
-const TICK_FACTOR: u32 = 2;
 
 /// A wake signal: input a tick service consumes may now be available.
 ///
@@ -149,8 +143,8 @@ pub async fn run(svc: Arc<dyn TickService>, tick_ms: u64, batch: i64, shutdown: 
 ///
 /// - [`Saturated`](TickProgress::Saturated): no sleep, so catch-up is bounded
 ///   by the database rather than by the tick.
-/// - [`Partial`](TickProgress::Partial): sleep from [`TICK_MIN`], so an arrival
-///   landing just after a round is picked up in ~50 ms.
+/// - [`Partial`](TickProgress::Partial): sleep from the [`Backoff::idle`] floor,
+///   so an arrival landing just after a round is picked up in ~50 ms.
 /// - [`Idle`](TickProgress::Idle): sleep, doubling up to `tick_ms`.
 ///
 /// `wake` cuts an idle sleep short when the producer signals new input; see
@@ -166,10 +160,7 @@ pub async fn run_with_wake(
     mut wake: Option<Wake>,
 ) {
     let name = svc.name();
-    // `max(1)` keeps a misconfigured `tick_ms = 0` from producing a zero
-    // backoff, which `Backoff::new` rejects and which would busy-poll.
-    let ceiling = Duration::from_millis(tick_ms.max(1));
-    let mut backoff = Backoff::new(TICK_MIN.min(ceiling), ceiling, TICK_FACTOR);
+    let mut backoff = Backoff::idle(tick_ms);
     info!(name, tick_ms, batch, "tick driver started");
 
     // Checked before every round because the `Saturated` path below skips the
@@ -232,8 +223,10 @@ async fn woken(wake: &mut Option<Wake>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backoff::{IDLE_FACTOR as TICK_FACTOR, IDLE_MIN as TICK_MIN};
     use crate::shutdown;
     use std::sync::Mutex;
+    use std::time::Duration;
     use tokio::sync::watch;
     use tokio::time::Instant;
 
