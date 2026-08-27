@@ -17,8 +17,9 @@ pub const NAME: &str = "explorer";
 /// Kinds backing the public stats and the deposit-escrow ledger. `NoteCreated`
 /// and `NullifierConsumed` belong to the FMD zone and are consumed by
 /// fmd-indexer.
-const KINDS: [i16; 6] = [
+const KINDS: [i16; 7] = [
     EventKind::AssetRegistered as i16,
+    EventKind::AssetFeeSet as i16,
     EventKind::RootAdvanced as i16,
     EventKind::AssetMoved as i16,
     EventKind::DepositEscrowed as i16,
@@ -204,6 +205,11 @@ async fn dispatch(
             token,
             scale,
         } => events::asset_registered(&ctx.pool, chain_id, asset_id, token, scale).await,
+        DecodedEvent::AssetFeeSet {
+            asset_id,
+            deposit_bps,
+            withdraw_bps,
+        } => events::asset_fee_set(&ctx.pool, chain_id, asset_id, deposit_bps, withdraw_bps).await,
         DecodedEvent::RootAdvanced {
             start_index,
             inserted,

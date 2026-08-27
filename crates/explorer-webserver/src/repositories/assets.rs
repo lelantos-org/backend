@@ -17,6 +17,13 @@ pub struct AssetRow {
     /// `NULL` until the indexer has read `symbol()` over RPC, or permanently for
     /// tokens that do not implement it.
     pub symbol: Option<String>,
+    /// Protocol fee rates, in bps, `NULL` until an `AssetFeeSet` is indexed.
+    ///
+    /// Per asset and per leg — the pool has no global rate — so `NULL` means
+    /// unknown and must not be read as zero. `SMALLINT` is wide enough because
+    /// the contract caps both at `MAX_FEE_BPS` (2000).
+    pub deposit_bps: Option<i16>,
+    pub withdraw_bps: Option<i16>,
 }
 
 pub async fn list(pool: &DbPool, chain_id: Option<i64>) -> AppResult<Vec<AssetRow>> {

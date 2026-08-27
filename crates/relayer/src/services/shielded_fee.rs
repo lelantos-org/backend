@@ -817,6 +817,8 @@ mod tests {
             scale: "1000000000000".parse().expect("scale"),
             decimals: Some(18),
             symbol: None,
+            deposit_bps: None,
+            withdraw_bps: None,
         }
     }
 

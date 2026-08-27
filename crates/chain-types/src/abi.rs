@@ -29,6 +29,18 @@ sol! {
         uint256 scale
     );
 
+    /// Emitted with the rates an asset is registered at, and again on every
+    /// change. Fees are per asset and per leg with no pool-wide fallback, so a
+    /// consumer must follow this event rather than reading a rate once:
+    /// `AssetRegistered` carries neither value, and unlike `scale` a fee is
+    /// mutable. Registration emits both events in the same transaction.
+    #[derive(Debug)]
+    event AssetFeeSet(
+        uint64 indexed assetId,
+        uint16 depositBps,
+        uint16 withdrawBps
+    );
+
     /// Emitted by `CommitmentTree._advanceRoot` when a tree-update SNARK lands
     /// on chain. `startIndex` is the leaf index of the first newly inserted
     /// commitment; `inserted` is the leaf count — spends insert

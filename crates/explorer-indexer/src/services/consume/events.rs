@@ -1,7 +1,7 @@
 use crate::error::ExplorerIndexerError;
 use crate::repositories::{
     asset_flows::{self, NewAssetFlow},
-    assets::{self, UpsertAsset},
+    assets::{self, UpsertAsset, UpsertAssetFee},
     deposit_events::{self, NewDepositEscrowed},
     raw_events::RawEventRow,
     tree_advances::{self, TreeAdvanceRow},
@@ -26,6 +26,30 @@ pub async fn asset_registered(
             asset_id_u64: asset_id as i64,
             token: token.as_slice().to_vec(),
             scale: u256_to_bigdecimal(scale),
+        },
+    )
+    .await
+}
+
+/// Rates are mutable, so this replaces whatever was stored rather than filling
+/// a gap: a later `AssetFeeSet` for the same asset is a rate change, not a
+/// duplicate.
+pub async fn asset_fee_set(
+    pool: &DbPool,
+    chain_id: i64,
+    asset_id: u64,
+    deposit_bps: u16,
+    withdraw_bps: u16,
+) -> Result<(), ExplorerIndexerError> {
+    assets::upsert_fee(
+        pool,
+        UpsertAssetFee {
+            chain_id,
+            asset_id_u64: asset_id as i64,
+            // Both are `uint16` on chain but bounded by `MAX_FEE_BPS` (2000),
+            // so the cast to Postgres `SMALLINT` cannot lose a valid value.
+            deposit_bps: deposit_bps as i16,
+            withdraw_bps: withdraw_bps as i16,
         },
     )
     .await

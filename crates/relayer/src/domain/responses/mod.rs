@@ -110,6 +110,18 @@ pub struct TokenOut {
     /// `symbol()`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+    /// Protocol fee on a shield of this asset, in bps. Absent until an
+    /// `AssetFeeSet` has been indexed.
+    ///
+    /// Rates are per asset and per leg — there is no pool-wide fee — so an
+    /// absent value is unknown, not zero, and the two legs differ routinely.
+    /// The deposit rate is charged **on top** of the principal, while the
+    /// withdraw rate is **skimmed from** the proceeds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deposit_bps: Option<i16>,
+    /// Protocol fee on an unshield of this asset, in bps. See `depositBps`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdraw_bps: Option<i16>,
 }
 
 /// Spot USD prices for the registered assets, across every chain.
@@ -154,6 +166,8 @@ impl From<&crate::repositories::assets::AssetRow> for TokenOut {
             scale: a.scale.to_string(),
             decimals: a.decimals,
             symbol: a.symbol.clone(),
+            deposit_bps: a.deposit_bps,
+            withdraw_bps: a.withdraw_bps,
         }
     }
 }
@@ -280,6 +294,8 @@ mod tests {
                 scale: "1000000000000".to_string(),
                 decimals: Some(6),
                 symbol: Some("USDC".to_string()),
+                deposit_bps: Some(0),
+                withdraw_bps: Some(20),
             }],
         });
         let json = serde_json::to_value(&h).expect("serialize");
@@ -358,6 +374,8 @@ mod tests {
                     scale: "10000000000".to_string(),
                     decimals: Some(18),
                     symbol: Some("WETH".to_string()),
+                    deposit_bps: Some(0),
+                    withdraw_bps: Some(20),
                 },
                 TokenOut {
                     asset_id: 2,
@@ -365,6 +383,10 @@ mod tests {
                     scale: "1".to_string(),
                     decimals: None,
                     symbol: None,
+                    // Unindexed rates omit both keys, the same way unknown
+                    // decimals and symbol do.
+                    deposit_bps: None,
+                    withdraw_bps: None,
                 },
             ],
         ))

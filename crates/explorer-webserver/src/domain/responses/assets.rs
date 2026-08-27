@@ -23,4 +23,15 @@ pub struct AssetOut {
     /// Provider's timestamp for `price_usd`, so a client can age the quote.
     /// `null` whenever `price_usd` is.
     pub price_at: Option<i64>,
+    /// Protocol fee charged when shielding this asset, in basis points.
+    ///
+    /// Rates are per asset and per leg; the pool has no global fee, so `null`
+    /// means "not indexed yet" and must be rendered as unknown rather than as
+    /// zero — a real zero is a common configuration and arrives as `0`.
+    /// Charged **on top of** the deposited principal.
+    pub deposit_bps: Option<i16>,
+    /// Protocol fee charged when unshielding this asset, in basis points.
+    /// Unlike `deposit_bps`, it is **skimmed from** the proceeds. See there for
+    /// how to treat `null`.
+    pub withdraw_bps: Option<i16>,
 }

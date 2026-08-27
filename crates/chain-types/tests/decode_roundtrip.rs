@@ -1,7 +1,8 @@
 use alloy::primitives::{Address, B256, U256};
 use alloy::sol_types::SolEvent;
 use chain_types::abi::{
-    AssetMoved, AssetRegistered, DepositEscrowed, DepositFlushed, NotePayload, RootAdvanced,
+    AssetFeeSet, AssetMoved, AssetRegistered, DepositEscrowed, DepositFlushed, NotePayload,
+    RootAdvanced,
 };
 use chain_types::decode::{DecodedEvent, decode, event_kind_from_topic0, known_signatures};
 use shared::entities::EventKind;
@@ -16,7 +17,7 @@ fn known_signatures_unique() {
     let mut sorted = sigs.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), 8);
+    assert_eq!(sorted.len(), 9);
 }
 
 #[test]
@@ -28,6 +29,10 @@ fn topic0_to_event_kind_maps() {
     assert_eq!(
         event_kind_from_topic0(&AssetRegistered::SIGNATURE_HASH),
         Some(EventKind::AssetRegistered)
+    );
+    assert_eq!(
+        event_kind_from_topic0(&AssetFeeSet::SIGNATURE_HASH),
+        Some(EventKind::AssetFeeSet)
     );
     assert_eq!(
         event_kind_from_topic0(&RootAdvanced::SIGNATURE_HASH),
@@ -230,6 +235,36 @@ fn deposit_flushed_roundtrip() {
             assert_eq!(*c, cm);
         }
         _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn asset_fee_set_roundtrip() {
+    // A zero deposit rate beside a non-zero withdraw rate: the asymmetric
+    // shape the contract exists to express, and the case a decoder that
+    // treated 0 as "absent" would corrupt.
+    let ev = AssetFeeSet {
+        assetId: 7,
+        depositBps: 0,
+        withdrawBps: 20,
+    };
+    let log = ev.encode_log_data();
+    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
+    let data = log.data.to_vec();
+
+    let decoded = decode(EventKind::AssetFeeSet, &topics, &data).expect("decode");
+    assert_eq!(decoded.len(), 1);
+    match &decoded[0] {
+        DecodedEvent::AssetFeeSet {
+            asset_id,
+            deposit_bps,
+            withdraw_bps,
+        } => {
+            assert_eq!(*asset_id, 7);
+            assert_eq!(*deposit_bps, 0);
+            assert_eq!(*withdraw_bps, 20);
+        }
+        other => panic!("wrong variant: {other:?}"),
     }
 }
 

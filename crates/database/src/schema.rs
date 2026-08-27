@@ -93,6 +93,8 @@ diesel::table! {
         scale -> Numeric,
         decimals -> Nullable<Int2>,
         symbol -> Nullable<Text>,
+        deposit_bps -> Nullable<Int2>,
+        withdraw_bps -> Nullable<Int2>,
     }
 }
 

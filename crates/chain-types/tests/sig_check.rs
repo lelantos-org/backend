@@ -1,7 +1,7 @@
 use alloy::sol_types::SolEvent;
 use chain_types::abi::{
-    AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed, NotePayload,
-    NullifierConsumed, RootAdvanced,
+    AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
+    NotePayload, NullifierConsumed, RootAdvanced,
 };
 
 /// Topic0 of every event this crate decodes, taken from the canonical Foundry
@@ -47,6 +47,10 @@ const EXPECTED: &[(&str, &str)] = &[
         "AssetMoved",
         "e518860ada3bf432f9af64f54465c559c978ecbe2a9d6711b16532dea1daa4a6",
     ),
+    (
+        "AssetFeeSet",
+        "a8dda59a05d622fd0130a6952f3e1fedeb17964708e5a6b3d186ce77cd69961c",
+    ),
 ];
 
 #[test]
@@ -60,6 +64,7 @@ fn test_signature_hashes_match_the_deployed_contract_abi() {
         ("RootAdvanced", RootAdvanced::SIGNATURE_HASH),
         ("AssetRegistered", AssetRegistered::SIGNATURE_HASH),
         ("AssetMoved", AssetMoved::SIGNATURE_HASH),
+        ("AssetFeeSet", AssetFeeSet::SIGNATURE_HASH),
     ];
 
     for (name, hash) in actual {

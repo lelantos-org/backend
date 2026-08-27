@@ -5,7 +5,7 @@ use alloy::primitives::{Address, B256, LogData, U256};
 use alloy::rpc::types::eth::Log;
 use alloy::sol_types::SolEvent;
 use bigdecimal::BigDecimal;
-use chain_types::abi::{AssetRegistered, RootAdvanced};
+use chain_types::abi::{AssetFeeSet, AssetRegistered, RootAdvanced};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use explorer_indexer::config::ExplorerIndexerConfig;
@@ -101,6 +101,23 @@ fn asset_registered_log(
     build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
 }
 
+fn asset_fee_set_log(
+    asset_id: u64,
+    deposit_bps: u16,
+    withdraw_bps: u16,
+    block_n: u64,
+    block_ts: u64,
+    tx_byte: u8,
+    log_idx: u64,
+) -> Log {
+    let ev = AssetFeeSet {
+        assetId: asset_id,
+        depositBps: deposit_bps,
+        withdrawBps: withdraw_bps,
+    };
+    build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
+}
+
 fn root_advanced_log(
     start_index: u64,
     inserted: u64,
@@ -182,6 +199,102 @@ async fn asset_registered_persists_registry_fields() {
     assert_eq!(row.0, ASSET_ID as i64);
     assert_eq!(row.1[0], 0xde);
     assert_eq!(row.2, BigDecimal::from_str("1000000").unwrap());
+}
+
+/// Registration emits `AssetRegistered` and `AssetFeeSet` in one transaction.
+/// The rates must land without disturbing `token` or `scale`, which the fee
+/// upsert does not carry.
+#[tokio::test]
+async fn asset_fee_set_persists_rates_without_clobbering_the_registry() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &asset_registered_log(ASSET_ID, 0xde, 100, 1_700_000_000, 0x01, 0),
+        EventKind::AssetRegistered,
+    )
+    .await;
+    // Zero deposit, non-zero withdraw: a zero rate must persist as a rate, not
+    // read back as "unset".
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &asset_fee_set_log(ASSET_ID, 0, 20, 100, 1_700_000_000, 0x01, 1),
+        EventKind::AssetFeeSet,
+    )
+    .await;
+
+    let ctx = empty_ctx(pool.clone());
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+
+    use database::schema::assets;
+    let mut conn = pool.get().await.unwrap();
+    let row: (Vec<u8>, BigDecimal, Option<i16>, Option<i16>) = assets::table
+        .filter(assets::chain_id.eq(CHAIN_A))
+        .select((
+            assets::token,
+            assets::scale,
+            assets::deposit_bps,
+            assets::withdraw_bps,
+        ))
+        .first(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(row.0[0], 0xde, "token survived the fee upsert");
+    assert_eq!(
+        row.1,
+        BigDecimal::from_str("1000000").unwrap(),
+        "scale survived"
+    );
+    assert_eq!(row.2, Some(0), "a zero deposit rate is stored, not dropped");
+    assert_eq!(row.3, Some(20));
+}
+
+/// A rate change long after registration replaces the stored pair rather than
+/// only filling a gap, and still leaves the registry columns alone.
+#[tokio::test]
+async fn asset_fee_set_replaces_earlier_rates() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &asset_registered_log(ASSET_ID, 0xde, 100, 1_700_000_000, 0x01, 0),
+        EventKind::AssetRegistered,
+    )
+    .await;
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &asset_fee_set_log(ASSET_ID, 25, 25, 100, 1_700_000_000, 0x01, 1),
+        EventKind::AssetFeeSet,
+    )
+    .await;
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &asset_fee_set_log(ASSET_ID, 0, 50, 101, 1_700_000_100, 0x02, 0),
+        EventKind::AssetFeeSet,
+    )
+    .await;
+
+    let ctx = empty_ctx(pool.clone());
+    let _ = tick_chain(&ctx, CHAIN_A, 101).await.unwrap();
+
+    use database::schema::assets;
+    let mut conn = pool.get().await.unwrap();
+    let row: (Vec<u8>, Option<i16>, Option<i16>) = assets::table
+        .filter(assets::chain_id.eq(CHAIN_A))
+        .select((assets::token, assets::deposit_bps, assets::withdraw_bps))
+        .first(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(row.0[0], 0xde);
+    assert_eq!(row.1, Some(0), "latest rates win");
+    assert_eq!(row.2, Some(50));
 }
 
 #[tokio::test]

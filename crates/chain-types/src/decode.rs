@@ -1,6 +1,6 @@
 use crate::abi::{
-    AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed, NotePayload,
-    NullifierConsumed, RootAdvanced,
+    AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
+    NotePayload, NullifierConsumed, RootAdvanced,
 };
 use alloy::primitives::{Address, B256, LogData, U256};
 use alloy::sol_types::SolEvent;
@@ -52,6 +52,14 @@ pub enum DecodedEvent {
         asset_id: u64,
         token: Address,
         scale: U256,
+    },
+    /// Per-leg fee rates for one asset. Emitted at registration and on every
+    /// change; there is no pool-wide rate to fall back to, so an asset with no
+    /// observed `AssetFeeSet` has unknown rates rather than default ones.
+    AssetFeeSet {
+        asset_id: u64,
+        deposit_bps: u16,
+        withdraw_bps: u16,
     },
     RootAdvanced {
         start_index: u64,
@@ -138,6 +146,15 @@ pub fn decode(
                 scale: ev.scale,
             }])
         }
+        EventKind::AssetFeeSet => {
+            let ev = AssetFeeSet::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::AssetFeeSet {
+                asset_id: ev.assetId,
+                deposit_bps: ev.depositBps,
+                withdraw_bps: ev.withdrawBps,
+            }])
+        }
         EventKind::RootAdvanced => {
             let ev = RootAdvanced::decode_log_data(&log, true)
                 .map_err(|e| DecodeError::Alloy(e.to_string()))?;
@@ -221,6 +238,8 @@ pub fn event_kind_from_topic0(topic0: &B256) -> Option<EventKind> {
         Some(EventKind::NoteCreated)
     } else if topic0 == &AssetRegistered::SIGNATURE_HASH {
         Some(EventKind::AssetRegistered)
+    } else if topic0 == &AssetFeeSet::SIGNATURE_HASH {
+        Some(EventKind::AssetFeeSet)
     } else if topic0 == &RootAdvanced::SIGNATURE_HASH {
         Some(EventKind::RootAdvanced)
     } else if topic0 == &AssetMoved::SIGNATURE_HASH {
@@ -238,10 +257,11 @@ pub fn event_kind_from_topic0(topic0: &B256) -> Option<EventKind> {
     }
 }
 
-pub fn known_signatures() -> [B256; 8] {
+pub fn known_signatures() -> [B256; 9] {
     [
         NotePayload::SIGNATURE_HASH,
         AssetRegistered::SIGNATURE_HASH,
+        AssetFeeSet::SIGNATURE_HASH,
         RootAdvanced::SIGNATURE_HASH,
         AssetMoved::SIGNATURE_HASH,
         NullifierConsumed::SIGNATURE_HASH,

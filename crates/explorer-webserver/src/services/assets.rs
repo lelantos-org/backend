@@ -38,6 +38,8 @@ pub async fn list(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<Ass
                         symbol: a.symbol,
                         price_usd: price.map(|p| p.price_usd),
                         price_at: price.map(|p| p.quoted_at),
+                        deposit_bps: a.deposit_bps,
+                        withdraw_bps: a.withdraw_bps,
                     }
                 })
                 .collect();

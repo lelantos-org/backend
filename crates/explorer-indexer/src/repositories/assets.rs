@@ -28,6 +28,46 @@ pub async fn upsert(pool: &DbPool, row: UpsertAsset) -> Result<(), ExplorerIndex
     Ok(())
 }
 
+/// Per-leg rates for one asset, keyed like `UpsertAsset`.
+///
+/// A separate insert rather than fields on `UpsertAsset`, because the two
+/// events are independent: `AssetFeeSet` fires again on every rate change,
+/// long after registration, and must not restate `token` or `scale`. The
+/// insert branch exists only for ordering — the contract emits both events in
+/// one transaction, but nothing here depends on which row lands first.
+#[derive(Debug, Clone, Insertable, AsChangeset)]
+#[diesel(table_name = assets)]
+pub struct UpsertAssetFee {
+    pub chain_id: i64,
+    pub asset_id_u64: i64,
+    pub deposit_bps: i16,
+    pub withdraw_bps: i16,
+}
+
+/// Write the rates for one asset, creating a placeholder row if the
+/// `AssetRegistered` for it has not been consumed yet.
+///
+/// `token` and `scale` are `NOT NULL`, so the placeholder uses an empty token
+/// and zero scale; the `AssetRegistered` upsert overwrites both. That ordering
+/// only matters on a replay that reorders two events from the same
+/// transaction, but the alternative — dropping the rates — loses them until
+/// the next rate change, which may never come.
+pub async fn upsert_fee(pool: &DbPool, row: UpsertAssetFee) -> Result<(), ExplorerIndexerError> {
+    let mut conn = super::conn(pool).await?;
+    diesel::insert_into(assets::table)
+        .values((
+            &row,
+            assets::token.eq(Vec::<u8>::new()),
+            assets::scale.eq(BigDecimal::from(0)),
+        ))
+        .on_conflict((assets::chain_id, assets::asset_id_u64))
+        .do_update()
+        .set(&row)
+        .execute(&mut conn)
+        .await?;
+    Ok(())
+}
+
 /// One asset still missing at least one metadata column, with what it already
 /// has so the sweep only reads what it needs.
 #[derive(Debug, Clone, Queryable)]

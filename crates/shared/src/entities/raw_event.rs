@@ -12,6 +12,7 @@ pub enum EventKind {
     DepositEscrowed = 6,
     DepositFlushed = 7,
     DepositCanceled = 8,
+    AssetFeeSet = 9,
 }
 
 impl EventKind {
@@ -25,6 +26,7 @@ impl EventKind {
             6 => Some(Self::DepositEscrowed),
             7 => Some(Self::DepositFlushed),
             8 => Some(Self::DepositCanceled),
+            9 => Some(Self::AssetFeeSet),
             _ => None,
         }
     }

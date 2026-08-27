@@ -21,6 +21,14 @@ pub struct AssetRow {
     /// `NULL` until the indexer has read `symbol()`, or permanently for a token
     /// that does not implement it.
     pub symbol: Option<String>,
+    /// Per-leg fee rates, `NULL` until an `AssetFeeSet` has been indexed.
+    ///
+    /// There is no pool-wide rate to fall back to, so `NULL` means unknown and
+    /// a consumer must decline to quote rather than assume zero. Both are
+    /// bounded by `MAX_FEE_BPS` (2000) on chain, so `SMALLINT` cannot hold a
+    /// value a `uint16` could not.
+    pub deposit_bps: Option<i16>,
+    pub withdraw_bps: Option<i16>,
 }
 
 impl AssetRow {
@@ -53,6 +61,8 @@ pub async fn list_for_chain(pool: &DbPool, chain_id: i64) -> AppResult<Vec<Asset
             assets::scale,
             assets::decimals,
             assets::symbol,
+            assets::deposit_bps,
+            assets::withdraw_bps,
         ))
         .load::<AssetRow>(&mut conn)
         .await
@@ -81,6 +91,8 @@ pub async fn list_for_chains(pool: &DbPool, chain_ids: &[i64]) -> AppResult<Vec<
                 assets::scale,
                 assets::decimals,
                 assets::symbol,
+                assets::deposit_bps,
+                assets::withdraw_bps,
             ),
         ))
         .load::<(i64, AssetRow)>(&mut conn)
