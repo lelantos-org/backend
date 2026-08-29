@@ -16,7 +16,6 @@ fmd-crypto = { path = "../fmd-crypto" }
 tokio = { workspace = true, features = ["fs"] }
 futures = { workspace = true }
 axum = { workspace = true }
-tower = { workspace = true }
 tower-http = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
@@ -40,18 +39,34 @@ moka = { workspace = true }
 
 # Native Groth16 prover. Witness inputs cross as decimal strings, so no
 # ark types leak past this crate's boundary.
-ark-circom = { version = "0.6", default-features = false }
+#
+# `ark-circom` is deliberately absent: it is a hard `wasmer` dependency on every
+# target, for the circom wasm witness generator this crate no longer runs. The
+# only two things it provided — the zkey parser and the snarkjs QAP reduction —
+# are vendored in `services/{zkey,qap}.rs`.
+#
+# Declared here rather than as `workspace = true` on purpose: the workspace pins
+# ark 0.4 for the FMD crates, which `light-poseidon` holds back (see the root
+# Cargo.toml). These 0.6 crates and those 0.4 ones never exchange types.
 ark-groth16 = "0.6"
 ark-bn254 = "0.6"
 ark-ec = "0.6"
 ark-ff = "0.6"
 ark-relations = "0.6"
 ark-snark = "0.6"
+ark-serialize = "0.6"
+ark-poly = "0.6"
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
-# Runs the circom-generated witness generator. Same version ark-circom pulls
-# in, so there is one wasmer in the graph.
-wasmer = "6.1"
+# Evaluates the witness-calculation graph `circuits/just build-graph` emits,
+# replacing the circom wasm generator and the wasm runtime it needed.
+#
+# Pinned to a git revision because the crates.io releases do not ship the
+# `build-circuit` producer, and the graph format is versioned: a reader from a
+# different revision rejects the file with "Invalid magic". This revision MUST
+# match `CWC_REV` in `circuits/justfile`.
+circom-witnesscalc = { git = "https://github.com/iden3/circom-witnesscalc", rev = "d48eb7c97857d46b8a75c94ab96f769207263245" }
+byteorder = "1"
 rand = "0.8"
 parking_lot = "0.12"
 rayon = { workspace = true }

@@ -15,24 +15,17 @@ database = { path = "../database" }
 prices = { path = "../prices" }
 # NOTE: must NOT depend on fmd-crypto. Privacy gate enforced in CI.
 tokio = { workspace = true }
-futures = { workspace = true }
 axum = { workspace = true }
 bigdecimal = { workspace = true }
-tower = { workspace = true }
 tower-http = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
-toml = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 dotenvy = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
-async-trait = { workspace = true }
-reqwest = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 moka = { workspace = true }

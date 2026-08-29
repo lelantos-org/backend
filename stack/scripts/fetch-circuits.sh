@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch the tree_update_batch circuit artifacts (wasm + r1cs + zkey) from a
+# Fetch the tree_update_batch circuit artifacts (witness graph + zkey) from a
 # @lelantos-org/circuits GitHub release into ./circuits/, which docker-compose
 # mounts into the relayer container at /circuits:ro.
 #
@@ -28,7 +28,11 @@ VERSION_FILE="${DEST}/.version"
 
 # The transact verification key must match the deployed verifier's arity;
 # the relayer's DTOs are 4x4, so 3x3 is no longer fetched.
-ASSETS="tree_update_batch.wasm tree_update_batch.r1cs tree_update_batch_final.zkey 4x4_verification_key.json"
+#
+# `.wcd` is the witness-calculation graph, which replaced the circom `.wasm`
+# generator. The `.r1cs` went with it: the constraint matrices come from the
+# zkey, so the relayer never read it.
+ASSETS="tree_update_batch.wcd tree_update_batch_final.zkey 4x4_verification_key.json"
 
 # Nothing to do when the cached artifacts already match the requested tag.
 is_cached() {

@@ -18,6 +18,13 @@ pub struct NewAssetFlow {
     pub out_amount: BigDecimal,
     pub tx_hash: Vec<u8>,
     pub block_ts: i64,
+    /// The same movement in circuit units, as published by the SNARK.
+    ///
+    /// `Option` because rows written before the contract emitted these fields
+    /// carry NULL. Aggregations over denominations must skip NULL rather than
+    /// read it as a zero-valued denomination.
+    pub public_in: Option<BigDecimal>,
+    pub public_out: Option<BigDecimal>,
 }
 
 pub async fn refresh_hourly_mv(pool: &DbPool) -> Result<(), ExplorerIndexerError> {

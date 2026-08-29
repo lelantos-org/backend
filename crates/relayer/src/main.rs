@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use relayer::services::prover::{ArkCircomProver, TreeUpdateBatchProver};
+use relayer::services::prover::{Groth16Prover, TreeUpdateBatchProver};
 use relayer::{RelayerConfig, build_router, build_state};
 use std::sync::Arc;
 use tracing::info;
@@ -30,18 +30,13 @@ async fn main() -> Result<()> {
         .context("build pool")?;
 
     info!(
-        wasm = %cfg.prover.wasm_path.display(),
-        r1cs = %cfg.prover.r1cs_path.display(),
+        graph = %cfg.prover.graph_path.display(),
         zkey = %cfg.prover.zkey_path.display(),
-        "ark-circom prover loading",
+        "groth16 prover loading",
     );
     let prover: Arc<dyn TreeUpdateBatchProver> = Arc::new(
-        ArkCircomProver::new(
-            &cfg.prover.wasm_path,
-            &cfg.prover.r1cs_path,
-            &cfg.prover.zkey_path,
-        )
-        .context("ark-circom prover init")?,
+        Groth16Prover::new(&cfg.prover.graph_path, &cfg.prover.zkey_path)
+            .context("groth16 prover init")?,
     );
 
     let state = build_state(&cfg, pool, prover)

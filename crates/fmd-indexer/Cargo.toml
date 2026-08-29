@@ -18,7 +18,6 @@ database = { path = "../database" }
 chain-types = { path = "../chain-types" }
 fmd-crypto = { path = "../fmd-crypto" }
 tokio = { workspace = true }
-futures = { workspace = true }
 async-trait = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }

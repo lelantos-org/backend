@@ -8,6 +8,7 @@ use crate::repositories::{
 };
 use crate::util::u256_to_bigdecimal;
 use alloy::primitives::{Address, B256, U256};
+use bigdecimal::BigDecimal;
 use chain_types::decode::DepositFeeNote;
 use database::DbPool;
 use serde_json::json;
@@ -63,6 +64,8 @@ pub async fn asset_moved(
     token: Address,
     in_amount: U256,
     out_amount: U256,
+    public_in: u64,
+    public_out: u64,
 ) -> Result<(), ExplorerIndexerError> {
     asset_flows::insert(
         pool,
@@ -76,6 +79,8 @@ pub async fn asset_moved(
             out_amount: u256_to_bigdecimal(out_amount),
             tx_hash: row.tx_hash.clone(),
             block_ts: row.block_ts,
+            public_in: Some(BigDecimal::from(public_in)),
+            public_out: Some(BigDecimal::from(public_out)),
         },
     )
     .await?;

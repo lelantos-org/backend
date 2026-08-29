@@ -48,11 +48,15 @@ fn topic0_to_event_kind_maps() {
 #[test]
 fn asset_moved_roundtrip() {
     let token = Address::repeat_byte(0x44);
+    // A deposit leg, at a scale of 1e6: the base-unit and circuit-unit figures
+    // differ, so a decoder that crossed them would not survive this.
     let ev = AssetMoved {
         assetId: 7,
         token,
         inAmount: U256::from(1_000_000u64),
         outAmount: U256::ZERO,
+        publicIn: 1,
+        publicOut: 0,
     };
     let log = ev.encode_log_data();
     let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
@@ -66,11 +70,15 @@ fn asset_moved_roundtrip() {
             token: t,
             in_amount,
             out_amount,
+            public_in,
+            public_out,
         } => {
             assert_eq!(*asset_id, 7);
             assert_eq!(*t, token);
             assert_eq!(*in_amount, U256::from(1_000_000u64));
             assert_eq!(*out_amount, U256::ZERO);
+            assert_eq!(*public_in, 1);
+            assert_eq!(*public_out, 0);
         }
         _ => panic!("wrong variant"),
     }

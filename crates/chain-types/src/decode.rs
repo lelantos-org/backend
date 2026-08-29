@@ -70,8 +70,12 @@ pub enum DecodedEvent {
     AssetMoved {
         asset_id: u64,
         token: Address,
+        /// ERC-20 base units moved.
         in_amount: U256,
         out_amount: U256,
+        /// The same movement in circuit units, as published by the SNARK.
+        public_in: u64,
+        public_out: u64,
     },
     NullifierConsumed {
         nf: B256,
@@ -173,6 +177,8 @@ pub fn decode(
                 token: ev.token,
                 in_amount: ev.inAmount,
                 out_amount: ev.outAmount,
+                public_in: ev.publicIn,
+                public_out: ev.publicOut,
             }])
         }
         EventKind::NullifierConsumed => {

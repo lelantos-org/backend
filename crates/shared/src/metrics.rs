@@ -404,7 +404,7 @@ pub fn record_chain_leader(chain_id: i64, leader: bool) {
 ///
 /// The `route` label is the matched route template from
 /// [`axum::extract::MatchedPath`], so
-/// `/v1/chains/:chain_id/commitments/chunks/:chunk_id` is one series rather than
+/// `/v1/chains/{chain_id}/commitments/chunks/{chunk_id}` is one series rather than
 /// one per chunk id. A request that matched nothing is labelled
 /// [`UNMATCHED_ROUTE`] for the same reason.
 #[cfg(feature = "webserver")]
@@ -565,7 +565,7 @@ mod tests {
     fn app() -> Router {
         Router::new()
             .route(
-                "/v1/chains/:chain_id/commitments/chunks/:chunk_id",
+                "/v1/chains/{chain_id}/commitments/chunks/{chunk_id}",
                 get(|| async { "ok" }),
             )
             .layer(axum::middleware::from_fn(track_http))
@@ -609,7 +609,7 @@ mod tests {
             "four chunk ids must share one series, got {matched:?}"
         );
         assert!(
-            matched[0].contains(":chunk_id"),
+            matched[0].contains("{chunk_id}"),
             "route label must be the template, got {matched:?}"
         );
 

@@ -21,9 +21,15 @@ pub struct NullifierChunkOut {
     pub is_complete: bool,
 }
 
+/// The route template, shared by the router and the OpenAPI annotation below.
+///
+/// axum 0.8 and OpenAPI spell a path parameter the same way, `{chunk_id}`, so
+/// one constant serves both and the two cannot drift apart.
+pub const ROUTE: &str = "/v1/chains/{chain_id}/nullifiers/chunks/{chunk_id}";
+
 #[utoipa::path(
     get,
-    path = "/v1/chains/{chain_id}/nullifiers/chunks/{chunk_id}",
+    path = ROUTE,
     tag = "nullifiers",
     params(
         ("chain_id" = i64, Path, description = "Chain id"),

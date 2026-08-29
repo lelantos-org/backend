@@ -140,7 +140,7 @@ reconciled parks itself as **desynced**, which `/chains` reports per chain.
 
 ### Prover
 
-`ArkCircomProver` parses the `.zkey` once at startup and runs Groth16 over
+`Groth16Prover` parses the `.zkey` once at startup and runs Groth16 over
 ark-bn254 behind a **single permit** — proving is CPU-bound, and letting two run
 concurrently makes both slower rather than either faster.
 

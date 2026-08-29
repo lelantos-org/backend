@@ -144,7 +144,7 @@ flowchart TD
   PIPE --> NG[nullifier guard]
   NG --> W[witness builder]
   MIR[tree mirror] --> W
-  W --> PR[ArkCircomProver Groth16]
+  W --> PR[Groth16Prover Groth16]
   PR --> SUB[submitter]
   SUB -->|flushBatch tx| EVM[(EVM)]
   PIPE --> FQ[fee quote]

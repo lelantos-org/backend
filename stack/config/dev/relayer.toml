@@ -117,8 +117,7 @@ cache_ttl_s = 1
 
 [prover]
 # Mounted from backend/stack/circuits/ (populated by `just fetch-circuits`).
-wasm_path = "/circuits/tree_update_batch.wasm"
-r1cs_path = "/circuits/tree_update_batch.r1cs"
+graph_path = "/circuits/tree_update_batch.wcd"
 zkey_path = "/circuits/tree_update_batch_final.zkey"
 # Transact circuit verification key — must match the deployed verifier's
 # arity. The relayer's DTOs are 4x4 (`TRANSACT_IN`/`TRANSACT_OUT`), so a 3x3

@@ -38,11 +38,11 @@ pub fn build(state: AppState) -> Router {
                 .layer(cc("no-store")),
         )
         .route(
-            "/v1/chains/:chain_id/commitments/chunks/:chunk_id",
+            handlers::commitments::ROUTE,
             get(handlers::get_commitment_chunk),
         )
         .route(
-            "/v1/chains/:chain_id/nullifiers/chunks/:chunk_id",
+            handlers::nullifiers::ROUTE,
             get(handlers::get_nullifier_chunk),
         )
         .route(

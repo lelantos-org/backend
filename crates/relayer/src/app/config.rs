@@ -254,10 +254,14 @@ impl Default for TokenPricesCfg {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProverCfg {
-    /// Path to `circuits/build/tree_update_js/tree_update.wasm`.
-    pub wasm_path: PathBuf,
-    /// Path to `circuits/build/tree_update.r1cs`.
-    pub r1cs_path: PathBuf,
+    /// Path to `circuits/build/tree_update_batch.wcd`, the witness-calculation
+    /// graph `just build-graph` emits.
+    ///
+    /// Replaces the former `wasm_path` / `r1cs_path` pair. Both are now ignored
+    /// if still present in a deployed `relayer.toml`, but this key is required:
+    /// the new binary cannot prove without the graph artifact, so the config and
+    /// the `/circuits` mount have to roll out together either way.
+    pub graph_path: PathBuf,
     /// Path to `circuits/build/tree_update_final.zkey`, snarkjs-compatible.
     pub zkey_path: PathBuf,
     /// snarkjs `verification_key.json` for the deployed transact circuit.
@@ -612,8 +616,7 @@ mod tests {
             listen_addr: "0.0.0.0:3003".into(),
             chains,
             prover: ProverCfg {
-                wasm_path: "/w".into(),
-                r1cs_path: "/r".into(),
+                graph_path: "/g".into(),
                 zkey_path: "/z".into(),
                 transact_vkey_path: None,
             },

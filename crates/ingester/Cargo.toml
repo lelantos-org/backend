@@ -20,18 +20,13 @@ bb8 = { workspace = true }
 alloy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 dotenvy = { workspace = true }
-hex = { workspace = true }
-chrono = { workspace = true }
 url = { workspace = true }
 async-trait = { workspace = true }
-reqwest = { workspace = true }
 rand = { workspace = true }
-metrics = { workspace = true }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }

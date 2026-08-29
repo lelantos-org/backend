@@ -123,6 +123,8 @@ diesel::table! {
         out_amount -> Numeric,
         tx_hash -> Bytea,
         block_ts -> Int8,
+        public_in -> Nullable<Numeric>,
+        public_out -> Nullable<Numeric>,
     }
 }
 

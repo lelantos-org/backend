@@ -6,7 +6,6 @@
 
 use crate::domain::error::AppError;
 use crate::domain::token::TokenHash;
-use axum::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::header;
 use axum::http::request::Parts;
@@ -29,7 +28,6 @@ fn malformed() -> AppError {
     AppError::Unauthorized("expected `Authorization: Bearer <token>`".to_string())
 }
 
-#[async_trait]
 impl<S: Send + Sync> FromRequestParts<S> for CapabilityToken {
     type Rejection = AppError;
 

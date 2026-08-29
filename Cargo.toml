@@ -29,13 +29,13 @@ tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal", "
 futures = "0.3"
 
 # http
-axum = "0.7"
+axum = "0.8.9"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "timeout"] }
 
 # openapi / swagger
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
-utoipa-swagger-ui = { version = "8", features = ["axum"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # db
 diesel = { version = "2.2", features = ["postgres", "chrono", "numeric", "serde_json", "32-column-tables"] }
@@ -92,7 +92,19 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false, feat
 # config
 dotenvy = "0.15"
 
-# crypto (fmd-crypto only)
+# crypto (FMD crates only)
+#
+# Pinned to arkworks 0.4 by `light-poseidon`, not by preference. `fmd-crypto`
+# calls `get_poseidon_parameters::<Fq>()` with its own field type, and that
+# function is bounded on `light-poseidon`'s ark-ff, so the two versions cannot
+# diverge. light-poseidon 0.2 requires ark 0.4; its latest release (0.4) requires
+# ark 0.5. Neither supports 0.6.
+#
+# The relayer is therefore on ark 0.6 and declares those deps locally rather than
+# here — `ark-groth16 0.6` is what its Groth16 prover needs. The two sets never
+# exchange types, so the split is inert. Unifying would mean dropping
+# light-poseidon and vendoring circomlib's `bn254_x5` tables (~43k generated
+# lines of round constants), which is not worth it to tidy a manifest.
 light-poseidon = "0.2"
 ark-ed-on-bn254 = "0.4"
 ark-ff = "0.4"

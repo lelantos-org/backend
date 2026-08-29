@@ -12,14 +12,14 @@ use std::time::Instant;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tracing::info;
 
+use crate::services::qap::CircomReduction;
+use crate::services::zkey::read_zkey;
 use ark_bn254::{Bn254, Fr};
-use ark_circom::{CircomReduction, read_zkey};
 use ark_ff::{PrimeField, UniformRand};
 use ark_groth16::{Groth16, PreparedVerifyingKey, Proof, ProvingKey};
 use ark_relations::utils::matrix::Matrix;
 use ark_snark::SNARK;
 use num_bigint::BigInt;
-use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeUpdateBatchWitness {
@@ -166,7 +166,7 @@ impl Groth16Params {
     }
 }
 
-/// Where one proof spent its time. `elapsed_ms` alone cannot distinguish the wasm
+/// Where one proof spent its time. `elapsed_ms` alone cannot distinguish the
 /// witness build from the MSMs, which have different fixes.
 #[derive(Debug, Default)]
 struct Timings {
@@ -184,26 +184,25 @@ fn timed<T>(slot: &mut u64, f: impl FnOnce() -> T) -> T {
 }
 
 /// In-process Groth16 prover. The proving key, a ~150 MB zkey, the A/B/C matrices
-/// it carries, and the circom witness generator are loaded once at startup and
+/// it carries, and the witness-calculation graph are loaded once at startup and
 /// reused, so a prove costs only the witness calculation and the proof itself.
 ///
 /// Proving is serialised, since the MSMs already saturate the machine, but the
 /// gate is a `Semaphore` held outside `spawn_blocking` rather than a mutex inside
 /// it: queueing on a blocking-pool thread would let a burst of requests park the
 /// whole pool, which the database and everything else also draw from.
-pub struct ArkCircomProver {
+pub struct Groth16Prover {
     params: Arc<Groth16Params>,
-    /// Guarded by `gate`, so the inner lock is always uncontended.
-    wtns: Arc<Mutex<WitnessCalculator>>,
+    wtns: Arc<WitnessCalculator>,
     gate: Semaphore,
 }
 
-impl ArkCircomProver {
-    /// `r1cs_path` is accepted and ignored: the constraint matrices come from the
-    /// zkey, which already carries them. The config key remains so deployed
-    /// `relayer.toml` files keep loading.
-    pub fn new(wasm_path: &Path, _r1cs_path: &Path, zkey_path: &Path) -> AppResult<Self> {
-        let wtns = WitnessCalculator::new(wasm_path)?;
+impl Groth16Prover {
+    /// `graph_path` is the `.wcd` witness-calculation graph `just build-graph`
+    /// emits. The constraint matrices come from the zkey, which already carries
+    /// them, so no `.r1cs` is needed here.
+    pub fn new(graph_path: &Path, zkey_path: &Path) -> AppResult<Self> {
+        let wtns = WitnessCalculator::new(graph_path)?;
         let params = Groth16Params::load(zkey_path)?;
         info!(
             threads = rayon::current_num_threads(),
@@ -212,11 +211,11 @@ impl ArkCircomProver {
                 .unwrap_or(0),
             num_constraints = params.num_constraints,
             num_inputs = params.num_inputs,
-            "ark-circom prover ready"
+            "groth16 prover ready"
         );
         Ok(Self {
             params: Arc::new(params),
-            wtns: Arc::new(Mutex::new(wtns)),
+            wtns: Arc::new(wtns),
             gate: Semaphore::new(1),
         })
     }
@@ -240,12 +239,12 @@ impl ArkCircomProver {
 /// on a blocking thread while holding the prover's permit.
 fn run_proof(
     params: &Groth16Params,
-    wtns: &Mutex<WitnessCalculator>,
+    wtns: &WitnessCalculator,
     inputs: witness_calc::Inputs,
 ) -> AppResult<(TreeUpdateBatchProof, Timings)> {
     let mut timings = Timings::default();
 
-    let witness = timed(&mut timings.witness_ms, || wtns.lock().calculate(inputs))?;
+    let witness = timed(&mut timings.witness_ms, || wtns.calculate(inputs))?;
     let public_inputs = params.public_inputs(&witness)?;
     let proof = timed(&mut timings.groth16_ms, || params.prove(&witness))?;
     timed(&mut timings.verify_ms, || {
@@ -264,7 +263,7 @@ fn run_proof(
 }
 
 #[async_trait]
-impl TreeUpdateBatchProver for ArkCircomProver {
+impl TreeUpdateBatchProver for Groth16Prover {
     fn is_busy(&self) -> bool {
         self.gate.available_permits() == 0
     }
@@ -278,7 +277,7 @@ impl TreeUpdateBatchProver for ArkCircomProver {
             start_index = %witness.start_index,
             actual_count = %witness.actual_count,
             ?priority,
-            "ark-circom groth16 prove queued"
+            "groth16 prove queued"
         );
 
         let queued = Instant::now();
@@ -301,7 +300,7 @@ impl TreeUpdateBatchProver for ArkCircomProver {
         } = timings;
         info!(
             elapsed_ms = started.elapsed().as_millis() as u64,
-            queue_wait_ms, witness_ms, groth16_ms, verify_ms, "ark-circom prove ok"
+            queue_wait_ms, witness_ms, groth16_ms, verify_ms, "groth16 prove ok"
         );
         Ok(proof)
     }
@@ -494,7 +493,7 @@ mod zkey_compat {
     //! the result in snarkjs shape, so it can be verified with the snarkjs CLI.
     //!
     //! Skipped unless `ZKEY_COMPAT_DIR` points at a directory holding
-    //! `tree_update_batch.{wasm,r1cs}`, `tree_update_batch_final.zkey` and a
+    //! `tree_update_batch.wcd`, `tree_update_batch_final.zkey` and a
     //! `vector.json` carrying the published vector. Writes `proof.json` and
     //! `public.json` next to them.
 
@@ -553,9 +552,8 @@ mod zkey_compat {
                 .collect(),
         };
 
-        let prover = ArkCircomProver::new(
-            &dir.join("tree_update_batch.wasm"),
-            &dir.join("tree_update_batch.r1cs"),
+        let prover = Groth16Prover::new(
+            &dir.join("tree_update_batch.wcd"),
             &dir.join("tree_update_batch_final.zkey"),
         )
         .expect("load zkey");

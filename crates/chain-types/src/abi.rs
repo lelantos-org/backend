@@ -59,14 +59,23 @@ sol! {
     );
 
     /// Emitted per spend when the gross deposit/withdraw amount is non-zero;
-    /// internal transfers emit nothing. `inAmount` / `outAmount` are scaled
-    /// token base units.
+    /// internal transfers emit nothing.
+    ///
+    /// `inAmount` / `outAmount` are ERC-20 base units — what actually moved.
+    /// `publicIn` / `publicOut` are the same movement in circuit units, as the
+    /// SNARK published it. Today the two differ only by the asset's `scale`;
+    /// once a pool-managed yield index is live the conversion also multiplies
+    /// by that index, so `outAmount / scale` no longer recovers the circuit
+    /// value and the indexer must read it from the log rather than re-derive
+    /// contract arithmetic against a figure that moves every block.
     #[derive(Debug)]
     event AssetMoved(
         uint64 indexed assetId,
         address indexed token,
         uint256 inAmount,
-        uint256 outAmount
+        uint256 outAmount,
+        uint64 publicIn,
+        uint64 publicOut
     );
 
     /// Emitted on every nullifier burn. Lets wallets reconcile cached notes

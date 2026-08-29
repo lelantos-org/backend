@@ -45,7 +45,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     (
         "AssetMoved",
-        "e518860ada3bf432f9af64f54465c559c978ecbe2a9d6711b16532dea1daa4a6",
+        "5123881c5897fb743e8137f8b19854b64eb895f9d2311b9995397c3b8eff0c4a",
     ),
     (
         "AssetFeeSet",

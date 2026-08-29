@@ -232,9 +232,12 @@ async fn dispatch(
             token,
             in_amount,
             out_amount,
+            public_in,
+            public_out,
         } => {
             events::asset_moved(
-                &ctx.pool, chain_id, row, asset_id, token, in_amount, out_amount,
+                &ctx.pool, chain_id, row, asset_id, token, in_amount, out_amount, public_in,
+                public_out,
             )
             .await
         }

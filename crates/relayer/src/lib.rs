@@ -1,8 +1,9 @@
 //! Tree-update relayer.
 //!
 //! Layered binary; see `backend/ARCHITECTURE.md`. Owns proof generation
-//! (Groth16 via ark-circom) and on-chain submission. Per-chain pipelines gate the
-//! prover behind a `parking_lot::Mutex` to serialise CPU-heavy proofs.
+//! (native Groth16 over a snarkjs zkey, witness from a circom-witnesscalc graph)
+//! and on-chain submission. The prover serialises CPU-heavy proofs behind its own
+//! `Semaphore`; see `services::prover`.
 
 pub mod adapters;
 pub mod app;
