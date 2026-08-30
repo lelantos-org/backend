@@ -56,6 +56,9 @@ pub async fn asset_fee_set(
     .await
 }
 
+// One argument per `DecodedEvent::AssetMoved` field, as with `deposit_escrowed`
+// below; grouping them would only restate the variant.
+#[allow(clippy::too_many_arguments)]
 pub async fn asset_moved(
     pool: &DbPool,
     chain_id: i64,
