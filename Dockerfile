@@ -22,10 +22,17 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ---------- builder ----------
 FROM chef AS builder
 ARG PACKAGE
+# `protobuf-compiler` and `libclang-dev` are for `circom-witnesscalc`: its build
+# script generates the witness-graph reader with prost-build, which shells out to
+# `protoc`, and binds its C sources with bindgen, which needs libclang. Both come
+# free on macOS (Homebrew, Xcode), so this only bites in Debian-based builds.
+# Needed by the relayer only, but this stage is shared by every image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
         pkg-config \
         cmake \
+        protobuf-compiler \
+        libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=planner /app/recipe.json recipe.json

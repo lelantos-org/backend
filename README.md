@@ -260,6 +260,10 @@ rows and rewind. See [database](crates/database/README.md#reorg-retraction).
 - Rust 1.95 (pinned via `rust-toolchain.toml`)
 - [`just`](https://github.com/casey/just)
 - Docker (local stack, integration tests)
+- `protoc` and libclang (`brew install protobuf llvm` /
+  `apt-get install protobuf-compiler libclang-dev`) — the relayer's
+  `circom-witnesscalc` build script generates its witness-graph reader with
+  prost-build and bindgen
 
 ## Development
 

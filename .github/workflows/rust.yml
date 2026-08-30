@@ -33,6 +33,12 @@ jobs:
         with:
           toolchain: "1.95"
           components: clippy
+      - name: Install protoc and libclang
+        # `circom-witnesscalc`'s build script generates the witness-graph reader
+        # with prost-build, which shells out to `protoc`, and binds its C sources
+        # with bindgen, which needs libclang. Without both, the relayer fails to
+        # build on the runner.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
       - run: just clippy
@@ -45,6 +51,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.95"
+      - name: Install protoc and libclang
+        # `circom-witnesscalc`'s build script generates the witness-graph reader
+        # with prost-build, which shells out to `protoc`, and binds its C sources
+        # with bindgen, which needs libclang. Without both, the relayer fails to
+        # build on the runner.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2
       - run: just test
