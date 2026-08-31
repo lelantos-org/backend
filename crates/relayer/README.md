@@ -149,10 +149,11 @@ concurrently makes both slower rather than either faster.
 One cron task per chain, every `flush_interval_s`. It re-reads
 `deposit_escrowed_events` for deposits that are neither flushed nor canceled,
 oldest first by `submitted_at_block`, batches up to `flush_max_n` (clamped to
-the contract's `MAX_L_BATCH = 4`, one leaf per deposit), and submits one
+`MAX_DEPOSITS_PER_BATCH = 4` — the contract's `MAX_L_BATCH = 8` at two leaves
+per deposit), and submits one
 `flushBatch`. Each success publishes a `DepositEvent::Flushed` on the broadcast
 channel behind `/v1/deposits/stream` — 256 slots, dropping oldest for a lagging
-receiver, which is ample at ≤ 8 deposits per tick.
+receiver, which is ample at ≤ 4 deposits per tick.
 
 ```
 read pending deposits          oldest first, scanning past quarantined
@@ -347,7 +348,7 @@ signer_key_hex = "0x…"
 | `receipt_timeout_s` | no | 60 | Receipt poll budget. A revert rolls the mirror back and answers 502 |
 | `receipt_poll_interval_ms` | no | 250 | Pick ~¼ of block time |
 | `flush_interval_s` | no | 30 | Must be > 0 |
-| `flush_max_n` | no | 4 | Clamped to `MAX_L_BATCH = 4` |
+| `flush_max_n` | no | 4 | Clamped to `MAX_DEPOSITS_PER_BATCH = 4` (`MAX_L_BATCH = 8`, two leaves per deposit) |
 | `flush_max_attempts` | no | 5 | Attributable failures before a deposit is skipped. `0` disables quarantine |
 | `native_adapter_address` | no | — | Enables `withdrawNative`. The SNARK must name it as both `recipient` and `relayer` — the adapter is the pool's caller there |
 | `swap_wrapper_address` | no | — | Enables `/v1/swap` |

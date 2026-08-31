@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+use crate::adapters::calldata::MAX_DEPOSITS_PER_BATCH;
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct RelayerConfig {
     pub database_url: String,
@@ -287,9 +289,11 @@ fn default_flush_interval_s() -> u64 {
 }
 
 fn default_flush_max_n() -> usize {
-    // `MAX_L_BATCH / LEAVES_PER_DEPOSIT`. A deposit mints two leaves, so a batch
-    // of four leaves holds two deposits.
-    2
+    // Derived, not restated: `state.rs` already clamps to this figure, so a
+    // literal here silently caps every flush at the old batch width the moment
+    // `MAX_L_BATCH` moves — which is exactly what happened when it widened to 8
+    // and this default stayed at the pre-widening 2.
+    MAX_DEPOSITS_PER_BATCH
 }
 
 fn default_flush_max_attempts() -> u32 {
