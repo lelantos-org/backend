@@ -1,8 +1,22 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// What one asset still holds in escrow on one chain, all-time deposits minus
-/// all-time withdrawals.
+/// How a locked balance was arrived at.
+///
+/// Two assets in the same response can be measured differently, so the figure
+/// carries its own definition rather than leaving a caller to assume one.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LockedBasis {
+    /// All-time deposits minus all-time withdrawals. Exact for an asset held as
+    /// plain custody, where nothing changes the balance but a flow.
+    FlowDifference,
+    /// What the pool and its venue actually hold, read from chain. Used for a
+    /// yield asset, whose balance grows without any flow to observe.
+    VenueHoldings,
+}
+
+/// What one asset still holds in escrow on one chain.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LockedAssetOut {
@@ -19,7 +33,12 @@ pub struct LockedAssetOut {
     /// has no usable price.
     pub locked_usd: Option<f64>,
     /// Newest flow behind this balance, so a client can age it.
+    ///
+    /// For a `venueHoldings` figure this ages the last *flow*, not the last
+    /// index refresh: the balance itself is as fresh as the indexer's poll.
     pub last_ts: i64,
+    /// Which definition produced `amount`.
+    pub basis: LockedBasis,
 }
 
 /// One chain's escrowed balance.

@@ -1,6 +1,7 @@
 use crate::abi::{
     AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
-    NotePayload, NullifierConsumed, RootAdvanced,
+    EmergencyUnwound, HaltedSet, NormalizedFeeSwept, NotePayload, NullifierConsumed,
+    PerfFeeAccrued, Rebalanced, RootAdvanced, YieldAssetAdded, YieldParamsSet,
 };
 use alloy::primitives::{Address, B256, LogData, U256};
 use alloy::sol_types::SolEvent;
@@ -109,6 +110,43 @@ pub enum DecodedEvent {
         id: U256,
         payer: Address,
         refunded: U256,
+    },
+    /// An asset id bound to a yield venue. Emitted once per asset and never
+    /// reversed, so this is what makes an asset yield-bearing for a consumer.
+    YieldAssetAdded {
+        asset_id: u64,
+        venue: Address,
+        buffer_bps: u16,
+        perf_bps: u16,
+    },
+    YieldParamsSet {
+        asset_id: u64,
+        buffer_bps: u16,
+        perf_bps: u16,
+    },
+    /// The treasury's cut of growth, minted as units. Moves no tokens, so it
+    /// has no `AssetMoved` counterpart and is not derivable from flows.
+    PerfFeeAccrued {
+        asset_id: u64,
+        units_minted: U256,
+        new_last_idx: U256,
+    },
+    NormalizedFeeSwept {
+        asset_id: u64,
+        units: U256,
+        amount: U256,
+    },
+    Rebalanced {
+        asset_id: u64,
+        idle_after: U256,
+    },
+    HaltedSet {
+        asset_id: u64,
+        halted: bool,
+    },
+    EmergencyUnwound {
+        asset_id: u64,
+        recovered: U256,
     },
 }
 
@@ -236,6 +274,67 @@ pub fn decode(
                 refunded: ev.refunded,
             }])
         }
+        EventKind::YieldAssetAdded => {
+            let ev = YieldAssetAdded::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::YieldAssetAdded {
+                asset_id: ev.assetId,
+                venue: ev.venue,
+                buffer_bps: ev.bufferBps,
+                perf_bps: ev.perfBps,
+            }])
+        }
+        EventKind::YieldParamsSet => {
+            let ev = YieldParamsSet::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::YieldParamsSet {
+                asset_id: ev.assetId,
+                buffer_bps: ev.bufferBps,
+                perf_bps: ev.perfBps,
+            }])
+        }
+        EventKind::PerfFeeAccrued => {
+            let ev = PerfFeeAccrued::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::PerfFeeAccrued {
+                asset_id: ev.assetId,
+                units_minted: ev.unitsMinted,
+                new_last_idx: ev.newLastIdx,
+            }])
+        }
+        EventKind::NormalizedFeeSwept => {
+            let ev = NormalizedFeeSwept::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::NormalizedFeeSwept {
+                asset_id: ev.assetId,
+                units: ev.units,
+                amount: ev.amount,
+            }])
+        }
+        EventKind::Rebalanced => {
+            let ev = Rebalanced::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::Rebalanced {
+                asset_id: ev.assetId,
+                idle_after: ev.idleAfter,
+            }])
+        }
+        EventKind::HaltedSet => {
+            let ev = HaltedSet::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::HaltedSet {
+                asset_id: ev.assetId,
+                halted: ev.halted,
+            }])
+        }
+        EventKind::EmergencyUnwound => {
+            let ev = EmergencyUnwound::decode_log_data(&log, true)
+                .map_err(|e| DecodeError::Alloy(e.to_string()))?;
+            Ok(vec![DecodedEvent::EmergencyUnwound {
+                asset_id: ev.assetId,
+                recovered: ev.recovered,
+            }])
+        }
     }
 }
 
@@ -258,12 +357,26 @@ pub fn event_kind_from_topic0(topic0: &B256) -> Option<EventKind> {
         Some(EventKind::DepositFlushed)
     } else if topic0 == &DepositCanceled::SIGNATURE_HASH {
         Some(EventKind::DepositCanceled)
+    } else if topic0 == &YieldAssetAdded::SIGNATURE_HASH {
+        Some(EventKind::YieldAssetAdded)
+    } else if topic0 == &YieldParamsSet::SIGNATURE_HASH {
+        Some(EventKind::YieldParamsSet)
+    } else if topic0 == &PerfFeeAccrued::SIGNATURE_HASH {
+        Some(EventKind::PerfFeeAccrued)
+    } else if topic0 == &NormalizedFeeSwept::SIGNATURE_HASH {
+        Some(EventKind::NormalizedFeeSwept)
+    } else if topic0 == &Rebalanced::SIGNATURE_HASH {
+        Some(EventKind::Rebalanced)
+    } else if topic0 == &HaltedSet::SIGNATURE_HASH {
+        Some(EventKind::HaltedSet)
+    } else if topic0 == &EmergencyUnwound::SIGNATURE_HASH {
+        Some(EventKind::EmergencyUnwound)
     } else {
         None
     }
 }
 
-pub fn known_signatures() -> [B256; 9] {
+pub fn known_signatures() -> [B256; 16] {
     [
         NotePayload::SIGNATURE_HASH,
         AssetRegistered::SIGNATURE_HASH,
@@ -274,5 +387,12 @@ pub fn known_signatures() -> [B256; 9] {
         DepositEscrowed::SIGNATURE_HASH,
         DepositFlushed::SIGNATURE_HASH,
         DepositCanceled::SIGNATURE_HASH,
+        YieldAssetAdded::SIGNATURE_HASH,
+        YieldParamsSet::SIGNATURE_HASH,
+        PerfFeeAccrued::SIGNATURE_HASH,
+        NormalizedFeeSwept::SIGNATURE_HASH,
+        Rebalanced::SIGNATURE_HASH,
+        HaltedSet::SIGNATURE_HASH,
+        EmergencyUnwound::SIGNATURE_HASH,
     ]
 }

@@ -31,7 +31,7 @@ use crate::app::config::{BPS_DENOMINATOR, ShieldedFeeSettings};
 use crate::domain::dto::{OutputAuxDto, PointDto, PubInputsDto, TRANSACT_OUT};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::{ShieldedFeeOut, TokenOut};
-use crate::domain::units::Scale;
+use crate::domain::units::{Rate, Scale};
 use crate::repositories::assets::AssetRow;
 use crate::services::asset_registry::AssetRegistry;
 use crate::services::fee_quote::{FeeQuoter, FeeToken};
@@ -346,13 +346,13 @@ impl ShieldedFeeChecker {
     /// mirroring the spend path: a note value is a whole unit, so rounding down
     /// would set a bar no payer could hit exactly.
     pub async fn deposit_fee_required(&self, asset_id: u64, gas_used: u64) -> AppResult<u64> {
-        let (scale, fee_token) = self.priced_asset(asset_id).await?;
+        let (rate, fee_token) = self.priced_asset(asset_id).await?;
         let required = self
             .policy
             .fee_quoter
             .required_amount(&fee_token, gas_used)
             .await?;
-        let circuit = scale.to_circuit_ceil(apply_grace(required, self.grace_bps));
+        let circuit = rate.to_circuit_ceil(apply_grace(required, self.grace_bps));
         // A required amount past 64 bits cannot be paid: the circuit range-checks
         // a note's value to 64 bits. Saturating rather than erroring keeps this a
         // fee decision, leaving every deposit short, instead of aborting the tick
@@ -400,8 +400,8 @@ impl ShieldedFeeChecker {
                 address: self.address().to_string(),
             });
         };
-        let (scale, fee_token) = self.priced_asset(payment.asset_id).await?;
-        let paid = scale.to_base(payment.circuit_total);
+        let (rate, fee_token) = self.priced_asset(payment.asset_id).await?;
+        let paid = rate.to_base(payment.circuit_total);
         let required = self
             .policy
             .fee_quoter
@@ -449,7 +449,14 @@ impl ShieldedFeeChecker {
     /// Every failure here gives the payer the same answer, that this relayer will
     /// not take that asset, so they share one error. Which reason applies is an
     /// operator concern and appears in the message.
-    async fn priced_asset(&self, asset_id: u64) -> AppResult<(Scale, FeeToken)> {
+    /// The asset's rate and its fee token.
+    ///
+    /// Returns a [`Rate`] rather than a [`Scale`] because a yield asset's unit
+    /// is worth `gross / supply`, not `scale`. Pricing one at `scale` demands
+    /// more units than the gas costs and then values the payment at less than
+    /// the pool would hand over, so a wallet that converts correctly is refused
+    /// as underpaid.
+    async fn priced_asset(&self, asset_id: u64) -> AppResult<(Rate, FeeToken)> {
         if !self.policy.allowlists(asset_id) {
             return Err(self.unaccepted(asset_id, "it is not in shielded_fee_assets"));
         }
@@ -464,6 +471,12 @@ impl ShieldedFeeChecker {
                 self.chain_id, asset.scale
             ))
         })?;
+        let rate = asset.rate(scale).ok_or_else(|| {
+            self.unaccepted(
+                asset_id,
+                "it is a yield asset whose index has not been indexed yet",
+            )
+        })?;
         let fee_token = self
             .policy
             .price_for(&asset)
@@ -474,7 +487,7 @@ impl ShieldedFeeChecker {
                 )
             })?
             .clone();
-        Ok((scale, fee_token))
+        Ok((rate, fee_token))
     }
 
     fn unaccepted(&self, asset_id: u64, why: &str) -> AppError {
@@ -806,6 +819,7 @@ mod tests {
         assert!(!rendered.contains(&format!("{}", ivk[0])), "{rendered}");
     }
 
+    /// A plain asset: no venue, so it prices at `scale` forever.
     fn row(asset_id: i64, token: u8) -> AssetRow {
         AssetRow {
             asset_id_u64: asset_id,
@@ -815,6 +829,70 @@ mod tests {
             symbol: None,
             deposit_bps: None,
             withdraw_bps: None,
+            venue: None,
+            gross: None,
+            total_normalized: None,
+            accrued_fee_normalized: None,
+            halted: None,
+            index_ray: None,
+        }
+    }
+
+    /// Both directions of the mispricing a yield asset used to cause.
+    ///
+    /// Before `Rate`, this path converted with `scale` alone: it demanded
+    /// `required / scale` units where `required / (scale * index)` covers the
+    /// cost, and then valued a payment at `paid * scale` instead of
+    /// `paid * scale * index`. The two compound — the relayer asks for more than
+    /// it needs and credits less than it was given — so a wallet converting
+    /// correctly is refused as underpaid, while one repeating the same stale
+    /// error appears to work.
+    #[test]
+    fn a_yield_asset_prices_off_its_index_not_its_scale() {
+        let scale = Scale::from_decimal(&row(1, 1).scale).expect("scale");
+        let plain = row(1, 1).rate(scale).expect("a plain asset always prices");
+        let earning = yield_row(2, 2)
+            .rate(scale)
+            .expect("a polled yield asset prices");
+
+        // Covering a fixed gas cost takes fewer units than `scale` demands.
+        let cost = U256::from(1_100_000_000_000_000u64);
+        assert!(
+            earning.to_circuit_ceil(cost) < plain.to_circuit_ceil(cost),
+            "pricing at scale over-demands units"
+        );
+
+        // And the same units are worth more than `scale` credits.
+        assert!(
+            earning.to_base(1_000) > plain.to_base(1_000),
+            "pricing at scale under-credits the payment"
+        );
+    }
+
+    /// A yield asset the poller has not reached yet cannot be priced.
+    ///
+    /// `scale` is not a conservative fallback here — it is wrong by whatever the
+    /// venue has already earned — so the row yields no rate and the caller
+    /// declines rather than quoting.
+    #[test]
+    fn a_yield_asset_without_an_index_refuses_to_price() {
+        let scale = Scale::from_decimal(&row(1, 1).scale).expect("scale");
+        let mut unpolled = yield_row(2, 2);
+        unpolled.gross = None;
+        assert!(unpolled.rate(scale).is_none());
+    }
+
+    /// A yield asset whose venue has earned, so a unit is worth more than
+    /// `scale`. `gross / supply` is `1.1 * scale`.
+    fn yield_row(asset_id: i64, token: u8) -> AssetRow {
+        AssetRow {
+            venue: Some(vec![0xaa; 20]),
+            gross: Some("1100000000000000".parse().expect("gross")),
+            total_normalized: Some("1000".parse().expect("supply")),
+            accrued_fee_normalized: Some("0".parse().expect("fee")),
+            halted: Some(false),
+            index_ray: Some("1100000000000000000000000000".parse().expect("index")),
+            ..row(asset_id, token)
         }
     }
 

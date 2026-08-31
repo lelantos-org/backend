@@ -13,6 +13,13 @@ pub enum EventKind {
     DepositFlushed = 7,
     DepositCanceled = 8,
     AssetFeeSet = 9,
+    YieldAssetAdded = 10,
+    YieldParamsSet = 11,
+    PerfFeeAccrued = 12,
+    NormalizedFeeSwept = 13,
+    Rebalanced = 14,
+    HaltedSet = 15,
+    EmergencyUnwound = 16,
 }
 
 impl EventKind {
@@ -27,6 +34,13 @@ impl EventKind {
             7 => Some(Self::DepositFlushed),
             8 => Some(Self::DepositCanceled),
             9 => Some(Self::AssetFeeSet),
+            10 => Some(Self::YieldAssetAdded),
+            11 => Some(Self::YieldParamsSet),
+            12 => Some(Self::PerfFeeAccrued),
+            13 => Some(Self::NormalizedFeeSwept),
+            14 => Some(Self::Rebalanced),
+            15 => Some(Self::HaltedSet),
+            16 => Some(Self::EmergencyUnwound),
             _ => None,
         }
     }

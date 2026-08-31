@@ -13,7 +13,7 @@ pub use assets::AssetOut;
 pub use chain_flow::ChainFlowOut;
 pub use count_point::CountPoint;
 pub use flow_point::FlowPoint;
-pub use locked::{ChainLockedOut, LockedAssetOut};
+pub use locked::{ChainLockedOut, LockedAssetOut, LockedBasis};
 pub use pool_notes::PoolNotesOut;
 pub use transactions::{KindCounts, TxKind, TxOut};
 pub use tree_advances::TreeAdvanceOut;

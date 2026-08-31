@@ -263,15 +263,18 @@ impl FeeContext<'_> {
             else {
                 continue;
             };
-            let (Some(scale), Ok(amount)) = (
-                Scale::from_decimal(&row.scale),
+            // A yield asset whose index has not been polled yet yields no
+            // `rate`, so the quote is left undecorated rather than converted at
+            // `scale` — which would name a circuit amount that underpays.
+            let (Some(rate), Ok(amount)) = (
+                Scale::from_decimal(&row.scale).and_then(|s| row.rate(s)),
                 U256::from_str_radix(&quote.amount, 10),
             ) else {
                 continue;
             };
             quote.asset_id = Some(row.asset_id_u64);
             quote.scale = Some(row.scale.to_string());
-            quote.circuit_amount = Some(scale.to_circuit_ceil(amount).to_string());
+            quote.circuit_amount = Some(rate.to_circuit_ceil(amount).to_string());
         }
         Ok(estimate)
     }

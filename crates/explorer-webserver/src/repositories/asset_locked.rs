@@ -31,9 +31,18 @@ pub struct LockedRow {
     /// Newest flow that contributed, so a caller can age the figure.
     #[diesel(sql_type = BigInt)]
     pub last_ts: i64,
+    /// What the pool actually holds for a yield asset, from `asset_yield`.
+    ///
+    /// `NULL` for a plain asset, and for a yield asset the poller has not
+    /// reached. Present means `in_base - out_base` is *not* the balance: yield
+    /// is not a flow, so the flow difference misses everything the venue has
+    /// earned and drifts further from the truth every block.
+    #[diesel(sql_type = Nullable<Numeric>)]
+    pub yield_gross: Option<BigDecimal>,
 }
 
-/// Every asset that has ever moved, with its running totals.
+/// Every asset that has ever moved, with its running totals and, for a yield
+/// asset, what it actually holds.
 ///
 /// Assets with no flows are absent: `asset_locked` aggregates `asset_flows`, so
 /// a registered but untouched asset has no row and has never held anything. The
@@ -52,11 +61,15 @@ pub async fn totals(pool: &DbPool, chain_id: Option<i64>) -> AppResult<Vec<Locke
                 a.symbol AS symbol, \
                 l.in_base AS in_base, \
                 l.out_base AS out_base, \
-                l.last_ts AS last_ts \
+                l.last_ts AS last_ts, \
+                y.gross AS yield_gross \
          FROM asset_locked l \
          JOIN assets a \
            ON a.chain_id = l.chain_id \
           AND a.asset_id_u64 = l.asset_id_u64 \
+         LEFT JOIN asset_yield y \
+           ON y.chain_id = l.chain_id \
+          AND y.asset_id_u64 = l.asset_id_u64 \
          WHERE ($1::BIGINT IS NULL OR l.chain_id = $1) \
          ORDER BY l.chain_id, l.asset_id_u64",
     )

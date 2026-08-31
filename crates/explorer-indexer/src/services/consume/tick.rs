@@ -2,6 +2,7 @@ use super::events;
 use crate::adapters::DynTokenMetadata;
 use crate::config::ExplorerIndexerConfig;
 use crate::error::{ExplorerIndexerError, Result};
+use crate::repositories::yield_fee_events::{KIND_ACCRUED, KIND_SWEPT};
 use crate::repositories::{asset_flows, assets, raw_events, tree_advances};
 use alloy::primitives::Address;
 use chain_types::decode::{self, DecodedEvent};
@@ -287,6 +288,59 @@ async fn dispatch(
         DecodedEvent::DepositCanceled { id, .. } => {
             events::deposit_canceled(&ctx.pool, chain_id, row, id).await
         }
+        DecodedEvent::YieldAssetAdded {
+            asset_id,
+            venue,
+            buffer_bps,
+            perf_bps,
+        } => {
+            events::yield_asset_added(&ctx.pool, chain_id, asset_id, venue, buffer_bps, perf_bps)
+                .await
+        }
+        DecodedEvent::YieldParamsSet {
+            asset_id,
+            buffer_bps,
+            perf_bps,
+        } => events::yield_params_set(&ctx.pool, chain_id, asset_id, buffer_bps, perf_bps).await,
+        DecodedEvent::HaltedSet { asset_id, halted } => {
+            events::halted_set(&ctx.pool, chain_id, asset_id, halted).await
+        }
+        DecodedEvent::PerfFeeAccrued {
+            asset_id,
+            units_minted,
+            ..
+        } => {
+            events::yield_fee(
+                &ctx.pool,
+                chain_id,
+                row,
+                asset_id,
+                KIND_ACCRUED,
+                units_minted,
+                None,
+            )
+            .await
+        }
+        DecodedEvent::NormalizedFeeSwept {
+            asset_id,
+            units,
+            amount,
+        } => {
+            events::yield_fee(
+                &ctx.pool,
+                chain_id,
+                row,
+                asset_id,
+                KIND_SWEPT,
+                units,
+                Some(amount),
+            )
+            .await
+        }
+        // Both only move backing between the venue and the pool's own balance;
+        // the poller picks the new split up on its next pass.
+        DecodedEvent::Rebalanced { .. } => Ok(()),
+        DecodedEvent::EmergencyUnwound { .. } => Ok(()),
     }
 }
 

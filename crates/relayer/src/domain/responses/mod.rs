@@ -122,6 +122,43 @@ pub struct TokenOut {
     /// Protocol fee on an unshield of this asset, in bps. See `depositBps`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdraw_bps: Option<i16>,
+    /// Present iff this asset's custody earns in a venue. Absent means plain
+    /// custody, where one circuit unit is worth `scale` base units forever.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yield_state: Option<YieldOut>,
+}
+
+/// What a yield-bearing asset is currently worth, and under what terms.
+///
+/// A client needs this to size a shield: the pull is
+/// `ceil(units * gross / supply)`, and `Permit2.maxTotal` is signed over that
+/// figure. Quoting at `scale` instead under-signs the allowance by whatever the
+/// venue has earned, and the pull reverts.
+///
+/// `gross` and `supply` are published rather than only `index`, because that is
+/// how the pool converts — `scale` and `RAY` cancel out of `units * gross /
+/// supply`. Converting through the rounded index instead lands a unit or two
+/// from what the contract charges, which at the boundary is the difference
+/// between a pull that fits the signed ceiling and one that does not. `index` is
+/// for display.
+///
+/// Absent from `TokenOut` entirely until the indexer's first poll lands: an
+/// asset known to be yield-bearing but not yet priced must not be quoted at
+/// `scale`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YieldOut {
+    /// 0x-prefixed venue address. Bound once at registration and immutable.
+    pub venue: String,
+    /// Venue position plus the pool's idle balance, in base units.
+    pub gross: String,
+    /// Units outstanding, note holders plus the treasury's unswept fee.
+    pub supply: String,
+    /// `gross * RAY / (supply * scale)`, for display. Do not convert with it.
+    pub index: String,
+    /// The venue is no longer being supplied. Existing backing is unaffected —
+    /// the asset degrades to zero-yield custody, still fully backed.
+    pub halted: bool,
 }
 
 /// Spot USD prices for the registered assets, across every chain.
@@ -168,8 +205,25 @@ impl From<&crate::repositories::assets::AssetRow> for TokenOut {
             symbol: a.symbol.clone(),
             deposit_bps: a.deposit_bps,
             withdraw_bps: a.withdraw_bps,
+            yield_state: yield_out(a),
         }
     }
+}
+
+/// `None` for a plain asset, and also for a yield asset the poller has not
+/// reached yet — a client must not price the latter at `scale`.
+fn yield_out(a: &crate::repositories::assets::AssetRow) -> Option<YieldOut> {
+    let venue = a.venue.as_ref()?;
+    let gross = a.gross.as_ref()?;
+    let total = a.total_normalized.as_ref()?;
+    let fee_units = a.accrued_fee_normalized.as_ref()?;
+    Some(YieldOut {
+        venue: format!("0x{}", hex::encode(venue)),
+        gross: gross.to_string(),
+        supply: (total + fee_units).to_string(),
+        index: a.index_ray.as_ref()?.to_string(),
+        halted: a.halted.unwrap_or(false),
+    })
 }
 
 /// The configuration half of a chain record: static, deployment-supplied, and
@@ -296,6 +350,7 @@ mod tests {
                 symbol: Some("USDC".to_string()),
                 deposit_bps: Some(0),
                 withdraw_bps: Some(20),
+                yield_state: None,
             }],
         });
         let json = serde_json::to_value(&h).expect("serialize");
@@ -376,6 +431,7 @@ mod tests {
                     symbol: Some("WETH".to_string()),
                     deposit_bps: Some(0),
                     withdraw_bps: Some(20),
+                    yield_state: None,
                 },
                 TokenOut {
                     asset_id: 2,
@@ -387,6 +443,7 @@ mod tests {
                     // decimals and symbol do.
                     deposit_bps: None,
                     withdraw_bps: None,
+                    yield_state: None,
                 },
             ],
         ))

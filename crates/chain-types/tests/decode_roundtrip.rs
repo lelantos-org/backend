@@ -17,7 +17,7 @@ fn known_signatures_unique() {
     let mut sorted = sigs.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), 9);
+    assert_eq!(sorted.len(), sigs.len());
 }
 
 #[test]

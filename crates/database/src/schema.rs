@@ -187,6 +187,40 @@ diesel::table! {
 diesel::joinable!(matches -> subscriptions (subscription_id));
 diesel::joinable!(matches -> notes (note_id));
 
+diesel::table! {
+    asset_yield (chain_id, asset_id_u64) {
+        chain_id -> Int8,
+        asset_id_u64 -> Int8,
+        venue -> Bytea,
+        buffer_bps -> Int2,
+        perf_bps -> Int2,
+        halted -> Bool,
+        total_normalized -> Nullable<Numeric>,
+        accrued_fee_normalized -> Nullable<Numeric>,
+        idle -> Nullable<Numeric>,
+        last_idx -> Nullable<Numeric>,
+        gross -> Nullable<Numeric>,
+        index_ray -> Nullable<Numeric>,
+        block_number -> Nullable<Int8>,
+        updated_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    yield_fee_events (id) {
+        id -> Int8,
+        chain_id -> Int8,
+        asset_id_u64 -> Int8,
+        block_number -> Int8,
+        block_ts -> Int8,
+        tx_hash -> Bytea,
+        log_index -> Int4,
+        kind -> Int2,
+        units -> Numeric,
+        amount -> Nullable<Numeric>,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     raw_events,
     chain_state,
@@ -201,4 +235,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     spent_nullifiers,
     deposit_escrowed_events,
     screened_addresses,
+    asset_yield,
+    yield_fee_events,
 );

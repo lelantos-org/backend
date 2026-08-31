@@ -8,6 +8,15 @@
 //! The registry is append-mostly: an asset appears when the indexer first sees it
 //! registered on chain and does not change afterwards. A short TTL therefore
 //! picks up new assets promptly rather than correcting stale ones.
+//!
+//! One field does move. A yield asset's row carries the index its unit is priced
+//! at, and that rises with the venue on every block, so the TTL now bounds how
+//! stale a price can be rather than only how late a new asset arrives. It is
+//! still the right order of magnitude by a wide margin: at 5% APY the index
+//! moves on the order of 1e-7 per minute, far below the grace the fee check
+//! already applies. The one discontinuity is a venue loss, after which a cached
+//! row over-values a unit until it expires — a small relayer loss, never a
+//! charge to a user.
 
 use crate::domain::error::{AppError, AppResult};
 use crate::repositories::assets::{self, AssetRow};

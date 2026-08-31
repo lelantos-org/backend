@@ -1,10 +1,12 @@
 use crate::error::ExplorerIndexerError;
 use crate::repositories::{
     asset_flows::{self, NewAssetFlow},
+    asset_yield::{self, UpsertBinding},
     assets::{self, UpsertAsset, UpsertAssetFee},
     deposit_events::{self, NewDepositEscrowed},
     raw_events::RawEventRow,
     tree_advances::{self, TreeAdvanceRow},
+    yield_fee_events::{self, NewYieldFeeEvent},
 };
 use crate::util::u256_to_bigdecimal;
 use alloy::primitives::{Address, B256, U256};
@@ -224,4 +226,86 @@ pub async fn root_advanced(
     )
     .await?;
     Ok(())
+}
+
+/// The venue binding. Emitted once per asset and never reversed, so the row
+/// this creates is what marks the asset yield-bearing.
+pub async fn yield_asset_added(
+    pool: &DbPool,
+    chain_id: i64,
+    asset_id: u64,
+    venue: Address,
+    buffer_bps: u16,
+    perf_bps: u16,
+) -> Result<(), ExplorerIndexerError> {
+    asset_yield::upsert_binding(
+        pool,
+        UpsertBinding {
+            chain_id,
+            asset_id_u64: asset_id as i64,
+            venue: venue.as_slice().to_vec(),
+            // `bufferBps` is bounded by `BPS_DENOMINATOR` and `perfBps` by
+            // `MAX_FEE_BPS`, so neither can lose a valid value as `SMALLINT`.
+            buffer_bps: buffer_bps as i16,
+            perf_bps: perf_bps as i16,
+        },
+    )
+    .await
+}
+
+pub async fn yield_params_set(
+    pool: &DbPool,
+    chain_id: i64,
+    asset_id: u64,
+    buffer_bps: u16,
+    perf_bps: u16,
+) -> Result<(), ExplorerIndexerError> {
+    asset_yield::set_params(
+        pool,
+        chain_id,
+        asset_id as i64,
+        buffer_bps as i16,
+        perf_bps as i16,
+    )
+    .await
+}
+
+pub async fn halted_set(
+    pool: &DbPool,
+    chain_id: i64,
+    asset_id: u64,
+    halted: bool,
+) -> Result<(), ExplorerIndexerError> {
+    asset_yield::set_halted(pool, chain_id, asset_id as i64, halted).await
+}
+
+/// A treasury fee event, accrued or swept.
+///
+/// One function for both because they differ only in `kind` and whether tokens
+/// moved: an accrual mints units to the treasury and moves nothing, which is
+/// why `amount` is `None` there and why this log is the only trace of it.
+pub async fn yield_fee(
+    pool: &DbPool,
+    chain_id: i64,
+    row: &RawEventRow,
+    asset_id: u64,
+    kind: i16,
+    units: U256,
+    amount: Option<U256>,
+) -> Result<(), ExplorerIndexerError> {
+    yield_fee_events::insert(
+        pool,
+        NewYieldFeeEvent {
+            chain_id,
+            asset_id_u64: asset_id as i64,
+            block_number: row.block_number,
+            block_ts: row.block_ts,
+            tx_hash: row.tx_hash.clone(),
+            log_index: row.log_index,
+            kind,
+            units: u256_to_bigdecimal(units),
+            amount: amount.map(u256_to_bigdecimal),
+        },
+    )
+    .await
 }

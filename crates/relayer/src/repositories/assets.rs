@@ -1,8 +1,10 @@
+use crate::adapters::numeric::bigdecimal_to_u256;
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::units::{Rate, Scale};
 use alloy::primitives::Address;
 use bigdecimal::BigDecimal;
 use database::DbPool;
-use database::schema::assets;
+use database::schema::{asset_yield, assets};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
@@ -29,6 +31,23 @@ pub struct AssetRow {
     /// value a `uint16` could not.
     pub deposit_bps: Option<i16>,
     pub withdraw_bps: Option<i16>,
+    /// The venue this asset's custody earns in, or `NULL` for a plain asset.
+    ///
+    /// Present iff the asset has an `asset_yield` row, which the contract
+    /// creates once and can never undo.
+    pub venue: Option<Vec<u8>>,
+    /// Venue position plus idle, and the units outstanding against it.
+    ///
+    /// Both `NULL` until the indexer's first poll lands. A unit of this asset is
+    /// worth `gross / supply` rather than `scale`, so a consumer that has the
+    /// venue but not these two knows the asset is yield-bearing and that it
+    /// cannot yet price it — which is different from pricing it at `scale` and
+    /// being wrong by however much the venue has earned.
+    pub gross: Option<BigDecimal>,
+    pub total_normalized: Option<BigDecimal>,
+    pub accrued_fee_normalized: Option<BigDecimal>,
+    pub halted: Option<bool>,
+    pub index_ray: Option<BigDecimal>,
 }
 
 impl AssetRow {
@@ -37,6 +56,23 @@ impl AssetRow {
     /// belongs.
     pub fn asset_id(&self) -> u64 {
         self.asset_id_u64 as u64
+    }
+
+    /// This asset's circuit-to-base rate, or `None` if it cannot be priced yet.
+    ///
+    /// `None` means a yield asset whose index has not been polled — never a
+    /// plain asset, which prices at `scale` forever. Callers must not substitute
+    /// `scale` for a missing index: `scale` is not a conservative default but
+    /// wrong by whatever the venue has earned, in the direction that quotes too
+    /// many units and then credits too few.
+    pub fn rate(&self, scale: Scale) -> Option<Rate> {
+        if self.venue.is_none() {
+            return Some(Rate::plain(scale));
+        }
+        let gross = bigdecimal_to_u256(self.gross.as_ref()?).ok()?;
+        let total = bigdecimal_to_u256(self.total_normalized.as_ref()?).ok()?;
+        let fee = bigdecimal_to_u256(self.accrued_fee_normalized.as_ref()?).ok()?;
+        Some(Rate::yielding(scale, gross, total + fee))
     }
 
     /// The ERC-20 address, or `None` if the column does not hold 20 bytes.
@@ -53,6 +89,11 @@ impl AssetRow {
 pub async fn list_for_chain(pool: &DbPool, chain_id: i64) -> AppResult<Vec<AssetRow>> {
     let mut conn = super::conn(pool).await?;
     assets::table
+        .left_join(
+            asset_yield::table.on(asset_yield::chain_id
+                .eq(assets::chain_id)
+                .and(asset_yield::asset_id_u64.eq(assets::asset_id_u64))),
+        )
         .filter(assets::chain_id.eq(chain_id))
         .order(assets::asset_id_u64.asc())
         .select((
@@ -63,6 +104,12 @@ pub async fn list_for_chain(pool: &DbPool, chain_id: i64) -> AppResult<Vec<Asset
             assets::symbol,
             assets::deposit_bps,
             assets::withdraw_bps,
+            asset_yield::venue.nullable(),
+            asset_yield::gross.nullable(),
+            asset_yield::total_normalized.nullable(),
+            asset_yield::accrued_fee_normalized.nullable(),
+            asset_yield::halted.nullable(),
+            asset_yield::index_ray.nullable(),
         ))
         .load::<AssetRow>(&mut conn)
         .await
@@ -81,6 +128,11 @@ pub async fn list_for_chains(pool: &DbPool, chain_ids: &[i64]) -> AppResult<Vec<
     }
     let mut conn = super::conn(pool).await?;
     assets::table
+        .left_join(
+            asset_yield::table.on(asset_yield::chain_id
+                .eq(assets::chain_id)
+                .and(asset_yield::asset_id_u64.eq(assets::asset_id_u64))),
+        )
         .filter(assets::chain_id.eq_any(chain_ids))
         .order((assets::chain_id.asc(), assets::asset_id_u64.asc()))
         .select((
@@ -93,6 +145,12 @@ pub async fn list_for_chains(pool: &DbPool, chain_ids: &[i64]) -> AppResult<Vec<
                 assets::symbol,
                 assets::deposit_bps,
                 assets::withdraw_bps,
+                asset_yield::venue.nullable(),
+                asset_yield::gross.nullable(),
+                asset_yield::total_normalized.nullable(),
+                asset_yield::accrued_fee_normalized.nullable(),
+                asset_yield::halted.nullable(),
+                asset_yield::index_ray.nullable(),
             ),
         ))
         .load::<(i64, AssetRow)>(&mut conn)

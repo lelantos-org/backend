@@ -2,7 +2,7 @@ use crate::adapters::{TokenKey, TokenPrice};
 use crate::app::AppState;
 use crate::domain::amount::whole_tokens_str;
 use crate::domain::error::{AppError, AppResult};
-use crate::domain::responses::{ChainLockedOut, LockedAssetOut};
+use crate::domain::responses::{ChainLockedOut, LockedAssetOut, LockedBasis};
 use crate::repositories::asset_locked::{self, LockedRow};
 use bigdecimal::ToPrimitive;
 use std::cmp::Ordering;
@@ -33,8 +33,17 @@ pub async fn by_chain(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec
 /// dust amounts. A negative result is reported as-is; escrow cannot owe money, so
 /// a negative balance indicates missed deposits and clamping it to zero would
 /// hide that.
+///
+/// A yield asset is the exception, and takes `gross` instead. Its balance grows
+/// with its venue, and growth is not a flow: no event fires, `asset_flows` never
+/// sees it, and `in - out` therefore understates the balance by everything ever
+/// earned and drifts further every block. `basis` tells the caller which of the
+/// two definitions produced the figure, rather than mixing them silently.
 fn locked_asset(row: LockedRow, prices: &HashMap<TokenKey, TokenPrice>) -> LockedAssetOut {
-    let locked_base = &row.in_base - &row.out_base;
+    let (locked_base, basis) = match &row.yield_gross {
+        Some(gross) => (gross.clone(), LockedBasis::VenueHoldings),
+        None => (&row.in_base - &row.out_base, LockedBasis::FlowDifference),
+    };
     let locked_usd = prices
         .get(&(row.chain_id, row.token_hex.clone()))
         .and_then(|p| super::prices::to_usd(locked_base.to_f64()?, row.decimals, p));
@@ -45,6 +54,7 @@ fn locked_asset(row: LockedRow, prices: &HashMap<TokenKey, TokenPrice>) -> Locke
         amount: whole_tokens_str(&locked_base, row.decimals),
         locked_usd,
         last_ts: row.last_ts,
+        basis,
     }
 }
 
@@ -111,7 +121,35 @@ mod tests {
             in_base: BigDecimal::from_str(r#in).unwrap(),
             out_base: BigDecimal::from_str(out).unwrap(),
             last_ts: 42,
+            yield_gross: None,
         }
+    }
+
+    /// The same row for an asset whose custody earns, holding `gross` rather
+    /// than whatever its flows net out to.
+    fn yield_row(chain_id: i64, token: &str, decimals: i16, gross: &str) -> LockedRow {
+        LockedRow {
+            yield_gross: Some(BigDecimal::from_str(gross).unwrap()),
+            ..row(chain_id, token, decimals, "0", "0")
+        }
+    }
+
+    /// Yield is not a flow, so a yield asset's balance cannot come from
+    /// `in - out`: that difference misses everything the venue has earned. The
+    /// figure must come from what the pool and venue actually hold, and must say
+    /// so.
+    #[test]
+    fn a_yield_asset_reports_what_it_holds_not_what_flowed() {
+        let prices = HashMap::new();
+        // Nothing has flowed out and nothing flowed in that the view recorded,
+        // yet the pool holds 2 whole tokens.
+        let out = locked_asset(yield_row(1, "aa", 18, "2000000000000000000"), &prices);
+        assert_eq!(out.amount.as_deref(), Some("2"));
+        assert!(matches!(out.basis, LockedBasis::VenueHoldings));
+
+        let plain = locked_asset(row(1, "bb", 18, "3000000000000000000", "0"), &prices);
+        assert_eq!(plain.amount.as_deref(), Some("3"));
+        assert!(matches!(plain.basis, LockedBasis::FlowDifference));
     }
 
     fn priced(chain_id: i64, token: &str, price_usd: f64) -> (TokenKey, TokenPrice) {

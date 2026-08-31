@@ -164,7 +164,12 @@ async fn retract_derived(
     let tree = delete_at_or_above!(conn, tree_advances, chain_id, from_block);
     let flows = delete_at_or_above!(conn, asset_flows, chain_id, from_block);
     let escrow = delete_at_or_above!(conn, deposit_escrowed_events, chain_id, from_block);
-    Ok(notes + spent + tree + flows + escrow)
+    // Block-scoped, so it retracts like any other derived row. `asset_yield` is
+    // deliberately absent: it holds current state rather than per-block rows,
+    // and both halves of it self-heal — the polled columns are overwritten on
+    // the next tick, the event-sourced ones on the cursor rewind below.
+    let yield_fees = delete_at_or_above!(conn, yield_fee_events, chain_id, from_block);
+    Ok(notes + spent + tree + flows + escrow + yield_fees)
 }
 
 /// Rewind `name`'s cursor to the start and mark the reorg log processed to

@@ -1,9 +1,11 @@
 pub mod asset_flows;
+pub mod asset_yield;
 pub mod assets;
 pub mod cursor;
 pub mod deposit_events;
 pub mod raw_events;
 pub mod tree_advances;
+pub mod yield_fee_events;
 
 use crate::error::ExplorerIndexerError;
 use database::{DbConn, DbPool};

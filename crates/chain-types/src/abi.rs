@@ -134,4 +134,67 @@ sol! {
     /// refunded (in + fee, scaled token units).
     #[derive(Debug)]
     event DepositCanceled(uint256 indexed id, address indexed payer, uint256 refunded);
+
+    /// Emitted when an asset id is bound to a yield venue, which happens once
+    /// and never again: `MASP.addYieldAsset` goes through the add-only registry,
+    /// so a re-registration reverts. This log is therefore the definitive
+    /// signal that an asset is yield-bearing, and there is no counterpart
+    /// unbinding it.
+    #[derive(Debug)]
+    event YieldAssetAdded(
+        uint64 indexed assetId,
+        address indexed venue,
+        uint16 bufferBps,
+        uint16 perfBps
+    );
+
+    /// Owner change to an asset's buffer share or performance-fee rate. Neither
+    /// touches the venue binding.
+    #[derive(Debug)]
+    event YieldParamsSet(
+        uint64 indexed assetId,
+        uint16 bufferBps,
+        uint16 perfBps
+    );
+
+    /// The treasury's cut of venue growth, minted as normalized units rather
+    /// than moved as tokens — nobody's balance is rewritten, the treasury simply
+    /// starts owning a slice of the pot. `newLastIdx` is the fee high-water mark
+    /// after the mint.
+    ///
+    /// Together with `NormalizedFeeSwept` this is the only record of what the
+    /// protocol earned: an accrual moves no tokens, so it leaves no `AssetMoved`
+    /// and cannot be reconstructed from flows.
+    #[derive(Debug)]
+    event PerfFeeAccrued(
+        uint64 indexed assetId,
+        uint256 unitsMinted,
+        uint256 newLastIdx
+    );
+
+    /// Accrued fee units converted to underlying and sent to the treasury.
+    /// `units` is what was burned, `amount` what was paid; they differ by the
+    /// index at settlement.
+    #[derive(Debug)]
+    event NormalizedFeeSwept(
+        uint64 indexed assetId,
+        uint256 units,
+        uint256 amount
+    );
+
+    /// The idle/venue split was restored. Moves no value in or out of the pool,
+    /// so it changes no balance — only where the asset's backing sits.
+    #[derive(Debug)]
+    event Rebalanced(uint64 indexed assetId, uint256 idleAfter);
+
+    /// The asset stopped, or resumed, supplying its venue. Emitted by
+    /// `emergencyUnwind` (always `true`) and by `setHalted`.
+    #[derive(Debug)]
+    event HaltedSet(uint64 indexed assetId, bool halted);
+
+    /// A venue position was pulled back to idle. `recovered` may be less than
+    /// the position when the vault is short of liquidity, and the call is
+    /// repeatable, so several of these can describe one unwind.
+    #[derive(Debug)]
+    event EmergencyUnwound(uint64 indexed assetId, uint256 recovered);
 }

@@ -1,7 +1,8 @@
 use alloy::sol_types::SolEvent;
 use chain_types::abi::{
     AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
-    NotePayload, NullifierConsumed, RootAdvanced,
+    EmergencyUnwound, HaltedSet, NormalizedFeeSwept, NotePayload, NullifierConsumed,
+    PerfFeeAccrued, Rebalanced, RootAdvanced, YieldAssetAdded, YieldParamsSet,
 };
 
 /// Topic0 of every event this crate decodes, taken from the canonical Foundry
@@ -51,6 +52,34 @@ const EXPECTED: &[(&str, &str)] = &[
         "AssetFeeSet",
         "a8dda59a05d622fd0130a6952f3e1fedeb17964708e5a6b3d186ce77cd69961c",
     ),
+    (
+        "YieldAssetAdded",
+        "5ae984b9affbaf15a0cd4631d9fc011bb75bdb1a8e2da3cf13907a6ba18ba418",
+    ),
+    (
+        "YieldParamsSet",
+        "4ca5866c0899baa0a170281d0370a9bf9ffe83c56c4c37c2c59a0a9f07b3afb8",
+    ),
+    (
+        "PerfFeeAccrued",
+        "e859634206ca91269b2ded4ebcf8ab2af2974ef3a25b29e6e31104ff99f31886",
+    ),
+    (
+        "NormalizedFeeSwept",
+        "d4c0820935c555940002a6883fab7ba3769f411649844c4ec62b1c7c93e17aa5",
+    ),
+    (
+        "Rebalanced",
+        "09dbf3bd3f8a16776d0cd926612836410135cd5ef32b6cae9c9f182b923412ae",
+    ),
+    (
+        "HaltedSet",
+        "d05d75ff4dcbb98f9bc9448ffbb36e9fa2684426abf92840d4587afd8b829f75",
+    ),
+    (
+        "EmergencyUnwound",
+        "4385959e0b5d182a2d8fb896697c2034d6e959bec6b97907a6846036cf4f10cf",
+    ),
 ];
 
 #[test]
@@ -65,6 +94,13 @@ fn test_signature_hashes_match_the_deployed_contract_abi() {
         ("AssetRegistered", AssetRegistered::SIGNATURE_HASH),
         ("AssetMoved", AssetMoved::SIGNATURE_HASH),
         ("AssetFeeSet", AssetFeeSet::SIGNATURE_HASH),
+        ("YieldAssetAdded", YieldAssetAdded::SIGNATURE_HASH),
+        ("YieldParamsSet", YieldParamsSet::SIGNATURE_HASH),
+        ("PerfFeeAccrued", PerfFeeAccrued::SIGNATURE_HASH),
+        ("NormalizedFeeSwept", NormalizedFeeSwept::SIGNATURE_HASH),
+        ("Rebalanced", Rebalanced::SIGNATURE_HASH),
+        ("HaltedSet", HaltedSet::SIGNATURE_HASH),
+        ("EmergencyUnwound", EmergencyUnwound::SIGNATURE_HASH),
     ];
 
     for (name, hash) in actual {
