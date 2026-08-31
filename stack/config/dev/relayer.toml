@@ -64,7 +64,7 @@ shielded_fee_assets = []
 [chains.public]
 name = "anvil"
 rpc_url = "http://localhost:8545"
-tree_depth = 10
+tree_depth = 11
 permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 
 # ── second chain, for exercising the frontend's chain switcher ───────────
@@ -105,7 +105,7 @@ flush_max_attempts = 5
 [chains.public]
 name = "anvil-2"
 rpc_url = "http://localhost:8545"
-tree_depth = 10
+tree_depth = 11
 permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 
 [price_oracle]
@@ -120,6 +120,6 @@ cache_ttl_s = 1
 graph_path = "/circuits/tree_update_batch.wcd"
 zkey_path = "/circuits/tree_update_batch_final.zkey"
 # Transact circuit verification key — must match the deployed verifier's
-# arity. The relayer's DTOs are 4x4 (`TRANSACT_IN`/`TRANSACT_OUT`), so a 3x3
+# arity. The relayer's DTOs are 4x6 (`TRANSACT_IN`/`TRANSACT_OUT`), so a 4x4
 # key here rejects every wallet proof in pre-verification.
-transact_vkey_path = "/circuits/4x4_verification_key.json"
+transact_vkey_path = "/circuits/4x6_verification_key.json"

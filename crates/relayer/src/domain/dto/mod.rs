@@ -32,17 +32,34 @@ mod wire_contract {
         })
     }
 
+    /// `n` copies of `point()`, sized from the arity constants rather than
+    /// written out: `TRANSACT_IN` and `TRANSACT_OUT` stopped being the same
+    /// number at 4x6, and a literal list here would go stale on the next move.
+    fn points(n: usize) -> serde_json::Value {
+        serde_json::Value::Array((0..n).map(|_| point()).collect())
+    }
+
+    /// `n` distinct decimal strings starting at `from`.
+    fn decimals(from: usize, n: usize) -> serde_json::Value {
+        serde_json::Value::Array((from..from + n).map(|i| i.to_string().into()).collect())
+    }
+
+    /// `n` copies of `aux()`.
+    fn auxes(n: usize) -> serde_json::Value {
+        serde_json::Value::Array((0..n).map(|_| aux()).collect())
+    }
+
     fn pub_inputs() -> serde_json::Value {
         serde_json::json!({
             "merkleRoot": "1",
-            "nullifier": ["1", "2", "3", "4"],
-            "outCm": ["5", "6", "7", "8"],
+            "nullifier": decimals(1, TRANSACT_IN),
+            "outCm": decimals(1 + TRANSACT_IN, TRANSACT_OUT),
             "publicAssetId": 1,
             "publicIn": 0,
             "publicOut": 500,
-            "inCv": [point(), point(), point(), point()],
-            "outCv": [point(), point(), point(), point()],
-            "outCvDep": [point(), point(), point(), point()],
+            "inCv": points(TRANSACT_IN),
+            "outCv": points(TRANSACT_OUT),
+            "outCvDep": points(TRANSACT_OUT),
             "recipient": "0x000000000000000000000000000000000000beef",
             "chainId": 31337,
             "payer": "0x0000000000000000000000000000000000000001",
@@ -85,7 +102,7 @@ mod wire_contract {
             "kind": "withdraw",
             "proof": proof(),
             "pubInputs": pub_inputs(),
-            "aux": [aux(), aux(), aux(), aux()],
+            "aux": auxes(TRANSACT_OUT),
         });
         let p: SubmitSpendPayload = serde_json::from_value(raw).expect("spend payload");
         assert_eq!(p.kind, SpendKind::Withdraw);
@@ -109,7 +126,7 @@ mod wire_contract {
         assert!(serde_json::from_value::<SubmitSpendPayload>(raw).is_err());
     }
 
-    /// A 3x3 payload against the deployed 4x4 arity. Rejection at the JSON
+    /// A 3x3 payload against the deployed 4x6 arity. Rejection at the JSON
     /// boundary is the intended behaviour, so this asserts the refusal.
     #[test]
     fn a_three_output_spend_payload_is_refused() {
@@ -132,7 +149,7 @@ mod wire_contract {
             "chainId": 31337,
             "proof": proof(),
             "pubInputs": pub_inputs(),
-            "aux": [aux(), aux(), aux(), aux()],
+            "aux": auxes(TRANSACT_OUT),
             "swap": {
                 "adapter": "0x0000000000000000000000000000000000000001",
                 "route": "0x00",

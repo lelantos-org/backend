@@ -14,14 +14,14 @@ use fmd_crypto::tree::Field;
 /// Maximum leaves per `tree_update_batch` proof, mirroring
 /// `PubInputs.MAX_L_BATCH`. Counted in leaves rather than deposits: a deposit is
 /// two leaves and a spend is `TRANSACT_OUT`.
-pub const MAX_L_BATCH: usize = 4;
+pub const MAX_L_BATCH: usize = 8;
 
 /// Leaves one deposit mints (mirrors `PubInputs.LEAVES_PER_DEPOSIT`): the
 /// depositor's note, then the note paying whoever flushed it.
 ///
-/// Widening `MAX_L_BATCH` requires a new trusted setup, since `COUNT_BITS = 2`
-/// pins it, so the second leaf halves the deposits per batch rather than adding
-/// slots.
+/// Widening `MAX_L_BATCH` requires a new trusted setup, since `COUNT_BITS`
+/// pins it (3 at MAX_L 8), so the second leaf halves the deposits per batch
+/// rather than adding slots.
 pub const LEAVES_PER_DEPOSIT: usize = 2;
 
 /// Deposits one `flushBatch` can carry.
@@ -291,10 +291,19 @@ mod tests {
         };
         let batch = PaddedBatch::from_deposits(&[leaf(0xaa, 1_000), leaf(0xbb, 250)]);
 
+        // Built at MAX_L_BATCH width rather than written out, so widening the
+        // batch does not silently turn this into a length mismatch.
+        let mut want_deposit = [0u8; MAX_L_BATCH];
+        want_deposit[0] = 1;
+        want_deposit[1] = 1;
+        let mut want_public_in = [0u64; MAX_L_BATCH];
+        want_public_in[0] = 1_000;
+        want_public_in[1] = 250;
+
         assert_eq!(batch.actual_count, 2);
-        assert_eq!(batch.is_deposit, [1, 1, 0, 0]);
+        assert_eq!(batch.is_deposit, want_deposit);
         // Padding stays zero; the contract and the circuit both enforce it.
         assert_eq!(batch.cms[2], FixedBytes::<32>::ZERO);
-        assert_eq!(batch.leaf_public_in, [1_000, 250, 0, 0]);
+        assert_eq!(batch.leaf_public_in, want_public_in);
     }
 }

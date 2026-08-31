@@ -31,6 +31,22 @@ pub enum TreeError {
     BadFieldLength(usize),
 }
 
+/// Merkle depth of the deployed commitment tree.
+///
+/// A constant rather than configuration, because it is pinned at compile time
+/// in three places that must all agree and none of which a deployment can
+/// vary: `circuits/src/lib/common.circom` asserts `d <= 11` (its empty-subtree
+/// table stops there), `MASP.MAX_LEAVES` is `4^11`, and the verifying key is
+/// built for that geometry. Changing the depth means new circuits and a new
+/// verifier, not a new environment variable.
+///
+/// Lives here because this crate owns `MerkleTree`, and it is the one crate
+/// every service that mirrors the tree already depends on. A service that
+/// picked its own value would serve a well-formed root for a tree the chain
+/// never held, which no caller can detect and every wallet then rejects its
+/// own correct tree against.
+pub const DEPTH: usize = 11;
+
 /// Big-endian 32-byte field element (matches SDK `Field`).
 pub type Field = [u8; 32];
 

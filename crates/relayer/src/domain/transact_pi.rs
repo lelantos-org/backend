@@ -34,15 +34,15 @@ use alloy::sol_types::SolValue;
 /// Derived rather than written out: `merkleRoot`, one word per nullifier and per
 /// `outCm`, the three public-value words, `inCv` as a coordinate pair per input,
 /// the four address and chain words, and `outCv` plus `outCvDep` as two
-/// coordinate pairs per output. 32 at 3x3 and 40 at 4x4; a literal here would
+/// coordinate pairs per output. 40 at 4x4 and 50 at 4x6; a literal here would
 /// stop matching the circuit when the arity moves.
 const STRUCT_WORDS: usize =
     1 + TRANSACT_IN + TRANSACT_OUT + 3 + 2 * TRANSACT_IN + 4 + 4 * TRANSACT_OUT;
 /// Word index of the first `(clueRx, clueRy, clueBits)` triple: they start
 /// where the struct's own words end.
 const CLUE_BASE: usize = STRUCT_WORDS;
-/// The struct words, one clue triple per output, then the aux digest: 42 at 3x3
-/// and 53 at 4x4. `contracts/test/fixtures/transact_4x4_vector.json` publishes
+/// The struct words, one clue triple per output, then the aux digest: 53 at 4x4
+/// and 69 at 4x6. `contracts/test/fixtures/transact_4x6_vector.json` publishes
 /// `coeffCount` for the deployed shape, which the tests check.
 pub const TRANSACT_COEFFS: usize = STRUCT_WORDS + 3 * TRANSACT_OUT + 1;
 
@@ -146,13 +146,13 @@ fn eval_poly(coeffs: &[U256], z: U256) -> U256 {
 /// are what keep the layout correct. This assertion makes changing the arity a
 /// deliberate edit in this file, where the coefficient order lives and no test
 /// can infer it from the constants.
-const _: () = assert!(TRANSACT_IN == 4 && TRANSACT_OUT == 4);
+const _: () = assert!(TRANSACT_IN == 4 && TRANSACT_OUT == 6);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Published `transact_4x4` vectors, carrying the coefficient vector the
+    /// Published `transact_4x6` vectors, carrying the coefficient vector the
     /// reference implementation built plus the `z` and `y` derived from it, which
     /// is what this module must reproduce. A layout that drifts from the
     /// contract's produces proofs the chain rejects and a local check that rejects
@@ -161,12 +161,12 @@ mod tests {
     /// A missing file is a hard failure rather than a skip, so a renamed fixture
     /// cannot stop these tests from running unnoticed.
     ///
-    /// The file is vendored from `contracts/test/fixtures/transact_4x4_vector.json`
+    /// The file is vendored from `contracts/test/fixtures/transact_4x6_vector.json`
     /// because this repository is checked out on its own in CI, where the
     /// contracts tree is not present.
     fn vectors() -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/vectors/transact_4x4.json");
+            .join("../../tests/vectors/transact_4x6.json");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("published vectors missing at {}: {e}", path.display()));
         serde_json::from_str(&raw).expect("published vectors parse")
@@ -276,7 +276,9 @@ mod tests {
         alloy::primitives::Address::from_slice(&u256(s).to_be_bytes::<32>()[12..])
     }
 
-    fn points(v: &serde_json::Value) -> [[U256; 2]; TRANSACT_OUT] {
+    /// Generic over the arity: `inCv` is `TRANSACT_IN` wide while `outCv` and
+    /// `outCvDep` are `TRANSACT_OUT`, which stopped being the same number at 4x6.
+    fn points<const N: usize>(v: &serde_json::Value) -> [[U256; 2]; N] {
         let rows = v.as_array().expect("points");
         std::array::from_fn(|i| {
             let p = strs(&rows[i]);

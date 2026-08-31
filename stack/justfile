@@ -15,10 +15,11 @@ export STACK_ENV := env_var_or_default("STACK_ENV", "dev")
 export DEBUG := env_var_or_default("DEBUG", "0")
 export TRACE := env_var_or_default("TRACE", "0")
 
-# v0.11.2 is the first release carrying `4x4_verification_key.json`. The
-# relayer's transact DTOs are 4x4, so an older pin has no key that matches the
-# deployed verifier — see `transact_vkey_path` in config/*/relayer.toml.
-CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.11.2")
+# v0.12.0 is the generation the deployed contracts are built for: tree depth 11
+# (`CommitmentTree.EMPTY_ROOT`), `MAX_L_BATCH` 8 and the 4x6 transact shape.
+# v0.11.2 and earlier are depth 10 / MAX_L 4 / 4x4 — the witness graph then
+# rejects `frontier_in[30..32]` and no proof the relayer builds can land.
+CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.12.1")
 DC := "docker compose"
 
 default:

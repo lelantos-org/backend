@@ -17,24 +17,24 @@ sol! {
             uint256[2] c;
         }
         /// `PubInputs.Transact`. The array arity is the deployed circuit's
-        /// `TRANSACT_IN` and `TRANSACT_OUT`, both 4. `sol!` takes literals, so
+        /// `TRANSACT_IN` (4) and `TRANSACT_OUT` (6). `sol!` takes literals, so
         /// the arity cannot be written in terms of the Rust constants;
         /// `domain::dto::transact` asserts the pair at compile time. Changing the
         /// arity requires a new circuit, ceremony and verifier.
         struct Transact {
             bytes32 merkleRoot;
             bytes32[4] nullifier;
-            bytes32[4] outCm;
+            bytes32[6] outCm;
             uint64 publicAssetId;
             uint64 publicIn;
             uint64 publicOut;
             uint256[2][4] inCv;
-            uint256[2][4] outCv;
+            uint256[2][6] outCv;
             address recipient;
             uint256 chainId;
             address payer;
             address relayer;
-            uint256[2][4] outCvDep;
+            uint256[2][6] outCvDep;
         }
         /// `PubInputs.TreeUpdateBatch`. Every array is indexed by leaf rather
         /// than by pair: `actualCount` is a leaf count in `[1, MAX_L_BATCH]`, so
@@ -45,11 +45,11 @@ sol! {
             bytes32 newRoot;
             uint64 startIndex;
             uint64 actualCount;
-            bytes32[4] cms;
-            uint256[2][4] cvDeps;
-            uint64[4] leafAsset;
-            uint64[4] leafPublicIn;
-            uint8[4] isDeposit;
+            bytes32[8] cms;
+            uint256[2][8] cvDeps;
+            uint64[8] leafAsset;
+            uint64[8] leafPublicIn;
+            uint8[8] isDeposit;
         }
         /// `PubInputs.DepositRequest`. A deposit occupies exactly one leaf,
         /// whose `cvDep` the batch circuit pins to `publicIn` units of
@@ -136,7 +136,7 @@ sol! {
             Transact calldata pi,
             Proof calldata tp,
             TreeUpdateBatch calldata tpi,
-            OutputAux[4] calldata aux
+            OutputAux[6] calldata aux
         ) external;
 
         function withdraw(
@@ -144,7 +144,7 @@ sol! {
             Transact calldata pi,
             Proof calldata tp,
             TreeUpdateBatch calldata tpi,
-            OutputAux[4] calldata aux
+            OutputAux[6] calldata aux
         ) external;
     }
 
@@ -165,7 +165,7 @@ sol! {
             IMasp.Transact pi_w;
             IMasp.Proof tp_w;
             IMasp.TreeUpdateBatch tpi_w;
-            IMasp.OutputAux[4] aux_w;
+            IMasp.OutputAux[6] aux_w;
             IMasp.DepositRequest deposit_d;
             /// Two leaves per deposit, hence two aux payloads; leg 1's withdraw
             /// carries one per transact output.
@@ -189,7 +189,7 @@ sol! {
             IMasp.Transact calldata pi,
             IMasp.Proof calldata tp,
             IMasp.TreeUpdateBatch calldata tpi,
-            IMasp.OutputAux[4] calldata aux
+            IMasp.OutputAux[6] calldata aux
         ) external returns (uint256 net);
     }
 }

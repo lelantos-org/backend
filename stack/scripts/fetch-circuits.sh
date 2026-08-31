@@ -27,12 +27,12 @@ REPO="lelantos-org/circuits"
 VERSION_FILE="${DEST}/.version"
 
 # The transact verification key must match the deployed verifier's arity;
-# the relayer's DTOs are 4x4, so 3x3 is no longer fetched.
+# the relayer's DTOs are 4x6, so 4x4 is no longer fetched.
 #
 # `.wcd` is the witness-calculation graph, which replaced the circom `.wasm`
 # generator. The `.r1cs` went with it: the constraint matrices come from the
 # zkey, so the relayer never read it.
-ASSETS="tree_update_batch.wcd tree_update_batch_final.zkey 4x4_verification_key.json"
+ASSETS="tree_update_batch.wcd tree_update_batch_final.zkey 4x6_verification_key.json"
 
 # Nothing to do when the cached artifacts already match the requested tag.
 is_cached() {

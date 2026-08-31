@@ -53,7 +53,15 @@ pub fn build(state: AppState) -> Router {
         )
         .route(
             "/v1/tx-kinds",
-            get(handlers::tx_kinds).layer(cc_layer(analytic)),
+            get(handlers::tx_kinds).layer(cc_layer(analytic.clone())),
+        )
+        .route(
+            "/v1/anonymity-set",
+            get(handlers::anonymity_set).layer(cc_layer(analytic.clone())),
+        )
+        .route(
+            "/v1/pool-notes",
+            get(handlers::pool_notes).layer(cc_layer(analytic)),
         )
         .layer(request_span::trace_layer())
         .with_state(state)

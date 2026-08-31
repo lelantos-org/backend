@@ -56,6 +56,17 @@ pub struct TxOut {
     /// Whole tokens as a decimal string. `null` for transfers and for any asset
     /// whose decimals the indexer has not resolved.
     pub amount: Option<String>,
+    /// The circuit value this withdrawal published, as a decimal string — the
+    /// key its anonymity set is grouped by. Join it against `/v1/anonymity-set`
+    /// on `(chainId, assetIdU64, publicOut)` to get the cohort size.
+    ///
+    /// `null` for every non-withdrawal kind, and for a withdrawal indexed before
+    /// the contract emitted the field. Both mean the denomination is unknown, so
+    /// a consumer must render that as unknown rather than as a cohort of zero.
+    ///
+    /// A string for the same reason as `AnonymitySetOut::public_out`: the value
+    /// is a `uint64` and would not survive a JSON number intact.
+    pub public_out: Option<String>,
 }
 
 /// Transaction counts for one time bucket, split by kind.

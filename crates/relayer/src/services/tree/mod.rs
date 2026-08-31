@@ -26,9 +26,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{error, info};
 
-/// Merkle depth this mirror is built for. Must match the deployed pool and
-/// every chain's published `public.tree_depth`.
-pub const DEPTH: usize = 10;
+/// Merkle depth this mirror is built for.
+///
+/// Re-exported rather than declared: the depth is pinned by the circuits and
+/// the verifier, so every service that mirrors the tree has to agree on one
+/// value, and `fmd_crypto::tree` is the crate they all share.
+pub use fmd_crypto::tree::DEPTH;
 /// Quaternary tree, so `ARITY^DEPTH` leaves. Mirrors `MASP.MAX_LEAVES`.
 const MAX_LEAVES: usize = 4usize.pow(DEPTH as u32);
 /// Leaves read per round trip during [`TreeMirror::bootstrap`].

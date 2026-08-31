@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::domain::amount::whole_tokens;
+use crate::domain::amount::{plain_amount, whole_tokens};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::{KindCounts, TxKind, TxOut};
 use crate::repositories::transactions::{self, KindCountRow};
@@ -43,6 +43,11 @@ pub async fn recent(
                             .as_ref()
                             .and_then(|a| whole_tokens(a, r.decimals))
                             .map(|a| a.normalized().to_string()),
+                        // Passed through unconverted: the denomination is the
+                        // raw circuit integer the cohort is grouped by, and
+                        // converting it to whole tokens would key the join on a
+                        // value that moves with the yield index.
+                        public_out: r.public_out.as_ref().map(plain_amount),
                     })
                 })
                 .collect();

@@ -14,11 +14,9 @@ use crate::repositories::notes;
 use crate::services::field::{bigdec_to_field, field_to_hex};
 use crate::services::poseidon::leaf_hash;
 use database::DbPool;
-use fmd_crypto::tree::{Field, MerkleTree};
+use fmd_crypto::tree::{DEPTH, Field, MerkleTree};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-const DEPTH: usize = 10;
 
 /// Leaves fetched per round trip while the mirror catches up.
 const LEAF_PAGE: i64 = 100_000;

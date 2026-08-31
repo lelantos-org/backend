@@ -39,7 +39,8 @@ use diesel_async::RunQueryDsl;
 /// `$1` is the chain filter and `$2` the since-ts filter; NULL matches all.
 const CLASSIFIED: &str = "\
     SELECT f.chain_id, f.tx_hash, f.block_number, f.block_ts, \
-           'withdraw' AS kind, f.asset_id_u64, a.decimals, f.out_amount AS amount \
+           'withdraw' AS kind, f.asset_id_u64, a.decimals, f.out_amount AS amount, \
+           f.public_out AS public_out \
       FROM asset_flows f \
       JOIN assets a ON a.chain_id = f.chain_id AND a.asset_id_u64 = f.asset_id_u64 \
      WHERE f.out_amount > 0 \
@@ -49,7 +50,7 @@ const CLASSIFIED: &str = "\
     SELECT d.chain_id, d.flushed_tx_hash AS tx_hash, d.flushed_at_block AS block_number, \
            d.flushed_at_ts AS block_ts, \
            'deposit' AS kind, d.public_asset_id AS asset_id_u64, a.decimals, \
-           (d.public_in * a.scale) AS amount \
+           (d.public_in * a.scale) AS amount, NULL::NUMERIC AS public_out \
       FROM deposit_escrowed_events d \
       JOIN assets a ON a.chain_id = d.chain_id AND a.asset_id_u64 = d.public_asset_id \
      WHERE d.flushed_at_ts IS NOT NULL AND d.canceled_at_block IS NULL \
@@ -58,7 +59,7 @@ const CLASSIFIED: &str = "\
     UNION ALL \
     SELECT d.chain_id, d.tx_hash, d.block_number, d.block_ts, \
            'pending' AS kind, d.public_asset_id AS asset_id_u64, a.decimals, \
-           (d.public_in * a.scale) AS amount \
+           (d.public_in * a.scale) AS amount, NULL::NUMERIC AS public_out \
       FROM deposit_escrowed_events d \
       JOIN assets a ON a.chain_id = d.chain_id AND a.asset_id_u64 = d.public_asset_id \
      WHERE d.flushed_at_block IS NULL AND d.canceled_at_block IS NULL \
@@ -67,7 +68,7 @@ const CLASSIFIED: &str = "\
     UNION ALL \
     SELECT t.chain_id, t.tx_hash, t.block_number, t.block_ts, \
            'transfer' AS kind, NULL::BIGINT AS asset_id_u64, NULL::SMALLINT AS decimals, \
-           NULL::NUMERIC AS amount \
+           NULL::NUMERIC AS amount, NULL::NUMERIC AS public_out \
       FROM tree_advances t \
      WHERE ($1::BIGINT IS NULL OR t.chain_id = $1) \
        AND ($2::BIGINT IS NULL OR t.block_ts >= $2) \
@@ -97,6 +98,12 @@ pub struct ClassifiedTxRow {
     /// Token base units. `NULL` for transfers, which move no public value.
     #[diesel(sql_type = Nullable<Numeric>)]
     pub amount: Option<BigDecimal>,
+    /// The circuit value a withdrawal published, in circuit units. `NULL` for
+    /// every other kind, and for withdrawals indexed before the contract emitted
+    /// the field — the two are indistinguishable here and both mean "no
+    /// denomination to report", never a denomination of zero.
+    #[diesel(sql_type = Nullable<Numeric>)]
+    pub public_out: Option<BigDecimal>,
 }
 
 /// Newest-first feed of classified transactions.

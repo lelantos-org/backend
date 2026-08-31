@@ -1,7 +1,7 @@
 use crate::adapters::{TokenKey, TokenPrice};
 use crate::domain::responses::{
-    AssetOut, ChainFlowOut, ChainLockedOut, CountPoint, FlowPoint, KindCounts, TreeAdvanceOut,
-    TxKind, TxOut,
+    AnonymitySetOut, AssetOut, ChainFlowOut, ChainLockedOut, CountPoint, FlowPoint, KindCounts,
+    PoolNotesOut, TreeAdvanceOut, TxKind, TxOut,
 };
 use moka::future::Cache;
 use shared::cache::build;
@@ -16,6 +16,8 @@ pub type ChainFlows24hKey = i64;
 pub type LockedKey = Option<i64>;
 pub type TransactionsKey = (Option<i64>, Option<i64>, Option<TxKind>, i64);
 pub type TxKindsKey = (Option<i64>, i64, Option<i64>);
+pub type AnonymitySetKey = (Option<i64>, Option<i64>, i64, i64);
+pub type PoolNotesKey = Option<i64>;
 
 #[derive(Clone)]
 pub struct AppCache {
@@ -31,6 +33,11 @@ pub struct AppCache {
     /// rather than the analytic one.
     pub transactions: Cache<TransactionsKey, Arc<Vec<TxOut>>>,
     pub tx_kinds: Cache<TxKindsKey, Arc<Vec<KindCounts>>>,
+    /// Denomination cohorts. Analytic TTL: the counts are all-time, so one more
+    /// withdrawal moves a k that is already in the hundreds by one.
+    pub anonymity_set: Cache<AnonymitySetKey, Arc<Vec<AnonymitySetOut>>>,
+    /// Per-chain tree occupancy. Analytic TTL, like the other all-time figures.
+    pub pool_notes: Cache<PoolNotesKey, Arc<Vec<PoolNotesOut>>>,
     /// `None` records a token the provider could not price. Caching that answer
     /// stops every request from re-asking upstream about tokens that will never
     /// have a price.
@@ -55,6 +62,8 @@ impl AppCache {
             locked: build(32, analytic),
             transactions: build(512, head),
             tx_kinds: build(2_048, analytic),
+            anonymity_set: build(512, analytic),
+            pool_notes: build(32, analytic),
             prices: build(1_024, price),
         }
     }

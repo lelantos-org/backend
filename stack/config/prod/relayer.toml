@@ -29,6 +29,6 @@ swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
 graph_path = "/circuits/tree_update_batch.wcd"
 zkey_path = "/circuits/tree_update_batch_final.zkey"
 # Transact circuit verification key — must match the deployed verifier's
-# arity. The relayer's DTOs are 4x4 (`TRANSACT_IN`/`TRANSACT_OUT`), so a 3x3
+# arity. The relayer's DTOs are 4x6 (`TRANSACT_IN`/`TRANSACT_OUT`), so a 4x4
 # key here rejects every wallet proof in pre-verification.
-transact_vkey_path = "/circuits/4x4_verification_key.json"
+transact_vkey_path = "/circuits/4x6_verification_key.json"
