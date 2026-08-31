@@ -3,8 +3,9 @@
 #
 #   1. forge script DeployTest.s.sol      → verifiers, MASP, mock tokens
 #   2. forge script DeployTestSwap.s.sol  → UniV3Adapter, SwapWrapper, mocks
-#   3. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
-#   4. write addresses.env, sourced by every backend's entrypoint wrapper
+#   3. forge script DeployTestYield.s.sol → MockERC4626 vaults, ERC4626Venues
+#   4. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
+#   5. write addresses.env, sourced by every backend's entrypoint wrapper
 #
 # Required env (set in docker-compose.yml):
 #   RPC_URL DEPLOYER_KEY FUND_RECIPIENT FUND_NATIVE FUND_WETH FUND_ERC20
@@ -152,6 +153,33 @@ deploy_swap() {
     debug "MOCK_UNIVERSAL_ROUTER=${MOCK_UNIVERSAL_ROUTER} (rates seeded by DeployTest)"
 }
 
+# One MockERC4626 + ERC4626Venue per fixture asset, each registered as a new
+# yield asset id. DeployTestYield reads MASP and the token addresses from the
+# environment, and derives the yield ids from the same committed fixture as the
+# plain ones (1,2,3 → 4,5,6).
+deploy_yield() {
+    step "deploy yield stack (MockERC4626 vaults + ERC4626Venues)"
+    export MASP TOKEN_1 TOKEN_2 TOKEN_3
+    forge_script "DeployTestYield.s.sol:DeployTestYield"
+    reload_addresses
+
+    # Keyed by *yield* id, which is the plain id shifted by the asset count.
+    # Read back rather than assumed: addr_req fails loudly if the script's id
+    # derivation and this offset ever disagree.
+    YIELD_VENUE_4=$(addr_req YIELD_VENUE_4)
+    YIELD_VENUE_5=$(addr_req YIELD_VENUE_5)
+    YIELD_VENUE_6=$(addr_req YIELD_VENUE_6)
+    YIELD_VAULT_4=$(addr_req YIELD_VAULT_4)
+
+    log "YIELD_VENUE_4=${YIELD_VENUE_4}"
+    debug "YIELD_VENUE_5=${YIELD_VENUE_5} YIELD_VENUE_6=${YIELD_VENUE_6}"
+    # The vaults start empty and at a 1:1 share price. `MockERC4626.earn` is
+    # how a dev flow moves the index off RAY; nothing here needs it, and a
+    # seeded vault would make the first deposit's normalized units depend on
+    # deploy-time state.
+    debug "YIELD_VAULT_4=${YIELD_VAULT_4} (empty; index starts at RAY)"
+}
+
 fund_recipient() {
     step "fund ${FUND_RECIPIENT}"
 
@@ -243,6 +271,9 @@ print_summary() {
         UNIV4_QUOTER   "$UNIV4_QUOTER" \
         NATIVE_ADAPTER "$NATIVE_ADAPTER" \
         WRAPPED_NATIVE "$WETH" \
+        YIELD_VENUE_4  "$YIELD_VENUE_4" \
+        YIELD_VENUE_5  "$YIELD_VENUE_5" \
+        YIELD_VENUE_6  "$YIELD_VENUE_6" \
         funded         "$FUND_RECIPIENT" >&2
 }
 
@@ -250,6 +281,7 @@ main() {
     preflight
     deploy_core
     deploy_swap
+    deploy_yield
     fund_recipient
     write_env_file
     print_summary

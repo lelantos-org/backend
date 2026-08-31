@@ -1,5 +1,6 @@
 pub mod anonymity_set;
 pub mod asset_flows;
+pub mod asset_yield;
 pub mod assets;
 pub mod locked;
 pub mod pool_notes;

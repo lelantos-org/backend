@@ -83,14 +83,25 @@ Under profile `all`, the one-shot `deploy` service runs before the backends:
 
 1. `forge script DeployTest.s.sol` — verifiers, MASP, mock tokens, `NativeAdapter`
 2. `forge script DeployTestSwap.s.sol` — `UniV3Adapter`, `SwapWrapper`, swap mocks
-3. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
-4. Writes `/addresses/addresses.env` to the shared `addresses` volume
+3. `forge script DeployTestYield.s.sol` — a `MockERC4626` vault and its
+   `ERC4626Venue` per asset, registered as new yield ids
+4. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
+5. Writes `/addresses/addresses.env` to the shared `addresses` volume
 
 Every backend's entrypoint sources that file before exec'ing its binary, which
 is how the freshly deployed addresses reach the per-chain overlay.
 
 Re-running the deploy mints new addresses (new nonces), so backends must be
 restarted to pick them up — `just redeploy` does both.
+
+A yield id sits *alongside* the token's plain id rather than replacing it: ids
+1,2,3 stay risk-free custody, and 4,5,6 are the same three tokens earning in a
+mock vault (`YIELD_TOKEN_<id>` / `YIELD_VAULT_<id>` / `YIELD_VENUE_<id>` in
+`addresses.env`). The vaults start empty at a 1:1 share price; `MockERC4626`'s
+`earn` / `lose` / `setLiquidityCap` move the index from a test or by hand.
+Registration is permanent — `addYieldAsset` cannot re-point an id — so this
+phase runs once per MASP, which is why `just redeploy` re-runs the whole chain
+of scripts against a fresh one.
 
 ## Circuits
 

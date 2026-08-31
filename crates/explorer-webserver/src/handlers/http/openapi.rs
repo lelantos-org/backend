@@ -1,6 +1,6 @@
 use crate::domain::responses::{
     AnonymitySetOut, AssetOut, ChainFlowOut, ChainLockedOut, CountPoint, FlowPoint, KindCounts,
-    LockedAssetOut, PoolNotesOut, TreeAdvanceOut, TxKind, TxOut,
+    LockedAssetOut, PoolNotesOut, TreeAdvanceOut, TxKind, TxOut, YieldAssetOut,
 };
 use crate::handlers::http as handlers;
 use crate::handlers::http::health::HealthOut;
@@ -21,6 +21,7 @@ use utoipa::OpenApi;
         handlers::transactions::tx_kinds,
         handlers::anonymity_set::anonymity_set,
         handlers::pool_notes::pool_notes,
+        handlers::asset_yield::yield_assets,
     ),
     components(schemas(
         AssetOut,
@@ -35,7 +36,8 @@ use utoipa::OpenApi;
         TxKind,
         KindCounts,
         AnonymitySetOut,
-        PoolNotesOut
+        PoolNotesOut,
+        YieldAssetOut
     )),
     tags(
         (name = "health", description = "Health and build info"),
@@ -46,6 +48,7 @@ use utoipa::OpenApi;
         (name = "transactions", description = "Classified transactions: deposit / pending / transfer / withdraw"),
         (name = "anonymity-set", description = "Withdrawal anonymity sets: how many withdrawals published each denomination"),
         (name = "pool-notes", description = "Per-chain commitment-tree occupancy"),
+        (name = "yield", description = "Yield-bearing assets: venue binding, buffer and performance rates, and last polled state"),
     )
 )]
 pub struct ApiDoc;
@@ -75,6 +78,7 @@ mod tests {
             "/v1/tx-kinds",
             "/v1/anonymity-set",
             "/v1/pool-notes",
+            "/v1/yield",
         ] {
             assert!(
                 paths.contains(&path),

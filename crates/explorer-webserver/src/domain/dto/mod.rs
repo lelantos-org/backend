@@ -1,5 +1,6 @@
 pub mod anonymity_set;
 pub mod asset_flows;
+pub mod asset_yield;
 pub mod assets;
 pub mod locked;
 pub mod pool_notes;
@@ -9,6 +10,7 @@ pub mod tx_counts;
 
 pub use anonymity_set::AnonymitySetQuery;
 pub use asset_flows::AssetFlowsQuery;
+pub use asset_yield::YieldQuery;
 pub use assets::ListAssetsQuery;
 pub use locked::LockedQuery;
 pub use pool_notes::PoolNotesQuery;

@@ -61,7 +61,11 @@ pub fn build(state: AppState) -> Router {
         )
         .route(
             "/v1/pool-notes",
-            get(handlers::pool_notes).layer(cc_layer(analytic)),
+            get(handlers::pool_notes).layer(cc_layer(analytic.clone())),
+        )
+        .route(
+            "/v1/yield",
+            get(handlers::yield_assets).layer(cc_layer(analytic)),
         )
         .layer(request_span::trace_layer())
         .with_state(state)

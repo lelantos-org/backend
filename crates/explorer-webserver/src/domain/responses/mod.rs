@@ -1,4 +1,5 @@
 pub mod anonymity_set;
+pub mod asset_yield;
 pub mod assets;
 pub mod chain_flow;
 pub mod count_point;
@@ -9,6 +10,7 @@ pub mod transactions;
 pub mod tree_advances;
 
 pub use anonymity_set::AnonymitySetOut;
+pub use asset_yield::YieldAssetOut;
 pub use assets::AssetOut;
 pub use chain_flow::ChainFlowOut;
 pub use count_point::CountPoint;

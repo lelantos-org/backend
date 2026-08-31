@@ -1,5 +1,6 @@
 pub mod anonymity_set;
 pub mod asset_flows;
+pub mod asset_yield;
 pub mod assets;
 pub mod health;
 pub mod locked;
@@ -11,6 +12,7 @@ pub mod tree_advances;
 
 pub use anonymity_set::anonymity_set;
 pub use asset_flows::asset_flows;
+pub use asset_yield::yield_assets;
 pub use assets::list_assets;
 pub use health::health;
 pub use locked::locked_by_chain;

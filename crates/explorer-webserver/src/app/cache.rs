@@ -1,7 +1,7 @@
 use crate::adapters::{TokenKey, TokenPrice};
 use crate::domain::responses::{
     AnonymitySetOut, AssetOut, ChainFlowOut, ChainLockedOut, CountPoint, FlowPoint, KindCounts,
-    PoolNotesOut, TreeAdvanceOut, TxKind, TxOut,
+    PoolNotesOut, TreeAdvanceOut, TxKind, TxOut, YieldAssetOut,
 };
 use moka::future::Cache;
 use shared::cache::build;
@@ -18,6 +18,7 @@ pub type TransactionsKey = (Option<i64>, Option<i64>, Option<TxKind>, i64);
 pub type TxKindsKey = (Option<i64>, i64, Option<i64>);
 pub type AnonymitySetKey = (Option<i64>, Option<i64>, i64, i64);
 pub type PoolNotesKey = Option<i64>;
+pub type YieldKey = Option<i64>;
 
 #[derive(Clone)]
 pub struct AppCache {
@@ -38,6 +39,10 @@ pub struct AppCache {
     pub anonymity_set: Cache<AnonymitySetKey, Arc<Vec<AnonymitySetOut>>>,
     /// Per-chain tree occupancy. Analytic TTL, like the other all-time figures.
     pub pool_notes: Cache<PoolNotesKey, Arc<Vec<PoolNotesOut>>>,
+    /// Yield-bearing assets. Analytic TTL even though the underlying row is
+    /// repolled on its own tick: serving a reading a few seconds old is what
+    /// every other figure here does, and `updatedAt` carries the real age.
+    pub asset_yield: Cache<YieldKey, Arc<Vec<YieldAssetOut>>>,
     /// `None` records a token the provider could not price. Caching that answer
     /// stops every request from re-asking upstream about tokens that will never
     /// have a price.
@@ -64,6 +69,7 @@ impl AppCache {
             tx_kinds: build(2_048, analytic),
             anonymity_set: build(512, analytic),
             pool_notes: build(32, analytic),
+            asset_yield: build(32, analytic),
             prices: build(1_024, price),
         }
     }
