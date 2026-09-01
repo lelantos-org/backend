@@ -13,10 +13,8 @@ async fn main() -> Result<()> {
 
     // Unlike the other webservers this one runs migrations: no indexer touches
     // `screened_addresses`, so nothing else would create it.
-    let migrate_url = cfg.database_url.clone();
-    tokio::task::spawn_blocking(move || database::migrate::run(&migrate_url))
+    database::migrate::run_locked(&cfg.database_url)
         .await
-        .context("join migrate task")?
         .context("run migrations")?;
 
     let pool = database::build_pool(&cfg.database_url, database::PoolCfg::webserver())

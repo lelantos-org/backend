@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, anyhow};
 use database::DbPool;
-use database::advisory::{ChainLock, MIGRATE_KEY};
 use ingester::adapters::{DynRpc, HttpRpc};
 use ingester::app::config::{ChainConfig, IngesterConfig, redact_url};
 use ingester::app::state::WorkerDeps;
@@ -17,13 +16,7 @@ use ingester::services::reorg::ReorgService;
 use ingester::services::retry::{Policy, is_retryable};
 use shared::shutdown::{self, Shutdown};
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{error, info, warn};
-
-/// How long a replica waits between attempts at the migration lock.
-const MIGRATE_LOCK_POLL: Duration = Duration::from_secs(1);
-/// Give up on the migration lock rather than hang a deploy indefinitely.
-const MIGRATE_LOCK_ATTEMPTS: u32 = 120;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,7 +32,11 @@ async fn main() -> Result<()> {
 
     shared::metrics::init_addr(&cfg.metrics_addr)?;
 
-    migrate(&cfg.database_url).await?;
+    info!("running migrations");
+    database::migrate::run_locked(&cfg.database_url)
+        .await
+        .context("migrations")?;
+    info!("migrations complete");
 
     let pool_cfg = cfg.pool();
     let pool = database::build_pool(&cfg.database_url, pool_cfg)
@@ -134,41 +131,6 @@ async fn await_workers(
     } else {
         Err(anyhow!("chain workers failed: {:?}", failed))
     }
-}
-
-/// Run migrations under an advisory lock so concurrent replicas serialise.
-///
-/// `diesel_migrations` takes no lock of its own, so replicas booting together
-/// would otherwise apply the same migration concurrently.
-async fn migrate(database_url: &str) -> Result<()> {
-    let lock = acquire_migrate_lock(database_url)
-        .await?
-        .ok_or_else(|| anyhow!("timed out waiting for the migration lock"))?;
-
-    info!("running migrations");
-    let url = database_url.to_string();
-    let result = tokio::task::spawn_blocking(move || database::migrate::run(&url)).await;
-    // Held until here: dropping the lock closes its connection.
-    drop(lock);
-    result?.context("migrations")?;
-    info!("migrations complete");
-    Ok(())
-}
-
-async fn acquire_migrate_lock(database_url: &str) -> Result<Option<ChainLock>> {
-    for attempt in 0..MIGRATE_LOCK_ATTEMPTS {
-        match ChainLock::try_acquire(database_url, MIGRATE_KEY).await {
-            Ok(Some(lock)) => return Ok(Some(lock)),
-            Ok(None) => {
-                if attempt == 0 {
-                    info!("another replica is migrating; waiting");
-                }
-                tokio::time::sleep(MIGRATE_LOCK_POLL).await;
-            }
-            Err(e) => return Err(anyhow!("migration lock: {}", e)),
-        }
-    }
-    Ok(None)
 }
 
 /// Keep one chain's worker alive across recoverable failures.

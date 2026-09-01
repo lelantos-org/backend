@@ -17,13 +17,9 @@ async fn main() -> Result<()> {
 
     // Migrations are idempotent, and run here in case the ingester starts after
     // the relayer in a compose dependency graph.
-    {
-        let url = cfg.database_url.clone();
-        tokio::task::spawn_blocking(move || database::migrate::run(&url))
-            .await
-            .context("migrate spawn_blocking")?
-            .context("migrate")?;
-    }
+    database::migrate::run_locked(&cfg.database_url)
+        .await
+        .context("migrate")?;
 
     let pool = database::build_pool(&cfg.database_url, database::PoolCfg::relayer())
         .await
