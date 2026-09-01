@@ -255,7 +255,9 @@ pub struct ChainConfigOut {
     pub explorer_url: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+// `Clone` so one priced token can be fanned out into a quote per asset id
+// registered at its address — see `FeeContext::quote`.
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FeeQuote {
     pub token_symbol: String,
