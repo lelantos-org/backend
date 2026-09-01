@@ -22,6 +22,7 @@ use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::submitter::Submitter;
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{self, TreeMirror};
+use crate::services::venue_apy::{self, VenueApyCache};
 use alloy::primitives::Address;
 use database::DbPool;
 use fmd_crypto::tree::Field;
@@ -75,6 +76,11 @@ pub struct AppState {
     /// The `assets` table, cached and shared by `/chains` and the shielded-fee
     /// check so neither reads it per request.
     pub assets: Arc<AssetRegistry>,
+    /// Estimated venue rates, refreshed by a per-chain worker and read by
+    /// `/chains`. Empty until this deployment has recorded a window's worth of
+    /// index history, which on a node with archive state the venue's vault
+    /// covers in the meantime — see `services::venue_apy`.
+    pub venue_apy: VenueApyCache,
 }
 
 /// The half of `ChainCfg` that is safe to publish.
@@ -160,10 +166,27 @@ pub async fn build_state(
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
     let mut flush_pipelines: HashMap<i64, Arc<FlushPipeline>> = HashMap::new();
+    let venue_apy = venue_apy::new_cache();
     for c in &cfg.chains {
         let chain = build_chain(c, &shared).await?;
         flush_pipelines.insert(c.chain_id, chain.flush.clone());
         spawn_flush_worker(chain.flush, Duration::from_secs(c.flush_interval_s));
+        // Its own endpoint rather than a pipeline's provider: this worker issues
+        // historical reads, which are slow and can be refused, and it must not
+        // share a connection pool with the submission path.
+        match RpcEndpoint::new(&c.rpc_url) {
+            Ok(rpc) => venue_apy::spawn(
+                c.chain_id,
+                shared.pool.clone(),
+                &rpc,
+                venue_apy.clone(),
+                shared.assets.clone(),
+            ),
+            // Non-fatal, alone among this loop's failures: a chain whose rate
+            // cannot be measured still serves every route. `build_chain` above
+            // has already rejected an unusable URL.
+            Err(e) => warn!(chain_id = c.chain_id, error = %e, "venue apy: worker not started"),
+        }
         spend_pipelines.insert(c.chain_id, chain.spend);
         if let Some(swap) = chain.swap {
             swap_pipelines.insert(c.chain_id, swap);
@@ -196,6 +219,7 @@ pub async fn build_state(
             Duration::from_secs(cfg.token_prices.ttl_s.max(1)),
         ),
         prices_response: shared::cache::build(1, PRICES_RESPONSE_TTL),
+        venue_apy,
         assets,
     })
 }

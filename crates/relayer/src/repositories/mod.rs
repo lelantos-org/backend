@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod spent_nullifiers;
+pub mod yield_samples;
 
 use crate::domain::error::{AppError, AppResult};
 use database::{DbConn, DbPool};

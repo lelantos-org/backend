@@ -48,6 +48,16 @@ pub struct AssetRow {
     pub accrued_fee_normalized: Option<BigDecimal>,
     pub halted: Option<bool>,
     pub index_ray: Option<BigDecimal>,
+    /// The pool's cut of the venue's yield, and the fraction of custody held
+    /// idle for withdrawals. Both `NULL` until the asset has an `asset_yield`
+    /// row; both bounded on chain, so `SMALLINT` cannot hold a value a `uint16`
+    /// could not.
+    ///
+    /// Read only by the rate estimate, which reports what a note holder earns
+    /// rather than what the venue paid — the difference between the two is
+    /// exactly these.
+    pub perf_bps: Option<i16>,
+    pub buffer_bps: Option<i16>,
 }
 
 impl AssetRow {
@@ -73,6 +83,12 @@ impl AssetRow {
         let total = bigdecimal_to_u256(self.total_normalized.as_ref()?).ok()?;
         let fee = bigdecimal_to_u256(self.accrued_fee_normalized.as_ref()?).ok()?;
         Some(Rate::yielding(scale, gross, total + fee))
+    }
+
+    /// The venue address, or `None` for a plain asset or a column of the wrong
+    /// width. Fallible for the same reason as [`Self::token_address`].
+    pub fn venue_address(&self) -> Option<Address> {
+        Address::try_from(self.venue.as_deref()?).ok()
     }
 
     /// The ERC-20 address, or `None` if the column does not hold 20 bytes.
@@ -110,6 +126,8 @@ pub async fn list_for_chain(pool: &DbPool, chain_id: i64) -> AppResult<Vec<Asset
             asset_yield::accrued_fee_normalized.nullable(),
             asset_yield::halted.nullable(),
             asset_yield::index_ray.nullable(),
+            asset_yield::perf_bps.nullable(),
+            asset_yield::buffer_bps.nullable(),
         ))
         .load::<AssetRow>(&mut conn)
         .await
@@ -151,6 +169,8 @@ pub async fn list_for_chains(pool: &DbPool, chain_ids: &[i64]) -> AppResult<Vec<
                 asset_yield::accrued_fee_normalized.nullable(),
                 asset_yield::halted.nullable(),
                 asset_yield::index_ray.nullable(),
+                asset_yield::perf_bps.nullable(),
+                asset_yield::buffer_bps.nullable(),
             ),
         ))
         .load::<(i64, AssetRow)>(&mut conn)

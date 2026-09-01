@@ -21,7 +21,23 @@ pub async fn chains(State(st): State<AppState>) -> AppResult<Json<ChainsResponse
         // Through the shared registry rather than the pool: every wallet boots
         // from this route and the relayer holds four connections.
         let assets = st.assets.for_chain(*chain_id).await?;
-        let tokens: Vec<TokenOut> = assets.iter().map(TokenOut::from).collect();
+        // The estimate comes from the worker's cache, never from a read of its
+        // own: `/chains` is what every wallet boots from and polls, and two
+        // archive calls per yield asset per request would put a week-long
+        // measurement on the critical path of every page load.
+        let mut tokens = Vec::with_capacity(assets.len());
+        for a in assets.iter() {
+            // Only a live venue can have an entry, and the response drops the
+            // rate for a halted one anyway — so a plain-custody asset is a
+            // guaranteed miss, and on a chain of twenty assets with three venues
+            // that is seventeen lookups and seventeen await points saved on the
+            // route every wallet polls.
+            let apy = match a.venue.is_some() && !a.halted.unwrap_or(false) {
+                true => st.venue_apy.get(&(*chain_id, a.asset_id())).await,
+                false => None,
+            };
+            tokens.push(TokenOut::new(a, apy));
+        }
 
         // Read the published snapshot rather than the mirror itself. The mirror
         // mutex is held from reserve through prove and confirmation, so locking it

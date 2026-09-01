@@ -1,3 +1,4 @@
+use crate::services::venue_apy::ApyEstimate;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -159,6 +160,26 @@ pub struct YieldOut {
     /// The venue is no longer being supplied. Existing backing is unaffected —
     /// the asset degrades to zero-yield custody, still fully backed.
     pub halted: bool,
+    /// Estimated annual rate for a note holder, in basis points, net of the
+    /// pool's performance fee and idle buffer.
+    ///
+    /// An **estimate**, measured from the venue's vault over `apyWindowS` and
+    /// annualized on the assumption it continues — not a promise, and not what
+    /// any particular wallet earned, which depends on when it bought in.
+    ///
+    /// Absent, never zero, when it could not be measured: an RPC without state
+    /// that far back, a vault younger than the window, or a reading too wild to
+    /// be a rate. A client must render nothing rather than `0.00%`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apy_bps: Option<i32>,
+    /// Seconds actually spanned by the two readings behind `apyBps`. Present iff
+    /// `apyBps` is.
+    ///
+    /// Published rather than assumed: a client that says "over the last week"
+    /// while the relayer measured nine days is stating something it did not
+    /// measure, and the window is what makes the figure checkable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apy_window_s: Option<i64>,
 }
 
 /// Spot USD prices for the registered assets, across every chain.
@@ -195,8 +216,12 @@ pub struct PriceOut {
     pub price_at: i64,
 }
 
-impl From<&crate::repositories::assets::AssetRow> for TokenOut {
-    fn from(a: &crate::repositories::assets::AssetRow) -> Self {
+impl TokenOut {
+    /// One asset, with the rate estimate the worker last measured for it.
+    ///
+    /// The estimate is passed in rather than read here: it comes from a cache
+    /// keyed by chain, and a row does not know which chain it was loaded for.
+    pub fn new(a: &crate::repositories::assets::AssetRow, apy: Option<ApyEstimate>) -> Self {
         Self {
             asset_id: a.asset_id_u64,
             token: format!("0x{}", hex::encode(&a.token)),
@@ -205,24 +230,35 @@ impl From<&crate::repositories::assets::AssetRow> for TokenOut {
             symbol: a.symbol.clone(),
             deposit_bps: a.deposit_bps,
             withdraw_bps: a.withdraw_bps,
-            yield_state: yield_out(a),
+            yield_state: yield_out(a, apy),
         }
     }
 }
 
 /// `None` for a plain asset, and also for a yield asset the poller has not
 /// reached yet — a client must not price the latter at `scale`.
-fn yield_out(a: &crate::repositories::assets::AssetRow) -> Option<YieldOut> {
+fn yield_out(
+    a: &crate::repositories::assets::AssetRow,
+    apy: Option<ApyEstimate>,
+) -> Option<YieldOut> {
     let venue = a.venue.as_ref()?;
     let gross = a.gross.as_ref()?;
     let total = a.total_normalized.as_ref()?;
     let fee_units = a.accrued_fee_normalized.as_ref()?;
+    // Bound once, so the two fields below cannot drift apart: their docs promise
+    // one is present iff the other is, and two separately written filters would
+    // hold that only by coincidence. A halted venue is no longer supplied, so
+    // whatever it last paid is not a rate this asset earns — dropped rather than
+    // published as stale.
+    let apy = apy.filter(|_| !a.halted.unwrap_or(false));
     Some(YieldOut {
         venue: format!("0x{}", hex::encode(venue)),
         gross: gross.to_string(),
         supply: (total + fee_units).to_string(),
         index: a.index_ray.as_ref()?.to_string(),
         halted: a.halted.unwrap_or(false),
+        apy_bps: apy.map(|e| e.bps),
+        apy_window_s: apy.map(|e| e.window_s),
     })
 }
 

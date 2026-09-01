@@ -16,6 +16,7 @@ pub mod shielded_fee;
 pub mod submitter;
 pub mod transact_verifier;
 pub mod tree;
+pub mod venue_apy;
 pub mod witness;
 pub mod witness_calc;
 mod zkey;

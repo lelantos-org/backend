@@ -221,6 +221,16 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    asset_yield_sample (chain_id, asset_id_u64, observed_at) {
+        chain_id -> Int8,
+        asset_id_u64 -> Int8,
+        observed_at -> Timestamptz,
+        index_ray -> Numeric,
+        block_number -> Nullable<Int8>,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     raw_events,
     chain_state,
@@ -236,5 +246,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     deposit_escrowed_events,
     screened_addresses,
     asset_yield,
+    asset_yield_sample,
     yield_fee_events,
 );

@@ -193,3 +193,28 @@ sol! {
         ) external returns (uint256 net);
     }
 }
+
+sol! {
+    #![sol(rpc)]
+    /// The venue surface, as far as reading it goes. Must match
+    /// `contracts/src/yield/IYieldVenue.sol`.
+    ///
+    /// Only `VAULT` is declared: the relayer never moves a position — the pool
+    /// does, and `onlyPool` would reject it anyway — so `deposit` and `withdraw`
+    /// have no business being callable from here.
+    interface IYieldVenue {
+        /// The ERC-4626 vault this venue holds shares of. Immutable, which is
+        /// what lets `venue_apy` resolve it once and keep it.
+        function VAULT() external view returns (address);
+    }
+
+    /// The ERC-4626 surface the rate estimate reads.
+    ///
+    /// `convertToAssets` is the vault's share price: two readings of the same
+    /// probe, at two blocks, are the whole measurement. `decimals` sizes that
+    /// probe — see `venue_apy::VenueApyWorker::measure`.
+    interface IERC4626 {
+        function convertToAssets(uint256 shares) external view returns (uint256);
+        function decimals() external view returns (uint8);
+    }
+}

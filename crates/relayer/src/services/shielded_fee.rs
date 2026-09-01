@@ -374,7 +374,7 @@ impl ShieldedFeeChecker {
             tokens: self
                 .policy
                 .payable(registered)
-                .map(TokenOut::from)
+                .map(|a| TokenOut::new(a, None))
                 .collect(),
         }
     }
@@ -835,6 +835,8 @@ mod tests {
             accrued_fee_normalized: None,
             halted: None,
             index_ray: None,
+            perf_bps: None,
+            buffer_bps: None,
         }
     }
 

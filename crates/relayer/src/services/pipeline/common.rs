@@ -376,6 +376,8 @@ mod tests {
             accrued_fee_normalized: None,
             halted: None,
             index_ray: None,
+            perf_bps: None,
+            buffer_bps: None,
         }
     }
 

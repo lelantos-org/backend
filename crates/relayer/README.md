@@ -52,6 +52,27 @@ itself: the mirror mutex is held from reserve through confirmation, so locking
 it here would park the endpoint every wallet boots from behind whatever
 submission is in flight.
 
+Each yield-bearing asset also carries an estimated annual rate, `apyBps`, with
+the window it was measured over. Nothing on chain publishes a rate: `yieldState`
+returns an index and no timestamp, and `asset_yield` is overwritten on every
+indexer pass, so one has to be measured. A background worker per chain does it
+two ways, preferring the first:
+
+1. **From the recorded index.** Every pass copies the current index into
+   `asset_yield_sample`, so once that history reaches back a window the rate is a
+   subtraction against a row this deployment wrote down — no archive state, no
+   RPC, and exact, since the index is already net of the performance fee and the
+   idle buffer.
+2. **From the venue's vault.** Until the history fills, the ERC-4626 vault is the
+   older object and its share price carries the history a fresh pool lacks. Two
+   `convertToAssets` reads a window apart, corrected for what the pool keeps.
+   This one needs an RPC serving state that far back, and is skipped entirely
+   once path 1 can answer.
+
+`/chains` only reads the worker's result; measuring per request would put archive
+calls on every page load. The fields are absent, never zero, when neither path
+can answer. See `services::venue_apy`.
+
 `/v1/deposits/stream` rejects a chain the relayer does not serve. A valid stream
 that can never emit anything reads to a client as "no deposits yet".
 
