@@ -62,6 +62,25 @@ require_cmd() {
     return 0
 }
 
+# ── cast ────────────────────────────────────────────────────────────────
+#
+# Both wrappers read RPC_URL from the environment; `cast_send` also reads
+# DEPLOYER_KEY. Callers `require_env` them, so a missing one names itself rather
+# than surfacing as a cast usage error.
+
+# cast_send <cast-send-args...>  — a state-changing call as the deployer.
+# Output is dropped: the receipt JSON is noise, and a failure is the non-zero
+# exit under `set -e`.
+cast_send() {
+    debug "cast send $*"
+    cast send --rpc-url "$RPC_URL" --private-key "$DEPLOYER_KEY" "$@" >/dev/null
+}
+
+# cast_call <cast-call-args...>  — a view call; stdout is the caller's result.
+cast_call() {
+    cast call --rpc-url "$RPC_URL" "$@"
+}
+
 # TRACE implies DEBUG, and enables tracing in the sourcing script (`set -x`
 # takes effect in the caller because this file is sourced, not executed).
 if [ "${TRACE:-0}" = "1" ]; then

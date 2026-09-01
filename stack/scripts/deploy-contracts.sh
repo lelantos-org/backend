@@ -62,12 +62,6 @@ forge_script() {
     [ "$_rc" = "0" ] || die "forge script ${_target} failed (exit ${_rc}); see ${FORGE_LOG}" "$_rc"
 }
 
-# cast_send <cast-send-args...>
-cast_send() {
-    debug "cast send $*"
-    cast send --rpc-url "$RPC_URL" --private-key "$DEPLOYER_KEY" "$@" >/dev/null
-}
-
 # ── address table ───────────────────────────────────────────────────────
 
 # Rebuild $ADDR_FILE from everything logged so far. The forge scripts print
@@ -228,7 +222,11 @@ write_env_file() {
     # in them, which silently strips the inner quotes of the JSON emitted
     # below. Addresses and URLs contain no single quote, so nothing here can
     # terminate the quoting early.
-    _emit() { printf "%s_CHAIN_%s_%s='%s'\n" "$1" "$CHAIN_ID" "$2" "$3"; }
+    # `_emit_for` takes the chain explicitly; `_emit` is it applied to the chain
+    # being deployed. Both exist so the second chain's entries below cannot
+    # spell the variable shape — or the single-quoting rule above — a second way.
+    _emit_for() { printf "%s_CHAIN_%s_%s='%s'\n" "$2" "$1" "$3" "$4"; }
+    _emit() { _emit_for "$CHAIN_ID" "$1" "$2" "$3"; }
 
     {
         _emit INGESTER POOL_ADDRESS "$MASP"
@@ -240,9 +238,25 @@ write_env_file() {
         # Enables `withdrawNative`; without it the relayer leaves
         # native_adapter_address unset and rejects native withdrawals.
         _emit RELAYER NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
+        # Served verbatim by `/chains`; wallets read it to build the Permit2
+        # AllowanceTransfer setup. DeployTest deploys a fresh Permit2 whenever
+        # the canonical address has no code, so its address moves with the
+        # deploy order — injected for the same reason as pool_address below.
+        _emit RELAYER PERMIT2_ADDRESS "$PERMIT2"
         # `accepted_fee_tokens` is the one piece of per-chain relayer config
         # carrying ERC-20 addresses, which only exist once this script has run.
         _emit RELAYER ACCEPTED_FEE_TOKENS "$(fee_tokens_json)"
+
+        # config/dev/relayer.toml declares a second chain (31338) that points
+        # at this same anvil and this same pool, purely so `/chains` returns
+        # two entries and the frontend's chain switcher is reachable. Its
+        # pool_address used to be a literal in the TOML, which silently rotted
+        # every time the deploy order changed (the stale literal then resolved
+        # to some other contract and `currentRoot` reverted at boot, crash-
+        # looping the relayer). Inject it instead so it cannot drift.
+        _emit_for 31338 RELAYER POOL_ADDRESS "$MASP"
+        _emit_for 31338 RELAYER RPC_URL "$RPC_URL"
+        _emit_for 31338 RELAYER PERMIT2_ADDRESS "$PERMIT2"
 
         _emit METAQUOTER RPC_URL "$RPC_URL"
         _emit METAQUOTER UNIV3_QUOTER "$UNIV3_QUOTER"

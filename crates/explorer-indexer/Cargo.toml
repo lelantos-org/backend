@@ -9,6 +9,7 @@ name = "explorer-indexer"
 path = "src/main.rs"
 
 [dependencies]
+futures = { workspace = true }
 shared = { path = "../shared" }
 database = { path = "../database" }
 chain-types = { path = "../chain-types" }

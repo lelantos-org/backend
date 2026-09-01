@@ -21,20 +21,19 @@ use shared::tick::TickProgress;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Owns its context rather than rebuilding one per tick.
+///
+/// The context carries the last-written state per asset, which is what lets an
+/// unchanged row skip its `UPDATE`. Rebuilt per tick that cache would be empty
+/// every round and the skip would never fire.
 pub struct YieldStateServiceImpl {
-    pub pool: DbPool,
-    pub readers: Arc<HashMap<i64, DynMaspYieldReader>>,
+    ctx: YieldStateCtx,
 }
 
 impl YieldStateServiceImpl {
     pub fn new(pool: DbPool, readers: Arc<HashMap<i64, DynMaspYieldReader>>) -> Self {
-        Self { pool, readers }
-    }
-
-    fn ctx(&self) -> YieldStateCtx {
-        YieldStateCtx {
-            pool: self.pool.clone(),
-            readers: self.readers.clone(),
+        Self {
+            ctx: YieldStateCtx::new(pool, readers),
         }
     }
 }
@@ -48,13 +47,13 @@ impl shared::tick::TickService for YieldStateServiceImpl {
     /// The chains this crate indexes, not only those with yield assets: an
     /// asset can be bound at any time, and a chain with none simply ticks idle.
     async fn list_chain_ids(&self) -> Vec<i64> {
-        let mut ids: Vec<i64> = self.readers.keys().copied().collect();
+        let mut ids: Vec<i64> = self.ctx.readers.keys().copied().collect();
         ids.sort_unstable();
         ids
     }
 
     async fn tick_chain(&self, chain_id: i64, batch: i64) -> anyhow::Result<TickProgress> {
-        tick::tick_chain(&self.ctx(), chain_id, batch)
+        tick::tick_chain(&self.ctx, chain_id, batch)
             .await
             .map_err(Into::into)
     }

@@ -2591,6 +2591,7 @@ dependencies = [
  "diesel",
  "diesel-async",
  "dotenvy",
+ "futures",
  "hex",
  "serde",
  "serde_json",

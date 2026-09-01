@@ -7,7 +7,7 @@ use explorer_indexer::services::consume::ConsumeServiceImpl;
 use explorer_indexer::services::yield_state::YieldStateServiceImpl;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -67,7 +67,14 @@ async fn main() -> Result<()> {
     let yield_worker = tokio::spawn(shared::tick::run(yield_state, tick_ms, batch, shutdown));
 
     shared::shutdown::watch_signals(trigger).await;
-    let _ = consume_worker.await;
-    let _ = yield_worker.await;
+    // Joined with the outcome checked, not discarded. A tick that panics unwinds
+    // its driver, and `let _ =` swallowed that: the service died, nothing was
+    // logged, and the process stayed up and exited 0 — a silently half-running
+    // indexer is worse than one that fell over.
+    for (name, worker) in [("explorer", consume_worker), ("yield-state", yield_worker)] {
+        if let Err(e) = worker.await {
+            error!(service = name, error = %e, "tick worker terminated abnormally");
+        }
+    }
     Ok(())
 }

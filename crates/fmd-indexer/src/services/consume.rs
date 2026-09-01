@@ -20,17 +20,55 @@ use shared::metrics::{record_event_age, stage};
 use shared::tick::TickProgress;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 pub const NAME: &str = "fmd";
 
-const KINDS: [i16; 4] = [
-    EventKind::NoteCreated as i16,
-    EventKind::RootAdvanced as i16,
-    EventKind::NullifierConsumed as i16,
-    EventKind::DepositFlushed as i16,
-];
+/// Whether this service consumes a kind.
+///
+/// The predicate, not a list — `kinds()` below is derived from it, so the
+/// `WHERE event_kind = ANY` of the fetch cannot fall behind the decision. No
+/// wildcard arm, so a new `EventKind` variant fails to compile here and has to
+/// be classified deliberately.
+///
+/// explorer-indexer had the mirror-image bug: its filter was a hand-written
+/// array, the yield kinds were added to the enum but not to it, and their
+/// handlers were silently unreachable for as long as the mixin had been live.
+/// This service reads the FMD zone plus the two kinds it needs for ordering.
+const fn consumed(kind: EventKind) -> bool {
+    match kind {
+        EventKind::NoteCreated
+        | EventKind::RootAdvanced
+        | EventKind::NullifierConsumed
+        | EventKind::DepositFlushed => true,
+        EventKind::AssetRegistered
+        | EventKind::AssetMoved
+        | EventKind::DepositEscrowed
+        | EventKind::DepositCanceled
+        | EventKind::AssetFeeSet
+        | EventKind::YieldAssetAdded
+        | EventKind::YieldParamsSet
+        | EventKind::PerfFeeAccrued
+        | EventKind::NormalizedFeeSwept
+        | EventKind::Rebalanced
+        | EventKind::HaltedSet
+        | EventKind::EmergencyUnwound => false,
+    }
+}
+
+/// The kinds this service fetches, as the `ANY` array wants them.
+fn kinds() -> &'static [i16] {
+    static KINDS: OnceLock<Vec<i16>> = OnceLock::new();
+    KINDS.get_or_init(|| {
+        EventKind::ALL
+            .into_iter()
+            .filter(|k| consumed(*k))
+            .map(EventKind::as_i16)
+            .collect()
+    })
+}
 
 /// How far the window may be widened when a saturated one is entirely occupied by
 /// a transaction that cannot fit. A transaction needing more than 16 times
@@ -112,7 +150,7 @@ impl ConsumeServiceImpl {
         loop {
             let rows = self
                 .raw_events
-                .batch_after(chain_id, after, &KINDS, limit)
+                .batch_after(chain_id, after, kinds(), limit)
                 .await?;
             if rows.is_empty() {
                 return Ok(Planned::Drained);

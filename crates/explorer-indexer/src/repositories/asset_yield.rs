@@ -75,7 +75,7 @@ pub async fn set_halted(
 /// `updated_at` is not a field: it is set to the database's `now()` in the
 /// query, so the freshness stamp comes from one clock rather than from whichever
 /// indexer replica wrote the row.
-#[derive(Debug, Clone, AsChangeset)]
+#[derive(Debug, Clone, PartialEq, AsChangeset)]
 #[diesel(table_name = asset_yield)]
 pub struct UpdateState {
     pub total_normalized: BigDecimal,

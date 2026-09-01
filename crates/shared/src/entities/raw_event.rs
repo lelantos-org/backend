@@ -23,26 +23,48 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Every variant, ascending.
+    ///
+    /// The one place the set is written down. A consumer that reads a subset —
+    /// explorer-indexer and fmd-indexer each do — derives its filter from this
+    /// by partitioning it, rather than restating the members in a second
+    /// hand-maintained list. That is not a stylistic preference: the yield kinds
+    /// were added to the enum and to explorer-indexer's `apply` match but not to
+    /// its `WHERE event_kind = ANY` list, so the arms were unreachable,
+    /// `asset_yield` stayed permanently empty, and the cursor wedged whenever the
+    /// newest event was a yield one.
+    ///
+    /// `ALL_COUNT` below is what makes a forgotten entry here fail the build.
+    pub const ALL: [Self; Self::ALL_COUNT] = [
+        Self::NoteCreated,
+        Self::AssetRegistered,
+        Self::RootAdvanced,
+        Self::AssetMoved,
+        Self::NullifierConsumed,
+        Self::DepositEscrowed,
+        Self::DepositFlushed,
+        Self::DepositCanceled,
+        Self::AssetFeeSet,
+        Self::YieldAssetAdded,
+        Self::YieldParamsSet,
+        Self::PerfFeeAccrued,
+        Self::NormalizedFeeSwept,
+        Self::Rebalanced,
+        Self::HaltedSet,
+        Self::EmergencyUnwound,
+    ];
+
+    /// Length of [`ALL`](Self::ALL), pinned to the highest discriminant.
+    ///
+    /// The discriminants are `1..=N` with no gaps, so the last variant's value
+    /// *is* the count. Adding a variant without extending `ALL` then fails to
+    /// compile on the array length rather than silently shortening the set.
+    pub const ALL_COUNT: usize = Self::EmergencyUnwound as usize;
+
     pub fn from_i16(v: i16) -> Option<Self> {
-        match v {
-            1 => Some(Self::NoteCreated),
-            2 => Some(Self::AssetRegistered),
-            3 => Some(Self::RootAdvanced),
-            4 => Some(Self::AssetMoved),
-            5 => Some(Self::NullifierConsumed),
-            6 => Some(Self::DepositEscrowed),
-            7 => Some(Self::DepositFlushed),
-            8 => Some(Self::DepositCanceled),
-            9 => Some(Self::AssetFeeSet),
-            10 => Some(Self::YieldAssetAdded),
-            11 => Some(Self::YieldParamsSet),
-            12 => Some(Self::PerfFeeAccrued),
-            13 => Some(Self::NormalizedFeeSwept),
-            14 => Some(Self::Rebalanced),
-            15 => Some(Self::HaltedSet),
-            16 => Some(Self::EmergencyUnwound),
-            _ => None,
-        }
+        // Derived from `ALL` rather than a second 16-arm match: the two lists
+        // drifting apart is exactly the failure this enum has already had once.
+        Self::ALL.into_iter().find(|k| k.as_i16() == v)
     }
 
     pub fn as_i16(self) -> i16 {
@@ -62,4 +84,34 @@ pub struct RawEvent {
     pub event_kind: EventKind,
     pub topics: Vec<Vec<u8>>,
     pub data: Vec<u8>,
+}
+
+#[cfg(test)]
+mod event_kind_tests {
+    use super::EventKind;
+
+    /// `ALL` really is every variant, and in discriminant order.
+    ///
+    /// The array length is already pinned to the highest discriminant, so this
+    /// catches the remaining way to get it wrong: listing a variant twice and
+    /// omitting another, which keeps the length right.
+    #[test]
+    fn all_is_complete_and_ordered() {
+        for (i, kind) in EventKind::ALL.into_iter().enumerate() {
+            assert_eq!(
+                kind.as_i16(),
+                i as i16 + 1,
+                "ALL[{i}] is {kind:?}; discriminants must be 1..=N with no gaps or repeats"
+            );
+        }
+    }
+
+    #[test]
+    fn from_i16_round_trips_every_variant() {
+        for kind in EventKind::ALL {
+            assert_eq!(EventKind::from_i16(kind.as_i16()), Some(kind));
+        }
+        assert_eq!(EventKind::from_i16(0), None);
+        assert_eq!(EventKind::from_i16(EventKind::ALL_COUNT as i16 + 1), None);
+    }
 }

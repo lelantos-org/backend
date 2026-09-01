@@ -12,6 +12,7 @@ use crate::backoff::Backoff;
 use crate::shutdown::Shutdown;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, info, trace, warn};
@@ -32,6 +33,18 @@ pub enum TickProgress {
     /// The cursor did not move: nothing queued, or blocked on work this batch
     /// cannot complete. Lets the idle delay grow.
     Idle,
+    /// A fixed-cadence poll ran and there is nothing to catch up on.
+    ///
+    /// For a service with no cursor and no queue, which re-reads the same inputs
+    /// every pass — venue state, a price feed. Every such pass is the drained
+    /// state, so neither `Idle` ("nothing happened") nor `Partial` ("the queue
+    /// drained, look again from the floor") describes it: the first understates
+    /// the work and the second asks the driver to look again in 50 ms, which is
+    /// how the yield poller ended up at 20 rounds/second against an idle node.
+    ///
+    /// Sleeps the ceiling directly, skipping the backoff ramp — there is nothing
+    /// to ramp toward when the cadence is the answer rather than a guess.
+    Polled,
     /// The cursor advanced but the batch was not filled: the queue is drained.
     /// Sleeps, but from the floor.
     Partial,
@@ -60,6 +73,7 @@ impl TickProgress {
     pub fn label(self) -> &'static str {
         match self {
             Self::Idle => "idle",
+            Self::Polled => "polled",
             Self::Partial => "partial",
             Self::Saturated => "saturated",
         }
@@ -143,6 +157,8 @@ pub async fn run(svc: Arc<dyn TickService>, tick_ms: u64, batch: i64, shutdown: 
 ///
 /// - [`Saturated`](TickProgress::Saturated): no sleep, so catch-up is bounded
 ///   by the database rather than by the tick.
+/// - [`Polled`](TickProgress::Polled): sleep `tick_ms` exactly — a fixed-cadence
+///   service has no queue to drain and no backoff to ramp.
 /// - [`Partial`](TickProgress::Partial): sleep from the [`Backoff::idle`] floor,
 ///   so an arrival landing just after a round is picked up in ~50 ms.
 /// - [`Idle`](TickProgress::Idle): sleep, doubling up to `tick_ms`.
@@ -168,8 +184,20 @@ pub async fn run_with_wake(
     while !shutdown.is_triggered() {
         let round = run_round(svc.as_ref(), batch).await;
 
-        if round > TickProgress::Idle {
+        // `Polled` is excluded: it means "the cadence is the answer", so there is
+        // no arrival rate for the backoff to track and resetting it would put the
+        // next look 50 ms out.
+        if round > TickProgress::Polled {
             backoff.reset();
+        }
+
+        if round == TickProgress::Polled {
+            trace!(name, "fixed-cadence poll; sleeping the ceiling");
+            tokio::select! {
+                _ = sleep(Duration::from_millis(tick_ms.max(1))) => {}
+                _ = shutdown.recv() => break,
+            }
+            continue;
         }
 
         if round == TickProgress::Saturated {
@@ -515,6 +543,8 @@ mod tests {
 
     #[test]
     fn progress_orders_idle_below_partial_below_saturated() {
+        assert!(TickProgress::Idle < TickProgress::Polled);
+        assert!(TickProgress::Polled < TickProgress::Partial);
         assert!(TickProgress::Idle < TickProgress::Partial);
         assert!(TickProgress::Partial < TickProgress::Saturated);
     }

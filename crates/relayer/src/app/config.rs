@@ -503,6 +503,14 @@ impl RelayerConfig {
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "NATIVE_SYMBOL") {
                 c.native_symbol = v;
             }
+            // Wallet-facing, and the relayer itself never reads it — but it is a
+            // deployed address, so a literal in the TOML rots the moment the
+            // deploy order shifts. The stale value then resolves to a contract
+            // without Permit2's `allowance`, and every wallet's setup probe fails
+            // with "returned no data".
+            if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "PERMIT2_ADDRESS") {
+                c.public.permit2_address = Some(v);
+            }
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "FEE_MARKUP_BPS")
                 && let Ok(n) = v.parse::<u32>()
             {

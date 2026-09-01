@@ -11,23 +11,64 @@ use shared::entities::EventKind;
 use shared::tick::TickProgress;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tracing::{debug, warn};
 
 pub const NAME: &str = "explorer";
 
-/// Kinds backing the public stats and the deposit-escrow ledger. `NoteCreated`
-/// and `NullifierConsumed` belong to the FMD zone and are consumed by
-/// fmd-indexer.
-const KINDS: [i16; 7] = [
-    EventKind::AssetRegistered as i16,
-    EventKind::AssetFeeSet as i16,
-    EventKind::RootAdvanced as i16,
-    EventKind::AssetMoved as i16,
-    EventKind::DepositEscrowed as i16,
-    EventKind::DepositFlushed as i16,
-    EventKind::DepositCanceled as i16,
-];
+/// Whether this service consumes a kind.
+///
+/// The predicate, not a list. `KINDS` below — the `WHERE event_kind = ANY` of
+/// the fetch — is derived from it, so the filter and this decision cannot
+/// disagree: a kind answered `true` here is always fetched, and one answered
+/// `false` is never read.
+///
+/// That is the whole point of writing it this way. The yield kinds were added to
+/// `EventKind` and to `apply`'s match but not to the old hand-written filter
+/// array, so their arms were unreachable, `asset_yield` stayed permanently
+/// empty, and — because the cursor only ever advances to the highest id among
+/// the fetched kinds — the cursor wedged whenever the newest event was a yield
+/// one. No wildcard arm, so a new variant fails to compile here rather than
+/// silently defaulting to unconsumed.
+///
+/// `Rebalanced` and `EmergencyUnwound` are consumed although their `apply` arms
+/// do nothing: they still advance the cursor past themselves.
+const fn consumed(kind: EventKind) -> bool {
+    match kind {
+        // The FMD zone. fmd-indexer owns these; see its own `KINDS`.
+        EventKind::NoteCreated | EventKind::NullifierConsumed => false,
+        EventKind::AssetRegistered
+        | EventKind::AssetFeeSet
+        | EventKind::RootAdvanced
+        | EventKind::AssetMoved
+        | EventKind::DepositEscrowed
+        | EventKind::DepositFlushed
+        | EventKind::DepositCanceled
+        | EventKind::YieldAssetAdded
+        | EventKind::YieldParamsSet
+        | EventKind::PerfFeeAccrued
+        | EventKind::NormalizedFeeSwept
+        | EventKind::Rebalanced
+        | EventKind::HaltedSet
+        | EventKind::EmergencyUnwound => true,
+    }
+}
 
+/// The kinds this service fetches, as the `ANY` array wants them.
+///
+/// Built from [`consumed`] over [`EventKind::ALL`] at startup rather than
+/// spelled out. `OnceLock` because a `const fn` cannot yet filter into a
+/// fixed-size array on stable.
+fn kinds() -> &'static [i16] {
+    static KINDS: OnceLock<Vec<i16>> = OnceLock::new();
+    KINDS.get_or_init(|| {
+        EventKind::ALL
+            .into_iter()
+            .filter(|k| consumed(*k))
+            .map(EventKind::as_i16)
+            .collect()
+    })
+}
 pub struct ConsumeCtx {
     pub pool: DbPool,
     pub cfg: Arc<ExplorerIndexerConfig>,
@@ -132,7 +173,7 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<T
         return Ok(TickProgress::Saturated);
     }
 
-    let rows = raw_events::batch_after(&ctx.pool, chain_id, after, &KINDS, batch).await?;
+    let rows = raw_events::batch_after(&ctx.pool, chain_id, after, kinds(), batch).await?;
     if rows.is_empty() {
         // Sweep anyway: a previous attempt may have failed, and an idle chain
         // has room to retry.

@@ -65,7 +65,11 @@ shielded_fee_assets = []
 name = "anvil"
 rpc_url = "http://localhost:8545"
 tree_depth = 11
-permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+# Injected by deploy-contracts.sh as RELAYER_CHAIN_<id>_PERMIT2_ADDRESS. It was
+# a literal, which rotted whenever the deploy order shifted: DeployTest deploys
+# a fresh Permit2 when the canonical address has no code, so the stale literal
+# resolved to a contract with no `allowance` and every wallet's setup probe
+# failed with `returned no data ("0x")`.
 
 # ── second chain, for exercising the frontend's chain switcher ───────────
 #
@@ -83,17 +87,20 @@ permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 #     Once a deposit lands, the next relayer restart fails with
 #     "tree mirror diverges from chain 31338". Remove this block, or wipe, to
 #     recover.
-#   * `pool_address` is hard-coded rather than injected: deploy-contracts.sh
-#     emits `RELAYER_CHAIN_31337_*` only, so the env overlay never touches this
-#     entry. The literal is safe because anvil deploys deterministically from
-#     the same script, but it must be updated if the deploy order changes.
+#   * `pool_address` below is a placeholder: deploy-contracts.sh emits
+#     `RELAYER_CHAIN_31338_{POOL_ADDRESS,RPC_URL}` alongside the 31337 pair and
+#     the env overlay rewrites this entry with the freshly deployed MASP. It
+#     used to be a hard-coded literal, which rotted whenever the deploy order
+#     shifted: the stale address resolved to some other contract, `currentRoot`
+#     reverted at boot and the relayer crash-looped.
 #
 # A real second chain means a second anvil + deploy, and per-chain config in
 # the three indexers.
 [[chains]]
 chain_id = 31338
 rpc_url = "http://anvil:8545"
-pool_address = "0x0165878A594ca255338adfa4d48449f69242Eb8F"
+# Overridden by RELAYER_CHAIN_31338_POOL_ADDRESS (the deployed MASP).
+pool_address = "0x0000000000000000000000000000000000000000"
 # Anvil deterministic account #1 — public test key, same as 31337 above.
 signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 receipt_timeout_s = 60
@@ -106,7 +113,11 @@ flush_max_attempts = 5
 name = "anvil-2"
 rpc_url = "http://localhost:8545"
 tree_depth = 11
-permit2_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+# Injected by deploy-contracts.sh as RELAYER_CHAIN_<id>_PERMIT2_ADDRESS. It was
+# a literal, which rotted whenever the deploy order shifted: DeployTest deploys
+# a fresh Permit2 when the canonical address has no code, so the stale literal
+# resolved to a contract with no `allowance` and every wallet's setup probe
+# failed with `returned no data ("0x")`.
 
 [price_oracle]
 # The `oracle` service in docker-compose.yml, not Coinbase. Fee-token pairs are

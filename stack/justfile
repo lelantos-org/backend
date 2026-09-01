@@ -119,6 +119,22 @@ deploy-logs:
 addresses:
     {{DC}} run --rm --no-deps --entrypoint cat deploy /addresses/addresses.env
 
+# ── yield ───────────────────────────────────────────────────────────────
+
+# Credit interest on a yield asset's mock vault, raising its index.
+#
+# ID is a yield asset id (4, 5, 6 on the dev fixture — the plain ids 1-3 are
+# custody only and have no vault). AMT is in the token's base units. Deposit
+# into the asset first: the credit is shared out over the shares the pool
+# already holds, and there are none until a deposit has settled.
+#
+#   just earn 4 5000000000000000000   # 5 WETH into the WETH yield asset
+#
+# `--no-deps` because anvil is already up; the deploy one-shot is reused only
+# for its foundry image and its /addresses mount.
+earn ID AMT:
+    {{DC}} run --rm --no-deps --entrypoint /scripts/earn.sh deploy {{ID}} {{AMT}}
+
 # psql shell into the running postgres.
 db-shell:
     {{DC}} exec postgres psql -U postgres -d postgres
@@ -142,6 +158,7 @@ check:
     @echo "== shell scripts"
     bash -n ./scripts/fetch-circuits.sh
     sh -n ./scripts/deploy-contracts.sh
+    sh -n ./scripts/earn.sh
     @echo "== config TOMLs"
     @for f in ./config/*/*.toml; do \
         python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$f" \
