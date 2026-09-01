@@ -254,7 +254,10 @@ fn decorate_fees(fees: Vec<FeeQuote>, registered: &[AssetRow]) -> Vec<FeeQuote> 
         };
 
         let before = out.len();
-        for row in registered.iter().filter(|a| a.token_address() == Some(token)) {
+        for row in registered
+            .iter()
+            .filter(|a| a.token_address() == Some(token))
+        {
             // A yield asset whose index has not been polled yet yields no
             // `rate`, so it contributes no quote rather than one converted at
             // `scale` — which would name a circuit amount that underpays.
@@ -409,8 +412,18 @@ mod tests {
         assert_eq!(ids(&out), vec![Some(2), Some(5)]);
         // One price, two conversions: the yield unit is worth more, so covering
         // the same cost takes fewer of them.
-        let plain: u128 = out[0].circuit_amount.as_ref().expect("plain").parse().expect("n");
-        let earning: u128 = out[1].circuit_amount.as_ref().expect("yield").parse().expect("n");
+        let plain: u128 = out[0]
+            .circuit_amount
+            .as_ref()
+            .expect("plain")
+            .parse()
+            .expect("n");
+        let earning: u128 = out[1]
+            .circuit_amount
+            .as_ref()
+            .expect("yield")
+            .parse()
+            .expect("n");
         assert!(earning < plain, "a yield unit covers more than a plain one");
         assert_eq!(out[0].amount, out[1].amount, "the token price is the same");
     }
