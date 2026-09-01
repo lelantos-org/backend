@@ -26,11 +26,12 @@ pub async fn prices(State(st): State<AppState>) -> AppResult<Json<PricesResponse
             let chain_ids: Vec<i64> = st.spend_pipelines.keys().copied().collect();
             // Hex once per asset: it is both the price-lookup key and, with a
             // `0x`, the wire field.
-            let keys: Vec<TokenKey> = assets::list_for_chains(&st.pool, &chain_ids)
-                .await?
-                .into_iter()
-                .map(|(chain_id, row)| (chain_id, hex::encode(&row.token)))
-                .collect();
+            let keys = unique_token_keys(
+                assets::list_for_chains(&st.pool, &chain_ids)
+                    .await?
+                    .into_iter()
+                    .map(|(chain_id, row)| (chain_id, hex::encode(&row.token))),
+            );
 
             // One upstream call for every chain at once, and only for tokens the
             // cache has not already answered for.
@@ -42,6 +43,26 @@ pub async fn prices(State(st): State<AppState>) -> AppResult<Json<PricesResponse
         .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))?;
 
     Ok(Json(PricesResponse { prices: rows }))
+}
+
+/// The distinct `(chain, token)` pairs behind a set of registered assets.
+///
+/// The registry is keyed by asset id and this endpoint is keyed by token
+/// address, and that relation is many-to-one: a yield asset is registered
+/// alongside the plain asset it shadows and shares its ERC-20, differing only in
+/// the venue binding. Mapping the registry straight to keys therefore names the
+/// same pair once per id — five times over on Ethereum — and a caller reads a
+/// price by address, so those repeats are one fact restated rather than two
+/// facts.
+///
+/// Dropped here rather than in `to_rows` because `for_tokens` dedups nothing
+/// either: left in, the duplicates also ask the provider about the same token
+/// twice in the same request.
+fn unique_token_keys(keys: impl Iterator<Item = TokenKey>) -> Vec<TokenKey> {
+    let mut out: Vec<TokenKey> = keys.collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Pair each asked-about token with its price, dropping the ones that have none.
@@ -85,6 +106,32 @@ mod tests {
             decimals: Some(18),
             quoted_at: 7,
         }
+    }
+
+    /// The production shape: on Ethereum five yield ids shadow a plain id and
+    /// share its ERC-20, so the registry hands over the same pair twice.
+    #[test]
+    fn a_yield_asset_sharing_its_plain_asset_erc20_yields_one_key() {
+        let weth = key(1, "c02a");
+        let usdc = key(1, "a0b8");
+
+        // plain WETH, plain USDC, then the yield ids shadowing each.
+        let keys =
+            unique_token_keys([weth.clone(), usdc.clone(), weth.clone(), usdc.clone()].into_iter());
+
+        assert_eq!(keys, vec![usdc, weth], "one key per token, sorted");
+    }
+
+    /// A token on two chains is two facts, not a duplicate: the pair carries the
+    /// chain, and the same address prices independently on each.
+    #[test]
+    fn the_same_token_on_two_chains_keeps_both_keys() {
+        let mainnet = key(1, "a0b8");
+        let base = key(8453, "a0b8");
+
+        let keys = unique_token_keys([mainnet.clone(), base.clone(), mainnet.clone()].into_iter());
+
+        assert_eq!(keys, vec![mainnet, base]);
     }
 
     #[test]
