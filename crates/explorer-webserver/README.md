@@ -3,7 +3,7 @@
 Read-only HTTP API for explorer queries over public chain data. Axum +
 Postgres, over the tables `explorer-indexer` writes.
 
-**Must not depend on `fmd-crypto`** — the privacy gate is recorded in
+**Must not depend on `common-crypto`** — the privacy gate is recorded in
 `Cargo.toml` and `lib.rs`, but nothing in CI checks it, so a new dependency
 edge has to be caught in review.
 
@@ -19,6 +19,7 @@ DATABASE_URL=postgres://... cargo run -p explorer-webserver
 |-----|----------|---------|-------|
 | `DATABASE_URL` | yes | — | Postgres URL |
 | `EXPLORER_BIND_ADDR` | no | `0.0.0.0:3002` | Listen address |
+| `METRICS_ADDR` | no | `127.0.0.1:3014` | Where `/metrics` is served |
 | `CACHE_TTL_S` | no | `30` | Response cache TTL (seconds) |
 | `PRICE_BASE_URL` | no | `https://coins.llama.fi` | DefiLlama-compatible price API root |
 | `PRICE_TTL_S` | no | `300` | Spot-price cache TTL (seconds) |
@@ -51,6 +52,9 @@ Prices are decoration on public chain data, so nothing here can fail a request:
 All read-only `GET`. Every response is cached in-process for `CACHE_TTL_S`,
 except `/v1/tree-advances` and `/v1/transactions`, which track the head of the
 chain and use a fixed 5s TTL.
+
+Every response also carries an `ETag`, so a dashboard polling faster than the TTL
+revalidates with `If-None-Match` and gets a `304` instead of the body.
 
 | Path | Query | Notes |
 |------|-------|-------|

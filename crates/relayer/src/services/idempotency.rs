@@ -13,6 +13,7 @@
 //! state, so two relayers cannot serve the same chain.
 
 use crate::domain::error::{AppError, AppResult};
+use shared::cache::{self, Cache};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,16 +39,13 @@ struct Answer {
 
 /// Idempotent submission results, keyed by `(chain_id, key)`.
 pub struct IdempotencyCache {
-    entries: moka::future::Cache<(i64, String), Answer>,
+    entries: Cache<(i64, String), Answer>,
 }
 
 impl IdempotencyCache {
     pub fn new() -> Self {
         Self {
-            entries: moka::future::Cache::builder()
-                .max_capacity(CAPACITY)
-                .time_to_live(TTL)
-                .build(),
+            entries: cache::build(CAPACITY, TTL),
         }
     }
 

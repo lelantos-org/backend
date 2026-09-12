@@ -36,9 +36,9 @@ use crate::repositories::assets::AssetRow;
 use crate::services::asset_registry::AssetRegistry;
 use crate::services::fee_quote::{FeeQuoter, FeeToken};
 use alloy::primitives::U256;
-use fmd_crypto::clue::{fq_from_be_bytes, pack, point_from_xy};
-use fmd_crypto::note::{self, NotePlaintext};
-use fmd_crypto::tree::Field;
+use common_crypto::clue::{fq_from_be_bytes, pack, point_from_xy};
+use common_crypto::note::{self, NotePlaintext};
+use common_crypto::tree::Field;
 use std::fmt;
 use std::sync::Arc;
 use tracing::info;
@@ -371,11 +371,7 @@ impl ShieldedFeeChecker {
             address: self.address().to_string(),
             grace_bps: self.grace_bps,
             markup_bps: self.policy.fee_quoter.markup_bps,
-            tokens: self
-                .policy
-                .payable(registered)
-                .map(|a| TokenOut::new(a, None))
-                .collect(),
+            tokens: self.policy.payable(registered).map(TokenOut::new).collect(),
         }
     }
 
@@ -443,13 +439,12 @@ impl ShieldedFeeChecker {
         })
     }
 
-    /// Resolve an asset to the two things pricing needs: its unit scale and the
+    /// Resolve an asset to the two things pricing needs: its rate and the
     /// fee-table entry that gives it a price.
     ///
     /// Every failure here gives the payer the same answer, that this relayer will
     /// not take that asset, so they share one error. Which reason applies is an
     /// operator concern and appears in the message.
-    /// The asset's rate and its fee token.
     ///
     /// Returns a [`Rate`] rather than a [`Scale`] because a yield asset's unit
     /// is worth `gross / supply`, not `scale`. Pricing one at `scale` demands
@@ -530,7 +525,7 @@ mod tests {
     use serde::Deserialize;
 
     /// Built by the SDK's own encrypt path; see the generator note in
-    /// `crates/fmd-crypto/src/note/tests.rs`. Every ciphertext here is one a real
+    /// `crates/common-crypto/src/note/tests.rs`. Every ciphertext here is one a real
     /// wallet would produce for these keys.
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -837,6 +832,10 @@ mod tests {
             index_ray: None,
             perf_bps: None,
             buffer_bps: None,
+            apy_bps: None,
+            apy_window_s: None,
+            apy_measured_at: None,
+            vault_name: None,
         }
     }
 
@@ -933,7 +932,7 @@ mod tests {
                 oracle: Arc::new(NoOracle),
                 gas_estimator: Arc::new(crate::services::gas_estimator::GasEstimator::new(
                     31337,
-                    crate::adapters::rpc::RpcEndpoint::new("http://127.0.0.1:1").expect("url"),
+                    crate::adapters::rpc::endpoint("http://127.0.0.1:1").expect("url"),
                 )),
                 markup_bps: 1000,
             }),

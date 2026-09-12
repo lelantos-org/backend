@@ -1,4 +1,5 @@
 use crate::domain::error::IngesterError;
+use crate::domain::models::Checkpoint;
 use crate::repositories::checkout;
 use async_trait::async_trait;
 use database::DbPool;
@@ -14,14 +15,13 @@ use diesel_async::RunQueryDsl;
 /// wake-up NOTIFYs inside the transactions they announce.
 #[async_trait]
 pub trait BlockHashRepo: Send + Sync {
-    /// Distinct `(block_number, block_hash)` in `[from_block, to_block]`, highest
-    /// block first.
+    /// Distinct checkpoints in `[from_block, to_block]`, highest block first.
     async fn block_hashes_desc(
         &self,
         chain_id: i64,
         from_block: i64,
         to_block: i64,
-    ) -> Result<Vec<(i64, Vec<u8>)>, IngesterError>;
+    ) -> Result<Vec<Checkpoint>, IngesterError>;
 }
 
 pub struct PostgresBlockHashRepo {
@@ -41,15 +41,19 @@ impl BlockHashRepo for PostgresBlockHashRepo {
         chain_id: i64,
         from_block: i64,
         to_block: i64,
-    ) -> Result<Vec<(i64, Vec<u8>)>, IngesterError> {
+    ) -> Result<Vec<Checkpoint>, IngesterError> {
         let mut conn = checkout(&self.pool).await?;
-        Ok(raw_events::table
+        let rows: Vec<(i64, Vec<u8>)> = raw_events::table
             .filter(raw_events::chain_id.eq(chain_id))
             .filter(raw_events::block_number.between(from_block, to_block))
             .distinct_on(raw_events::block_number)
             .order(raw_events::block_number.desc())
             .select((raw_events::block_number, raw_events::block_hash))
             .load(&mut conn)
-            .await?)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(block, hash)| Checkpoint { block, hash })
+            .collect())
     }
 }

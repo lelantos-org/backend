@@ -1,3 +1,5 @@
+//! The state every handler is given: the pool, the config and the caches.
+
 use crate::app::cache::AppCache;
 use crate::app::config::FmdWebserverConfig;
 use database::DbPool;

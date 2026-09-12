@@ -1,3 +1,5 @@
+//! Config, wiring and per-chain state. No business logic.
+
 pub mod config;
 pub mod state;
 

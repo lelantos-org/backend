@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::responses::AnonymitySetOut;
 use crate::repositories::anonymity_set;
 use std::sync::Arc;
@@ -25,28 +25,25 @@ pub async fn denominations(
     let recent_from_ts = recent_from(now_ts, recent_sec);
     let key = (chain_id, asset_id_u64, limit, recent_from_ts);
     let pool = st.pool.clone();
-    st.cache
-        .anonymity_set
-        .try_get_with(key, async move {
-            let rows =
-                anonymity_set::denominations(&pool, chain_id, asset_id_u64, limit, recent_from_ts)
-                    .await?;
-            let out: Vec<AnonymitySetOut> = rows
-                .into_iter()
-                .map(|r| AnonymitySetOut {
-                    chain_id: r.chain_id,
-                    asset_id_u64: r.asset_id_u64,
-                    public_out: r.public_out,
-                    count: r.count,
-                    recent_count: r.recent_count,
-                    first_ts: r.first_ts,
-                    last_ts: r.last_ts,
-                })
-                .collect();
-            Ok::<_, AppError>(Arc::new(out))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&st.cache.anonymity_set, key, async move {
+        let rows =
+            anonymity_set::denominations(&pool, chain_id, asset_id_u64, limit, recent_from_ts)
+                .await?;
+        let out: Vec<AnonymitySetOut> = rows
+            .into_iter()
+            .map(|r| AnonymitySetOut {
+                chain_id: r.chain_id,
+                asset_id_u64: r.asset_id_u64,
+                public_out: r.public_out,
+                count: r.count,
+                recent_count: r.recent_count,
+                first_ts: r.first_ts,
+                last_ts: r.last_ts,
+            })
+            .collect();
+        Ok(Arc::new(out))
+    })
+    .await
 }
 
 #[cfg(test)]

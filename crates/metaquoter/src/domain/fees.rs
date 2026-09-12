@@ -1,4 +1,13 @@
+//! Fee and gas arithmetic applied to every venue's gross output.
+
 use alloy::primitives::U256;
+
+/// Basis-points denominator: 10_000 bps is 100%.
+///
+/// A MASP fee at or above this makes [`max_deposit`] return an amount unrelated
+/// to the venue's output, so it is also the ceiling `MetaQuoterConfig::validate`
+/// enforces.
+pub const BPS_DENOMINATOR: u16 = 10_000;
 
 /// Wrapper overhead added on top of the venue's reported `gasEstimate`: two
 /// MASP transacts (~250k each, inline verifier) plus ~85k wrapper bookkeeping.
@@ -6,15 +15,14 @@ pub const WRAPPER_OVERHEAD_GAS: u64 = 585_000;
 
 /// Largest `expected_out` such that
 /// `expected_out + expected_out * bps / 10_000 <= gross`, equivalent to
-/// `gross * 10_000 / (10_000 + bps)`. `bps` is clamped to 10_000.
+/// `gross * 10_000 / (10_000 + bps)`. `bps` is clamped to [`BPS_DENOMINATOR`].
 ///
 /// MASP charges its fee on top of the deposited amount (`MASP._computeAmounts`),
 /// so the depositable figure is the reciprocal of the fee applied to gross
 /// rather than gross minus fee.
 pub fn max_deposit(gross: U256, bps: u16) -> U256 {
-    let bps = u32::from(bps).min(10_000);
-    let denom = U256::from(10_000u32 + bps);
-    gross.saturating_mul(U256::from(10_000u32)) / denom
+    let denom = u32::from(BPS_DENOMINATOR) + u32::from(bps.min(BPS_DENOMINATOR));
+    gross.saturating_mul(U256::from(BPS_DENOMINATOR)) / U256::from(denom)
 }
 
 #[cfg(test)]

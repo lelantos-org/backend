@@ -1,10 +1,9 @@
 //! Mirror readings published for `/chains`.
 //!
-//! Its own module so the atomics can be called as plain methods: the parent
-//! glob-imports `diesel::prelude`, whose `RunQueryDsl::load` shadows the
-//! inherent `Atomic*::load`.
+//! Its own module because it is the only part of the mirror read without the
+//! mutex, and the only part `/chains` touches.
 
-use fmd_crypto::tree::Field;
+use common_crypto::tree::Field;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Mirror readings published for `/chains` to read without the mutex.
@@ -34,13 +33,9 @@ impl MirrorSnapshot {
 
     /// Publish a fresh set of readings. Only [`super::TreeMirror`] calls this, and
     /// only while holding the mirror.
-    pub(super) fn publish(&self, leaf_count: u64, root: Option<Field>, desynced: bool) {
+    pub(super) fn publish(&self, leaf_count: u64, root: Field, desynced: bool) {
         self.leaf_count.store(leaf_count, Ordering::Relaxed);
         self.desynced.store(desynced, Ordering::Relaxed);
-        // A root that cannot be computed leaves the last good one in place rather
-        // than publishing zero; the mirror is heading for a park in that case.
-        if let Some(root) = root {
-            *self.root.write() = root;
-        }
+        *self.root.write() = root;
     }
 }

@@ -10,16 +10,16 @@ use crate::services::asset_registry::AssetRegistry;
 use crate::services::fee_quote::FeeQuoter;
 use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    FeeContext, SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend,
-    check_known_root, parse_spend_inputs, prove_spend, verify_transact_proof,
+    FeeContext, SpendInputs, SubmitStage, TransactBinding, build_tu_pi_for_spend,
+    parse_spend_inputs, reserve_prove_submit, verify_transact_proof,
 };
-use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::submitter::{SubmissionReceipt, Submitter};
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use alloy::primitives::Address;
 use alloy::sol_types::SolCall;
+use groth16::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, instrument};
@@ -87,36 +87,34 @@ impl SwapPipeline {
             )
             .await?;
 
-        let mut mirror = self.mirror.lock().await;
-        info!(leaf_count = mirror.committed_count(), "swap pipeline start");
-        check_known_root(&mirror, &payload.pub_inputs)?;
-        let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
-
-        let tu_proof = match prove_spend(&self.prover, &slot, &advanced, &inputs).await {
-            Ok(p) => p,
-            Err(e) => return Err(mirror.unwind(SPEND_LEAVES, e)),
+        // The mirror lock is held from reserve through the receipt, and is the
+        // same one `SpendPipeline` takes, so spend and swap serialise against each
+        // other; see `reserve_prove_submit`.
+        let stage = SubmitStage {
+            mirror: &self.mirror,
+            prover: &self.prover,
+            submitter: &self.submitter,
+            start_msg: "swap pipeline start",
         };
+        let receipt = reserve_prove_submit(stage, &payload.pub_inputs, &inputs, |slot, adv, tp| {
+            encode_swap_calldata(
+                &payload,
+                &inputs,
+                slot,
+                adv,
+                tp,
+                self.deadline_for(&payload)?,
+            )
+        })
+        .await?;
 
-        let calldata = encode_swap_calldata(
-            &payload,
-            &inputs,
-            &slot,
-            &advanced,
-            &tu_proof,
-            self.deadline_for(&payload)?,
-        )?;
-        match self.submitter.submit(calldata).await {
-            Ok(receipt) => {
-                self.gas_witness.observe(EntryPoint::Swap, receipt.gas_used);
-                info!(
-                    tx_hash = %receipt.tx_hash,
-                    gas_used = receipt.gas_used,
-                    "swap submitted"
-                );
-                Ok(receipt)
-            }
-            Err(e) => Err(mirror.unwind(SPEND_LEAVES, e)),
-        }
+        self.gas_witness.observe(EntryPoint::Swap, receipt.gas_used);
+        info!(
+            tx_hash = %receipt.tx_hash,
+            gas_used = receipt.gas_used,
+            "swap submitted"
+        );
+        Ok(receipt)
     }
 
     /// Fee quote for `/v1/swap/estimate`. See `SpendPipeline::estimate`: no mirror
@@ -266,6 +264,24 @@ fn validate_swap_shape(
         parse_field(v, FieldRef::Index("deposit_d.cvDep", i))?;
     }
     parse_field(&p.swap.deposit_d.rcv, FieldRef::Named("deposit_d.rcv"))?;
+    // Parse every caller-supplied field the calldata encoder parses, here,
+    // before anything expensive or stateful runs. `encode_swap_calldata` runs
+    // inside `reserve_prove_submit`, after the mirror has speculatively
+    // reserved leaves and after a full Groth16 — so a swap naming an
+    // unparseable `adapter` used to cost a proof and an unwind before anyone
+    // noticed. The same errors surface, just ahead of the work instead of
+    // behind it.
+    build_proof(&p.proof)?;
+    build_pub_inputs(&p.pub_inputs)?;
+    build_aux(&p.aux)?;
+    build_deposit_request(&p.swap.deposit_d)?;
+    build_one_aux(&p.swap.aux_d)?;
+    build_one_aux(&p.swap.fee_aux_d)?;
+    parse_address(&p.swap.adapter)?;
+    parse_address(&p.swap.token_in)?;
+    parse_address(&p.swap.token_out)?;
+    parse_u256(&p.swap.amount_in)?;
+    parse_hex_bytes(&p.swap.route, "route")?;
     Ok(())
 }
 

@@ -22,15 +22,21 @@
 # ───────────────────────────────────────────────────────────── anchors ──
 
 # Profile groupings — change once, propagates to every service in the group.
-x-profiles-pg:        &profiles-pg        [db, ingester, fmd, explorer, relayer, risk, all, prod]
+x-profiles-pg:        &profiles-pg        [db, ingester, fmd, explorer, relayer, risk, registry, all, prod]
 x-profiles-anvil:     &profiles-anvil     [anvil, relayer, all]
-x-profiles-ingester:  &profiles-ingester  [ingester, fmd, explorer, all, prod]
+x-profiles-ingester:  &profiles-ingester  [ingester, fmd, explorer, relayer, registry, all, prod]
 x-profiles-fmd:       &profiles-fmd       [fmd, all, prod]
 x-profiles-explorer:  &profiles-explorer  [explorer, all, prod]
+x-profiles-protocol:  &profiles-protocol  [explorer, relayer, registry, all, prod]
 x-profiles-relayer:   &profiles-relayer   [relayer, all, prod]
 x-profiles-mq:        &profiles-mq        [metaquoter, all, prod]
+x-profiles-rpc:       &profiles-rpc       [rpc, all, prod]
 x-profiles-risk:      &profiles-risk      [risk, all, prod]
-x-profiles-deploy:    &profiles-deploy    [all]
+x-profiles-registry:  &profiles-registry  [registry, explorer, relayer, all, prod]
+# The one-shot runs wherever an anvil of our own is brought up: without it the
+# contracts do not exist, and the relayer's boot-time `currentRoot` call goes to
+# the zero address. `registry` has no anvil, so it cannot be deployed to.
+x-profiles-deploy:    &profiles-deploy    [relayer, all]
 
 # Shielded fee identity for the dev chain (31337).
 #
@@ -63,8 +69,14 @@ x-addresses-entrypoint: &addresses-entrypoint
     - 'if [ -f /addresses/addresses.env ]; then set -a; . /addresses/addresses.env; set +a; fi; exec /usr/bin/tini -- "$${BIN_PATH:-/usr/local/bin/app}"'
 
 # TCP liveness via bash /dev/tcp (no curl/nc needed; bash is present in
-# debian:bookworm-slim). Override PORT in the per-service test.
+# debian:bookworm-slim).
+#
+# The port comes from the service's own HEALTH_PORT rather than being written
+# into a per-service `test:`, so the whole check is one anchor and the probe
+# cannot drift from the port the service actually listens on. `$$` escapes the
+# expansion past compose, so the container's shell is what resolves it.
 x-tcp-healthcheck: &tcp-healthcheck
+    test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/$$HEALTH_PORT' >/dev/null 2>&1"]
     interval: 10s
     timeout: 3s
     retries: 10
@@ -167,8 +179,10 @@ services:
         environment:
             <<: *backend-env
             INGESTER_CONFIG: /etc/ingester.toml
-            # 0.0.0.0 inside the container so the published port can reach it;
-            # loopback on the host side. Same split as fmd-indexer.
+            # Bound on 0.0.0.0 inside the container so the published port can
+            # reach it, but published only on loopback: metrics are for a local
+            # scrape, not for anything off the host. Every backend that exposes
+            # /metrics follows this split.
             METRICS_ADDR: "0.0.0.0:3013"
         ports: ["127.0.0.1:3013:3013"]
         volumes:
@@ -185,11 +199,33 @@ services:
             FILTER_WORKERS: "${FILTER_WORKERS:-4}"
             FILTER_BATCH:   "${FILTER_BATCH:-1000}"
             FILTER_TICK_MS: "${FILTER_TICK_MS:-500}"
-            # 0.0.0.0 inside the container so the published port can reach it;
-            # loopback on the host side. Same split as prod.
+            # See the note on ingester's METRICS_ADDR.
             METRICS_ADDR:   "0.0.0.0:3012"
         ports: ["127.0.0.1:3012:3012"]
 
+    # ── protocol state ─────────────────────────────────────────────────
+    # The asset catalog and yield bindings the wallet boots from, plus the two
+    # ledgers the relayer transacts against: `tree_advances` for its Merkle
+    # mirror and `deposit_escrowed_events` for its flush pipeline.
+    #
+    # In the relayer and registry profiles as well as explorer's: those services
+    # read tables this one writes, so running either without it leaves them
+    # serving an empty catalog.
+    protocol-indexer:
+        <<: *backend-base
+        profiles: *profiles-protocol
+        build: { <<: *rust-build, args: { PACKAGE: protocol-indexer } }
+        image: lelantos/protocol-indexer:dev
+        environment:
+            <<: *backend-env
+            PROTOCOL_INDEXER_CONFIG: /etc/protocol-indexer.toml
+        volumes:
+            - ./config/${STACK_ENV:-dev}/protocol-indexer.toml:/etc/protocol-indexer.toml:ro
+            - addresses:/addresses:ro
+
+    # ── explorer analytics ─────────────────────────────────────────────
+    # Flow aggregation for explorer-ui only. No RPC and no addresses mount: it
+    # reads rows the ingester has already written.
     explorer-indexer:
         <<: *backend-base
         profiles: *profiles-explorer
@@ -200,7 +236,6 @@ services:
             EXPLORER_INDEXER_CONFIG: /etc/explorer-indexer.toml
         volumes:
             - ./config/${STACK_ENV:-dev}/explorer-indexer.toml:/etc/explorer-indexer.toml:ro
-            - addresses:/addresses:ro
 
     fmd-webserver:
         <<: *backend-base
@@ -210,14 +245,13 @@ services:
         environment:
             <<: *backend-env
             BIND_ADDR: 0.0.0.0:3001
+            HEALTH_PORT: "3001"
             METRICS_ADDR: 0.0.0.0:3011
             INDEXER_LAG_WARN_BLOCKS: "50"
         ports:
             - "3001:3001"
             - "127.0.0.1:3011:3011"
-        healthcheck:
-            <<: *tcp-healthcheck
-            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3001' >/dev/null 2>&1"]
+        healthcheck: *tcp-healthcheck
 
     explorer-webserver:
         <<: *backend-base
@@ -227,11 +261,15 @@ services:
         environment:
             <<: *backend-env
             EXPLORER_BIND_ADDR: 0.0.0.0:3002
+            HEALTH_PORT: "3002"
+            # 0.0.0.0 inside the container so the published port can reach it;
+            # loopback on the host side. Same split as fmd-webserver.
+            METRICS_ADDR: 0.0.0.0:3014
             CACHE_TTL_S: "30"
-        ports: ["3002:3002"]
-        healthcheck:
-            <<: *tcp-healthcheck
-            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3002' >/dev/null 2>&1"]
+        ports:
+            - "3002:3002"
+            - "127.0.0.1:3014:3014"
+        healthcheck: *tcp-healthcheck
 
     # Read-only address screening. Owns `screened_addresses` and migrates it
     # itself — no indexer writes that table.
@@ -243,11 +281,15 @@ services:
         environment:
             <<: *backend-env
             RISK_BIND_ADDR: 0.0.0.0:3004
+            HEALTH_PORT: "3004"
+            # 0.0.0.0 inside the container so the published port can reach it;
+            # loopback on the host side. Same split as fmd-webserver.
+            METRICS_ADDR: 0.0.0.0:3015
             CACHE_TTL_S: "60"
-        ports: ["3004:3004"]
-        healthcheck:
-            <<: *tcp-healthcheck
-            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3004' >/dev/null 2>&1"]
+        ports:
+            - "3004:3004"
+            - "127.0.0.1:3015:3015"
+        healthcheck: *tcp-healthcheck
 
     # ── price oracle stub (dev) ────────────────────────────────────────
     # `CoinbaseOracle` fetches `{base_url}/prices/{BASE}-{QUOTE}/spot`; nginx
@@ -289,6 +331,7 @@ services:
             <<: [*backend-env, *dev-shielded-fee]
             BIN_PATH: /usr/local/bin/relayer
             RELAYER_CONFIG: /etc/relayer.toml
+            HEALTH_PORT: "3003"
             # 42161 signer required only for prod-style runs; empty in dev is fine.
             RELAYER_CHAIN_42161_SIGNER_KEY: "${RELAYER_CHAIN_42161_SIGNER_KEY:-}"
             RELAYER_CHAIN_31337_SIGNER_KEY: "${RELAYER_CHAIN_31337_SIGNER_KEY:-}"
@@ -297,9 +340,7 @@ services:
             - ./circuits:/circuits:ro
             - addresses:/addresses:ro
         ports: ["3003:3003"]
-        healthcheck:
-            <<: *tcp-healthcheck
-            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3003' >/dev/null 2>&1"]
+        healthcheck: *tcp-healthcheck
 
     # ── metaquoter (DB-less; talks to RPCs only) ───────────────────────
     # Sources /addresses/addresses.env at startup like the other backends so
@@ -316,15 +357,76 @@ services:
         environment:
             RUST_LOG: info
             METAQUOTER_CONFIG: /etc/metaquoter.toml
+            HEALTH_PORT: "8081"
         entrypoint: *addresses-entrypoint
         volumes:
             - ./config/${STACK_ENV:-dev}/metaquoter.toml:/etc/metaquoter.toml:ro
             - addresses:/addresses:ro
         ports: ["8081:8081"]
         networks: [backend]
-        healthcheck:
-            <<: *tcp-healthcheck
-            test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8081' >/dev/null 2>&1"]
+        healthcheck: *tcp-healthcheck
+
+    # ── read RPC proxy ─────────────────────────────────────────────────
+    # The endpoint browsers read the chain through, so the paid upstream key
+    # stays server-side. Reads only: writes go through the user's own wallet.
+    #
+    # DB-less, like metaquoter. Its contract allowlist is static and comes from
+    # the config file, so an asset registered on-chain without re-running the
+    # deploy step is refused until it is — see crates/rpc-proxy/README.md.
+    rpc-proxy:
+        restart: unless-stopped
+        profiles: *profiles-rpc
+        depends_on:
+            deploy: { condition: service_completed_successfully, required: false }
+        build: { <<: *rust-build, args: { PACKAGE: rpc-proxy } }
+        image: lelantos/rpc-proxy:dev
+        environment:
+            RUST_LOG: info
+            RPC_PROXY_CONFIG: /etc/rpc-proxy.toml
+            HEALTH_PORT: "3006"
+            # No METRICS_ADDR here: unlike the other backends this one takes the
+            # address from its TOML (`metrics_addr`), which binds 0.0.0.0 so the
+            # published port below can reach it. Host side stays loopback.
+        entrypoint: *addresses-entrypoint
+        volumes:
+            - ./config/${STACK_ENV:-dev}/rpc-proxy.toml:/etc/rpc-proxy.toml:ro
+            - addresses:/addresses:ro
+        ports:
+            - "3006:3006"
+            - "127.0.0.1:3017:3017"
+        networks: [backend]
+        healthcheck: *tcp-healthcheck
+
+    # ── deployment registry / asset catalog ────────────────────────────
+    # The half of the old `/chains` that describes the deployment rather than a
+    # relayer: chain names, browser RPCs, Permit2 and the declared MASP address,
+    # plus the asset catalog and the vault-APY measurement.
+    #
+    # In the `explorer` and `relayer` profiles as well as its own: a wallet needs
+    # it to boot, and explorer-ui reads its catalog.
+    #
+    # Reads tables explorer-indexer owns and runs no migrations of its own. It
+    # writes only the APY estimate, and only from the one replica that wins this
+    # chain's advisory lock — see `services::venue_apy`.
+    registry-webserver:
+        <<: *backend-base
+        profiles: *profiles-registry
+        build: { <<: *rust-build, args: { PACKAGE: registry-webserver } }
+        image: lelantos/registry-webserver:dev
+        environment:
+            <<: *backend-env
+            REGISTRY_CONFIG: /etc/registry.toml
+            HEALTH_PORT: "3005"
+            # 0.0.0.0 inside the container so the published port can reach it;
+            # loopback on the host side. Same split as fmd-webserver.
+            METRICS_ADDR: 0.0.0.0:3016
+        volumes:
+            - ./config/${STACK_ENV:-dev}/registry.toml:/etc/registry.toml:ro
+            - addresses:/addresses:ro
+        ports:
+            - "3005:3005"
+            - "127.0.0.1:3016:3016"
+        healthcheck: *tcp-healthcheck
 
 # ─────────────────────────────────────────────────────── volumes/net ──
 

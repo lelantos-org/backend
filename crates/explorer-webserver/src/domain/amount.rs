@@ -19,8 +19,10 @@ pub fn whole_tokens(base: &BigDecimal, decimals: Option<i16>) -> Option<BigDecim
 /// `to_string()` switches to scientific notation for small magnitudes — a single
 /// wei of an 18-decimal token prints as `2E-18` — and an amount field whose
 /// syntax varies with its magnitude breaks clients that do more than `Number()`
-/// on it. Every endpoint that reports token amounts uses this, so the format is
-/// uniform.
+/// on it.
+///
+/// `/v1/transactions` is the one endpoint that does not route through here yet
+/// and so can still emit the exponent form; see `services::transactions::recent`.
 pub fn whole_tokens_str(base: &BigDecimal, decimals: Option<i16>) -> Option<String> {
     whole_tokens(base, decimals).as_ref().map(plain_amount)
 }

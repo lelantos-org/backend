@@ -1,0 +1,69 @@
+# rpc-proxy — PROD template. Mounted at /etc/rpc-proxy.toml.
+#
+# The read endpoint browsers use, in front of a paid archive provider. See
+# crates/rpc-proxy/README.md.
+#
+# `apply_env_overlay` only rewrites chains that ALREADY EXIST here, so a chain
+# without a block below gets nothing from the environment. In particular the
+# contract allowlist is static: an asset registered on chain after this file was
+# written is refused until the seeds are regenerated and the service restarted.
+
+listen_addr = "0.0.0.0:3006"
+metrics_addr = "0.0.0.0:3017"
+
+# Cloudflare overwrites this header on every request, so it cannot be spoofed
+# through it — but only while the origin is unreachable except through
+# Cloudflare. Behind any other proxy, set the header that proxy controls; with
+# nothing in front, leave it unset and the socket peer is used.
+trusted_client_ip_header = "CF-Connecting-IP"
+
+max_batch = 100
+max_log_range = 5000
+max_call_data_bytes = 8192
+max_call_gas = 50000000
+upstream_max_inflight = 64
+
+[rate_limit]
+# Per client, shared across every chain below.
+client_units_per_second = 30
+client_burst_units = 180
+client_long_units = 3000
+client_long_window_s = 300
+
+# Arbitrum One — the chain config/prod/{ingester,relayer,registry}.toml serve.
+[[chains]]
+chain_id = 42161
+# A SECRET: the API key lives in the URL. Supply it at runtime as
+# RPC_PROXY_CHAIN_42161_UPSTREAM_URL from a mounted file rather than committing
+# it here; the public endpoint below is only a placeholder that works without
+# archive state.
+upstream_url = "https://arb1.arbitrum.io/rpc"
+# The public endpoint prunes. Historical reads — which is what the earned column
+# needs — require an archive plan, so this must be `true` on the real upstream.
+upstream_archive = false
+# Public fallback for when the paid upstream is unreachable. Non-archive, so
+# historical reads are never routed here.
+fallback_url = "https://arb1.arbitrum.io/rpc"
+fallback_archive = false
+# Arbitrum produces a block roughly every 250ms, so mainnet's 64 would be ~16s
+# of finality rather than the ~15 minutes it is there. Matches the ingester's
+# `reorg_depth` for this chain.
+reorg_depth = 32
+# The block the deployment's contracts were created in — the same height
+# config/prod/ingester.toml starts from. A historical read below this asks a
+# paid archive node about state that cannot exist.
+deploy_block = 465459960
+upstream_units_per_second = 300
+upstream_burst_units = 1500
+# Overridden by RPC_PROXY_CHAIN_42161_{MASP,PERMIT2}_ADDRESS. The MASP is the
+# same pool config/prod/relayer.toml transacts against.
+masp_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
+permit2_address = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+# The contract allowlist. Unlike every other service this one refuses a call to
+# an address it was not told about, so a token or venue missing here is a
+# balance that silently stops loading. Regenerate from the registry's
+# `/v1/assets` after every asset registration and supply as
+# RPC_PROXY_CHAIN_42161_{ERC20,VENUE}_SEED (comma-separated) — declared empty
+# here because these addresses are deployment state, not config.
+erc20_seed = []
+venue_seed = []

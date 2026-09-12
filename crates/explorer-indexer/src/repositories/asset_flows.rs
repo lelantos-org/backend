@@ -1,4 +1,4 @@
-use crate::error::ExplorerIndexerError;
+use crate::domain::error::ExplorerIndexerError;
 use bigdecimal::BigDecimal;
 use database::DbPool;
 use database::schema::asset_flows;
@@ -51,10 +51,22 @@ async fn refresh(pool: &DbPool, view: &'static str) -> Result<(), ExplorerIndexe
     Ok(())
 }
 
-pub async fn insert(pool: &DbPool, row: NewAssetFlow) -> Result<usize, ExplorerIndexerError> {
+/// Insert a whole tick's flows in one statement.
+///
+/// One round trip and one pool checkout for the batch, where the per-event
+/// spelling cost both per row. `ON CONFLICT DO NOTHING` makes it a replay-safe
+/// no-op, including for rows duplicated inside the batch itself — unlike
+/// `DO UPDATE`, which errors when one statement touches a key twice.
+pub async fn insert_batch(
+    pool: &DbPool,
+    rows: &[NewAssetFlow],
+) -> Result<usize, ExplorerIndexerError> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
     let mut conn = super::conn(pool).await?;
     Ok(diesel::insert_into(asset_flows::table)
-        .values(&row)
+        .values(rows)
         .on_conflict((
             asset_flows::chain_id,
             asset_flows::block_number,

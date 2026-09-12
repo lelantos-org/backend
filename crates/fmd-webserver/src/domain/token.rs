@@ -19,7 +19,10 @@ const TOKEN_BYTES: usize = 32;
 ///
 /// Unsalted and unstretched: the input is 32 uniform secret bytes rather than a
 /// password, so there is no dictionary to precompute.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// `Hash` so it can key the cursor-state cache. That is a hash of a hash and
+/// never leaves the process; the digest itself is what the database compares.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TokenHash(Vec<u8>);
 
 /// Omits the digest, which is a stable per-subscriber identifier and must not

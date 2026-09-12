@@ -69,6 +69,28 @@ pub struct NoteRow {
     pub cv_dep_y: BigDecimal,
 }
 
+/// The insert shape of [`NoteRow`]: the same columns without the generated `id`.
+///
+/// Declared beside the row it writes so a column added to one is not missed on
+/// the other.
+#[derive(Debug, Clone, Insertable)]
+#[diesel(table_name = notes)]
+pub struct NewNote {
+    pub chain_id: i64,
+    pub block_number: i64,
+    pub tx_hash: Vec<u8>,
+    pub log_index: i32,
+    pub cm: Vec<u8>,
+    pub clue_rx: BigDecimal,
+    pub clue_ry: BigDecimal,
+    pub eph_pub_x: BigDecimal,
+    pub eph_pub_y: BigDecimal,
+    pub ciphertext: Vec<u8>,
+    pub leaf_index: i64,
+    pub cv_dep_x: BigDecimal,
+    pub cv_dep_y: BigDecimal,
+}
+
 /// One leaf's tree inputs: `leaf = Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`.
 ///
 /// A projection of `notes` rather than the whole row: the tree mirrors read
@@ -80,6 +102,21 @@ pub struct LeafInputsRow {
     pub cm: Vec<u8>,
     pub cv_dep_x: BigDecimal,
     pub cv_dep_y: BigDecimal,
+}
+
+/// Persisted commitment-tree state for one chain: what `/v1/tree-state` serves
+/// and all fmd-indexer needs to resume appending.
+///
+/// `frontier` is `DEPTH * 3` big-endian field elements concatenated, so 1056
+/// bytes. Kept as raw bytes here rather than a `[[u8; 32]; 3]` array because
+/// this layer maps rows, and only the callers know the tree's depth.
+#[derive(Debug, Clone, Queryable, Selectable, Insertable)]
+#[diesel(table_name = tree_state)]
+pub struct TreeStateRow {
+    pub chain_id: i64,
+    pub leaf_count: i64,
+    pub root: Vec<u8>,
+    pub frontier: Vec<u8>,
 }
 
 /// `token_hash` is absent: the indexer never needs the client capability, and

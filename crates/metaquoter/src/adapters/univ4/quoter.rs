@@ -1,4 +1,8 @@
-use crate::adapters::chain_setup::ChainSetup;
+//! Uniswap V4 quote source: one `eth_call` to `V4Quoter` per canonical
+//! `(fee, tickSpacing)` pair, hookless pools only.
+
+use crate::adapters::call;
+use crate::adapters::chain_setup::{ChainMap, ChainSetup};
 use crate::adapters::univ4::abi::{FEE_TIERS, IV4Quoter};
 use crate::domain::error::AppError;
 use crate::domain::models::{Quote, QuoteRequest, Venue};
@@ -10,12 +14,14 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 pub struct UniV4Quoter {
-    chains: HashMap<u64, ChainSetup>,
+    chains: ChainMap,
 }
 
 impl UniV4Quoter {
     pub fn new(chains: HashMap<u64, ChainSetup>) -> Self {
-        Self { chains }
+        Self {
+            chains: ChainMap::new(chains),
+        }
     }
 }
 
@@ -26,17 +32,16 @@ impl Quoter for UniV4Quoter {
     }
 
     fn supports_chain(&self, chain_id: u64) -> bool {
-        self.chains.contains_key(&chain_id)
+        self.chains.supports(chain_id)
     }
 
     async fn quote(&self, req: &QuoteRequest) -> Result<Quote, AppError> {
-        let setup = self
-            .chains
-            .get(&req.chain_id)
-            .ok_or(AppError::UnsupportedChain(req.chain_id))?;
+        let setup = self.chains.get(req.chain_id)?;
 
         // V4 takes the input as a uint128, unlike UniV3's uint256, so an amount
-        // that does not fit is rejected rather than silently truncated.
+        // that does not fit is rejected rather than silently truncated. A chain
+        // that also has V3 still answers: the race keeps V3's quote and only
+        // reports this if no venue produced one.
         let exact_amount: u128 = req
             .amount_in
             .try_into()
@@ -73,9 +78,9 @@ struct TierQuote {
     gas_estimate: u64,
 }
 
-/// Race all canonical (fee, tickSpacing) pairs and pick the highest-output
-/// pool. Pairs with no initialized pool revert at the lens and are dropped.
-/// Returns [`AppError::NoLiquidity`] if every pair fails.
+/// Race all canonical (fee, tickSpacing) pairs and pick the highest-output pool.
+/// A pair with no initialized pool reverts at the lens and is dropped; see
+/// [`call::best_tier`] for why a pair that fails any other way is not.
 ///
 /// `hooks` is pinned to the zero address: a hook pool can charge dynamic fees
 /// or run arbitrary logic during the swap, and `UniV4Adapter` will not execute
@@ -102,24 +107,18 @@ async fn best_tier(
             exactAmount: exact_amount,
             hookData: Default::default(),
         };
-        let call = quoter.quoteExactInputSingle(params);
+        let pending = quoter.quoteExactInputSingle(params);
         async move {
-            let r = call.call().await.ok()?;
-            Some(TierQuote {
+            pending.call().await.map(|r| TierQuote {
                 fee,
                 tick_spacing,
                 amount_out: r.amountOut,
-                gas_estimate: r.gasEstimate.try_into().unwrap_or(u64::MAX),
+                gas_estimate: call::gas_estimate(r.gasEstimate),
             })
         }
     });
 
-    futures::future::join_all(calls)
-        .await
-        .into_iter()
-        .flatten()
-        .max_by_key(|t| t.amount_out)
-        .ok_or(AppError::NoLiquidity)
+    call::best_tier(Venue::UniV4, calls, |t: &TierQuote| t.amount_out).await
 }
 
 #[cfg(test)]

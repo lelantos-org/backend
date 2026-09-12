@@ -30,6 +30,40 @@ pub enum ReorgError {
 
 pub type ReorgResult<T> = Result<T, ReorgError>;
 
+/// A consumer of `raw_events`, identified by the derived state it owns.
+///
+/// Names both the cursor row and the tables a retraction deletes, so the two
+/// cannot disagree. That pairing is the invariant retraction depends on: a
+/// consumer whose table is deleted must also have its cursor rewound, or the
+/// rows are never rebuilt.
+///
+/// Deleting only what the caller owns is what makes several consumers safe.
+/// Before the split every retraction deleted every derived table, which worked
+/// only because each consumer independently reached the same reorg record and
+/// replayed — leaving a window in which one consumer's tables were missing with
+/// only another's cursor rewound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// Notes, spent nullifiers and the tree frontier.
+    Fmd,
+    /// The asset catalog, the yield bindings, and the two ledgers the relayer
+    /// transacts against.
+    Protocol,
+    /// Flow analytics for explorer-ui.
+    Explorer,
+}
+
+impl Owner {
+    /// The `consumer_cursors.name` this owner commits under.
+    pub const fn cursor_name(self) -> &'static str {
+        match self {
+            Owner::Fmd => "fmd",
+            Owner::Protocol => "protocol",
+            Owner::Explorer => "explorer",
+        }
+    }
+}
+
 /// One recorded rewind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Queryable)]
 pub struct ReorgRecord {
@@ -97,7 +131,8 @@ pub async fn consumer_position(pool: &DbPool, name: &str, chain_id: i64) -> Reor
 /// pending at once and the deepest bounds what must be rebuilt. Retraction and
 /// the cursor rewind share a transaction, so no reader sees derived rows
 /// removed while the cursor still reports being past them.
-pub async fn apply_pending(pool: &DbPool, name: &str, chain_id: i64) -> ReorgResult<usize> {
+pub async fn apply_pending(pool: &DbPool, owner: Owner, chain_id: i64) -> ReorgResult<usize> {
+    let name = owner.cursor_name();
     let after = consumer_position(pool, name, chain_id).await?;
     let pending = pending(pool, chain_id, after).await?;
     let (Some(deepest), Some(latest)) = (
@@ -111,7 +146,7 @@ pub async fn apply_pending(pool: &DbPool, name: &str, chain_id: i64) -> ReorgRes
     let retracted = conn
         .transaction::<_, diesel::result::Error, _>(|conn| {
             async move {
-                let retracted = retract_derived(conn, chain_id, deepest).await?;
+                let retracted = retract_derived(conn, owner, chain_id, deepest).await?;
                 rewind_consumer(conn, name, chain_id, latest).await?;
                 Ok(retracted)
             }
@@ -147,29 +182,59 @@ macro_rules! delete_at_or_above {
     }};
 }
 
-/// Delete every derived row for `chain_id` at or above `from_block`.
+/// Delete `owner`'s derived rows for `chain_id` at or above `from_block`.
+///
+/// Scoped to the caller. A consumer deletes only what it writes, so the tables
+/// it drops are exactly the ones its own cursor rewind will rebuild.
 ///
 /// Idempotent: a re-run deletes nothing, so a consumer that crashes
 /// mid-retraction can repeat it.
 ///
 /// `matches` is omitted deliberately: `note_id REFERENCES notes(id) ON DELETE
 /// CASCADE` removes it together with the notes.
+///
+/// `assets` and `asset_yield` appear under no owner. They hold current state
+/// rather than per-block rows and self-heal: the polled columns are overwritten
+/// on the next tick, the event-sourced ones on the cursor rewind. A registration
+/// is an idempotent fact and survives a fork.
 async fn retract_derived(
     conn: &mut AsyncPgConnection,
+    owner: Owner,
     chain_id: i64,
     from_block: i64,
 ) -> Result<usize, diesel::result::Error> {
-    let notes = delete_at_or_above!(conn, notes, chain_id, from_block);
-    let spent = delete_at_or_above!(conn, spent_nullifiers, chain_id, from_block);
-    let tree = delete_at_or_above!(conn, tree_advances, chain_id, from_block);
-    let flows = delete_at_or_above!(conn, asset_flows, chain_id, from_block);
-    let escrow = delete_at_or_above!(conn, deposit_escrowed_events, chain_id, from_block);
-    // Block-scoped, so it retracts like any other derived row. `asset_yield` is
-    // deliberately absent: it holds current state rather than per-block rows,
-    // and both halves of it self-heal — the polled columns are overwritten on
-    // the next tick, the event-sourced ones on the cursor rewind below.
-    let yield_fees = delete_at_or_above!(conn, yield_fee_events, chain_id, from_block);
-    Ok(notes + spent + tree + flows + escrow + yield_fees)
+    Ok(match owner {
+        Owner::Fmd => {
+            let notes = delete_at_or_above!(conn, notes, chain_id, from_block);
+            let spent = delete_at_or_above!(conn, spent_nullifiers, chain_id, from_block);
+
+            // `tree_state` holds one current row rather than per-block rows, so
+            // it cannot be trimmed to a block: its frontier already commits to
+            // the leaves being deleted above. Dropping it is correct because the
+            // cursor rewind below replays the chain from the start, and
+            // fmd-indexer rebuilds the row as it re-commits. Leaving it would
+            // keep serving a root for notes that no longer exist -- the one
+            // failure this table must not have.
+            let tree_st = diesel::delete(
+                crate::schema::tree_state::table
+                    .filter(crate::schema::tree_state::chain_id.eq(chain_id)),
+            )
+            .execute(conn)
+            .await?;
+
+            notes + spent + tree_st
+        }
+        Owner::Protocol => {
+            let tree = delete_at_or_above!(conn, tree_advances, chain_id, from_block);
+            let escrow = delete_at_or_above!(conn, deposit_escrowed_events, chain_id, from_block);
+            tree + escrow
+        }
+        Owner::Explorer => {
+            let flows = delete_at_or_above!(conn, asset_flows, chain_id, from_block);
+            let yield_fees = delete_at_or_above!(conn, yield_fee_events, chain_id, from_block);
+            flows + yield_fees
+        }
+    })
 }
 
 /// Rewind `name`'s cursor to the start and mark the reorg log processed to

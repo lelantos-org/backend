@@ -10,14 +10,15 @@ name = "explorer-webserver"
 path = "src/main.rs"
 
 [dependencies]
-shared = { path = "../shared", features = ["webserver"] }
+shared = { path = "../shared", features = ["webserver", "metrics-exporter"] }
+asset-registry = { path = "../asset-registry", features = ["http"] }
 database = { path = "../database" }
 prices = { path = "../prices" }
-# NOTE: must NOT depend on fmd-crypto. Privacy gate enforced in CI.
+# NOTE: must NOT depend on common-crypto. Privacy gate; a convention, not a CI
+# check, so a new dependency edge here has to be caught in review.
 tokio = { workspace = true }
 axum = { workspace = true }
 bigdecimal = { workspace = true }
-tower-http = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
 serde = { workspace = true }
@@ -28,7 +29,6 @@ chrono = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
-moka = { workspace = true }
 
 [build-dependencies]
 vergen-gix = { workspace = true }

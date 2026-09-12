@@ -1,0 +1,24 @@
+[package]
+name = "asset-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chain-types = { path = "../chain-types" }
+database = { path = "../database" }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+alloy = { workspace = true }
+bigdecimal = { workspace = true }
+chrono = { workspace = true }
+num-bigint = { workspace = true }
+shared = { path = "../shared", features = ["cache"] }
+thiserror = { workspace = true }
+
+[features]
+default = []
+# Adds `From<Error>` for `shared::http::AppError`. Only the webservers that use
+# that error type enable it; `relayer` has its own and maps this one itself, so
+# it must not be made to link axum.
+http = ["shared/webserver"]

@@ -1,3 +1,5 @@
+//! utoipa spec served at `/api-docs/openapi.json`.
+
 use crate::domain::models::{Quote, QuoteRequest, Venue};
 use crate::handlers::http as handlers;
 use utoipa::OpenApi;

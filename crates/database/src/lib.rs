@@ -18,6 +18,7 @@ pub mod listen;
 pub mod migrate;
 pub mod models;
 pub mod pool;
+pub mod raw_events;
 pub mod reorg;
 pub mod schema;
 
@@ -28,3 +29,4 @@ pub use listen::{
     CHANNEL_NOTES_APPENDED, CHANNEL_RAW_EVENTS_APPENDED, CHANNEL_RAW_EVENTS_REORG, Wake,
 };
 pub use pool::{DbConn, DbPool, PoolCfg, PoolError, build_pool};
+pub use raw_events::{RawEventRow, RawEventsError, RawEventsResult};

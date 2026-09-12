@@ -12,6 +12,7 @@ use fmd_indexer::repositories::notes::PostgresNotesRepo;
 use fmd_indexer::repositories::raw_events::PostgresRawEventsRepo;
 use fmd_indexer::repositories::spent_nullifiers::PostgresSpentNullifiersRepo;
 use fmd_indexer::repositories::subscriptions::PostgresSubscriptionsRepo;
+use fmd_indexer::repositories::tree_state::PostgresTreeStateRepo;
 use fmd_indexer::services::{ConsumeServiceImpl, FilterServiceImpl};
 use std::sync::Arc;
 use tracing::info;
@@ -54,6 +55,7 @@ async fn main() -> Result<()> {
     let spent_nfs = Arc::new(PostgresSpentNullifiersRepo::new(pool.clone()));
     let subscriptions = Arc::new(PostgresSubscriptionsRepo::new(pool.clone()));
     let matches = Arc::new(PostgresMatchesRepo::new(pool.clone()));
+    let tree_state = Arc::new(PostgresTreeStateRepo::new(pool.clone()));
 
     let consume = Arc::new(ConsumeServiceImpl::new(
         pool.clone(),
@@ -61,6 +63,7 @@ async fn main() -> Result<()> {
         raw_events,
         notes.clone(),
         spent_nfs,
+        tree_state,
         ChainLocks::enabled(&cfg.database_url),
     ));
     let filter = Arc::new(FilterServiceImpl::new(
@@ -80,14 +83,14 @@ async fn main() -> Result<()> {
     let consume_wake = listen::spawn(&cfg.database_url, CONSUME_CHANNELS);
     let filter_wake = listen::spawn(&cfg.database_url, FILTER_CHANNELS);
 
-    let consume_handle = tokio::spawn(worker::consume::run(
+    let consume_handle = tokio::spawn(worker::run(
         consume,
         cfg.consume_tick_ms(),
         cfg.consume_batch() as i64,
         shutdown.clone(),
         Some(consume_wake),
     ));
-    let filter_handle = tokio::spawn(worker::filter::run(
+    let filter_handle = tokio::spawn(worker::run(
         filter,
         cfg.filter_tick_ms,
         cfg.filter_batch as i64,

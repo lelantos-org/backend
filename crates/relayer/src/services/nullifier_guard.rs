@@ -22,6 +22,7 @@ use crate::domain::dto::{PubInputsDto, TRANSACT_IN};
 use crate::domain::error::{AppError, AppResult};
 use crate::repositories::spent_nullifiers;
 use database::DbPool;
+use shared::cache::{self, Cache};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,16 +102,14 @@ impl NullifierGuards {
 #[derive(Debug)]
 struct ChainNullifiers {
     in_flight: Mutex<HashSet<[u8; 32]>>,
-    recently_spent: moka::future::Cache<[u8; 32], ()>,
+    recently_spent: Cache<[u8; 32], ()>,
 }
 
 impl ChainNullifiers {
     fn new() -> Self {
         Self {
             in_flight: Mutex::new(HashSet::new()),
-            recently_spent: moka::future::Cache::builder()
-                .time_to_live(RECENTLY_SPENT_TTL)
-                .build(),
+            recently_spent: cache::Spec::ttl(RECENTLY_SPENT_TTL).build(),
         }
     }
 

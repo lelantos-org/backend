@@ -1,0 +1,51 @@
+[package]
+name = "rpc-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "rpc-proxy"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared", features = ["webserver", "metrics-exporter"] }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dotenvy = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+metrics = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+# `Address`, and ABI encoding for the Multicall3 pack. Taken from the workspace
+# pin rather than depending on `alloy-primitives` directly so this crate cannot
+# drift to a second version of the address type the rest of the backend passes
+# around.
+alloy = { workspace = true }
+# `IMulticall3` and its canonical address, shared with the indexers that batch
+# through it. The ABI alone: the `rpc` feature stays off.
+chain-types = { path = "../chain-types" }
+# GCRA rate limiting. Chosen over a hand-rolled bucket for its keyed store with
+# idle-key GC and `NotUntil::wait_time_from`, which is what makes an accurate
+# `Retry-After` possible. Its `quanta` and `dashmap` deps were already in the
+# lockfile via moka, so the added tree is small. `tower_governor` is
+# deliberately not used: it brings its own key extractors and error responses,
+# which would fight the layer ordering `shared::router::service_layers` fixes.
+governor = "0.8"
+
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the real router without binding a port, as the
+# `shared::router` tests do.
+tower = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+async-trait = { workspace = true }
+
+[build-dependencies]
+vergen-gix = { workspace = true }

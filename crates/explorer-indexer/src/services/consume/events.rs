@@ -1,68 +1,93 @@
-use crate::error::ExplorerIndexerError;
+//! Routing one decoded event into the row it writes.
+//!
+//! Pure: every function here builds a value and performs no IO. The rows are
+//! collected into a [`CommitPlan`] and written in batches once the whole window
+//! is decoded, rather than one statement — and one pool checkout — per event.
+
+use super::plan::CommitPlan;
 use crate::repositories::{
-    asset_flows::{self, NewAssetFlow},
-    asset_yield::{self, UpsertBinding},
-    assets::{self, UpsertAsset, UpsertAssetFee},
-    deposit_events::{self, NewDepositEscrowed},
-    raw_events::RawEventRow,
-    tree_advances::{self, TreeAdvanceRow},
-    yield_fee_events::{self, NewYieldFeeEvent},
+    asset_flows::NewAssetFlow,
+    yield_fee_events::{KIND_ACCRUED, KIND_SWEPT, NewYieldFeeEvent},
 };
-use crate::util::u256_to_bigdecimal;
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, U256};
 use bigdecimal::BigDecimal;
-use chain_types::decode::DepositFeeNote;
-use database::DbPool;
-use serde_json::json;
+use chain_types::decode::DecodedEvent;
+use chain_types::numeric::u256_to_bigdecimal;
+use database::RawEventRow;
 
-pub async fn asset_registered(
-    pool: &DbPool,
-    chain_id: i64,
-    asset_id: u64,
-    token: Address,
-    scale: U256,
-) -> Result<(), ExplorerIndexerError> {
-    assets::upsert(
-        pool,
-        UpsertAsset {
+/// Route one decoded event into the plan.
+///
+/// Pure and infallible: every arm builds a row and pushes it. What used to be a
+/// per-event `await` on the database is now an append to a `Vec`, and the whole
+/// window is written once by [`CommitPlan::apply`].
+///
+/// Most arms are empty. The fetch filter in `super::tick` keeps those kinds out,
+/// so they never reach here — the arms exist because the match has no wildcard,
+/// which is what makes a new event a compile error rather than a silent
+/// omission.
+pub fn plan_event(plan: &mut CommitPlan, chain_id: i64, row: &RawEventRow, event: DecodedEvent) {
+    match event {
+        DecodedEvent::AssetMoved {
+            asset_id,
+            token,
+            in_amount,
+            out_amount,
+            public_in,
+            public_out,
+        } => plan.flows.push(asset_moved(
+            chain_id, row, asset_id, token, in_amount, out_amount, public_in, public_out,
+        )),
+        DecodedEvent::PerfFeeAccrued {
+            asset_id,
+            units_minted,
+            ..
+        } => plan.yield_fees.push(yield_fee(
             chain_id,
-            asset_id_u64: asset_id as i64,
-            token: token.as_slice().to_vec(),
-            scale: u256_to_bigdecimal(scale),
-        },
-    )
-    .await
+            row,
+            asset_id,
+            KIND_ACCRUED,
+            units_minted,
+            None,
+        )),
+        DecodedEvent::NormalizedFeeSwept {
+            asset_id,
+            units,
+            amount,
+        } => plan.yield_fees.push(yield_fee(
+            chain_id,
+            row,
+            asset_id,
+            KIND_SWEPT,
+            units,
+            Some(amount),
+        )),
+
+        // Owned by fmd-indexer.
+        DecodedEvent::NoteCreated { .. } => {}
+        DecodedEvent::NullifierConsumed { .. } => {}
+
+        // Owned by protocol-indexer: the asset catalog, the yield bindings, and
+        // the two ledgers the relayer drains.
+        DecodedEvent::AssetRegistered { .. } => {}
+        DecodedEvent::AssetFeeSet { .. } => {}
+        DecodedEvent::RootAdvanced { .. } => {}
+        DecodedEvent::DepositEscrowed { .. } => {}
+        DecodedEvent::DepositFlushed { .. } => {}
+        DecodedEvent::DepositCanceled { .. } => {}
+        DecodedEvent::YieldAssetAdded { .. } => {}
+        DecodedEvent::YieldParamsSet { .. } => {}
+        DecodedEvent::HaltedSet { .. } => {}
+
+        // Write no derived state anywhere.
+        DecodedEvent::Rebalanced { .. } => {}
+        DecodedEvent::EmergencyUnwound { .. } => {}
+    }
 }
 
-/// Rates are mutable, so this replaces whatever was stored rather than filling
-/// a gap: a later `AssetFeeSet` for the same asset is a rate change, not a
-/// duplicate.
-pub async fn asset_fee_set(
-    pool: &DbPool,
-    chain_id: i64,
-    asset_id: u64,
-    deposit_bps: u16,
-    withdraw_bps: u16,
-) -> Result<(), ExplorerIndexerError> {
-    assets::upsert_fee(
-        pool,
-        UpsertAssetFee {
-            chain_id,
-            asset_id_u64: asset_id as i64,
-            // Both are `uint16` on chain but bounded by `MAX_FEE_BPS` (2000),
-            // so the cast to Postgres `SMALLINT` cannot lose a valid value.
-            deposit_bps: deposit_bps as i16,
-            withdraw_bps: withdraw_bps as i16,
-        },
-    )
-    .await
-}
-
-// One argument per `DecodedEvent::AssetMoved` field, as with `deposit_escrowed`
-// below; grouping them would only restate the variant.
+// One argument per `DecodedEvent::AssetMoved` field; grouping them would only
+// restate the variant.
 #[allow(clippy::too_many_arguments)]
-pub async fn asset_moved(
-    pool: &DbPool,
+fn asset_moved(
     chain_id: i64,
     row: &RawEventRow,
     asset_id: u64,
@@ -71,212 +96,20 @@ pub async fn asset_moved(
     out_amount: U256,
     public_in: u64,
     public_out: u64,
-) -> Result<(), ExplorerIndexerError> {
-    asset_flows::insert(
-        pool,
-        NewAssetFlow {
-            chain_id,
-            block_number: row.block_number,
-            log_index: row.log_index,
-            asset_id_u64: asset_id as i64,
-            token: token.as_slice().to_vec(),
-            in_amount: u256_to_bigdecimal(in_amount),
-            out_amount: u256_to_bigdecimal(out_amount),
-            tx_hash: row.tx_hash.clone(),
-            block_ts: row.block_ts,
-            public_in: Some(BigDecimal::from(public_in)),
-            public_out: Some(BigDecimal::from(public_out)),
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn deposit_escrowed(
-    pool: &DbPool,
-    chain_id: i64,
-    row: &RawEventRow,
-    id: U256,
-    payer: Address,
-    recipient: Address,
-    public_asset_id: u64,
-    public_in: u64,
-    fee_bps_at_submit: u16,
-    cm: B256,
-    cv_dep_x: U256,
-    cv_dep_y: U256,
-    rcv: U256,
-    aux: serde_json::Value,
-    fee: DepositFeeNote,
-) -> Result<(), ExplorerIndexerError> {
-    deposit_events::insert(
-        pool,
-        NewDepositEscrowed {
-            chain_id,
-            block_number: row.block_number,
-            log_index: row.log_index,
-            deposit_id: u256_to_bigdecimal(id),
-            payer: payer.as_slice().to_vec(),
-            recipient: recipient.as_slice().to_vec(),
-            public_asset_id: public_asset_id as i64,
-            public_in: u256_to_bigdecimal(U256::from(public_in)),
-            fee_bps_at_submit: i32::from(fee_bps_at_submit),
-            cm: cm.0.to_vec(),
-            cv_dep_x: u256_to_bigdecimal(cv_dep_x),
-            cv_dep_y: u256_to_bigdecimal(cv_dep_y),
-            rcv: u256_to_bigdecimal(rcv),
-            aux,
-            fee_in: u256_to_bigdecimal(U256::from(fee.fee_in)),
-            fee_cm: fee.cm.0.to_vec(),
-            fee_cv_dep_x: u256_to_bigdecimal(fee.cv_dep_x),
-            fee_cv_dep_y: u256_to_bigdecimal(fee.cv_dep_y),
-            fee_rcv: u256_to_bigdecimal(fee.rcv),
-            // Built here rather than by the caller so the fee leaf's payload
-            // keeps the same shape as the depositor's.
-            fee_aux: encode_aux(
-                fee.clue_rx,
-                fee.clue_ry,
-                fee.eph_pub_x,
-                fee.eph_pub_y,
-                &fee.ciphertext,
-            ),
-            // The digest the contract stored hashes `uint32(block.number)`,
-            // which on Arbitrum is the L1 height rather than `row.block_number`.
-            // Rows ingested before `evm_block_number` existed fall back to
-            // `block_number`: correct on every chain except Arbitrum, whose rows
-            // need an explicit repair.
-            submitted_at_block: row.evm_block_number.unwrap_or(row.block_number),
-            tx_hash: row.tx_hash.clone(),
-            block_ts: row.block_ts,
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-pub async fn deposit_flushed(
-    pool: &DbPool,
-    chain_id: i64,
-    row: &RawEventRow,
-    id: U256,
-) -> Result<(), ExplorerIndexerError> {
-    deposit_events::mark_flushed(
-        pool,
+) -> NewAssetFlow {
+    NewAssetFlow {
         chain_id,
-        u256_to_bigdecimal(id),
-        row.block_number,
-        row.block_ts,
-        row.tx_hash.clone(),
-    )
-    .await?;
-    Ok(())
-}
-
-pub async fn deposit_canceled(
-    pool: &DbPool,
-    chain_id: i64,
-    row: &RawEventRow,
-    id: U256,
-) -> Result<(), ExplorerIndexerError> {
-    deposit_events::mark_canceled(pool, chain_id, u256_to_bigdecimal(id), row.block_number).await?;
-    Ok(())
-}
-
-/// Encode the deposit leaf's aux blob as JSON for the `aux` column. A deposit
-/// occupies one leaf, so this is a single object rather than an array.
-pub fn encode_aux(
-    clue_rx: U256,
-    clue_ry: U256,
-    eph_pub_x: U256,
-    eph_pub_y: U256,
-    ciphertext: &[u8],
-) -> serde_json::Value {
-    json!({
-        "clueRx": clue_rx.to_string(),
-        "clueRy": clue_ry.to_string(),
-        "ephPubX": eph_pub_x.to_string(),
-        "ephPubY": eph_pub_y.to_string(),
-        "ciphertext": format!("0x{}", hex::encode(ciphertext)),
-    })
-}
-
-pub async fn root_advanced(
-    pool: &DbPool,
-    chain_id: i64,
-    row: &RawEventRow,
-    start_index: u64,
-    inserted: u64,
-    old_root: B256,
-    new_root: B256,
-) -> Result<(), ExplorerIndexerError> {
-    tree_advances::insert(
-        pool,
-        TreeAdvanceRow {
-            chain_id,
-            block_number: row.block_number,
-            log_index: row.log_index,
-            start_index: start_index as i64,
-            inserted: inserted as i32,
-            old_root: old_root.0.to_vec(),
-            new_root: new_root.0.to_vec(),
-            tx_hash: row.tx_hash.clone(),
-            block_ts: row.block_ts,
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-/// The venue binding. Emitted once per asset and never reversed, so the row
-/// this creates is what marks the asset yield-bearing.
-pub async fn yield_asset_added(
-    pool: &DbPool,
-    chain_id: i64,
-    asset_id: u64,
-    venue: Address,
-    buffer_bps: u16,
-    perf_bps: u16,
-) -> Result<(), ExplorerIndexerError> {
-    asset_yield::upsert_binding(
-        pool,
-        UpsertBinding {
-            chain_id,
-            asset_id_u64: asset_id as i64,
-            venue: venue.as_slice().to_vec(),
-            // `bufferBps` is bounded by `BPS_DENOMINATOR` and `perfBps` by
-            // `MAX_FEE_BPS`, so neither can lose a valid value as `SMALLINT`.
-            buffer_bps: buffer_bps as i16,
-            perf_bps: perf_bps as i16,
-        },
-    )
-    .await
-}
-
-pub async fn yield_params_set(
-    pool: &DbPool,
-    chain_id: i64,
-    asset_id: u64,
-    buffer_bps: u16,
-    perf_bps: u16,
-) -> Result<(), ExplorerIndexerError> {
-    asset_yield::set_params(
-        pool,
-        chain_id,
-        asset_id as i64,
-        buffer_bps as i16,
-        perf_bps as i16,
-    )
-    .await
-}
-
-pub async fn halted_set(
-    pool: &DbPool,
-    chain_id: i64,
-    asset_id: u64,
-    halted: bool,
-) -> Result<(), ExplorerIndexerError> {
-    asset_yield::set_halted(pool, chain_id, asset_id as i64, halted).await
+        block_number: row.block_number,
+        log_index: row.log_index,
+        asset_id_u64: asset_id as i64,
+        token: token.as_slice().to_vec(),
+        in_amount: u256_to_bigdecimal(in_amount),
+        out_amount: u256_to_bigdecimal(out_amount),
+        tx_hash: row.tx_hash.clone(),
+        block_ts: row.block_ts,
+        public_in: Some(BigDecimal::from(public_in)),
+        public_out: Some(BigDecimal::from(public_out)),
+    }
 }
 
 /// A treasury fee event, accrued or swept.
@@ -284,28 +117,23 @@ pub async fn halted_set(
 /// One function for both because they differ only in `kind` and whether tokens
 /// moved: an accrual mints units to the treasury and moves nothing, which is
 /// why `amount` is `None` there and why this log is the only trace of it.
-pub async fn yield_fee(
-    pool: &DbPool,
+fn yield_fee(
     chain_id: i64,
     row: &RawEventRow,
     asset_id: u64,
     kind: i16,
     units: U256,
     amount: Option<U256>,
-) -> Result<(), ExplorerIndexerError> {
-    yield_fee_events::insert(
-        pool,
-        NewYieldFeeEvent {
-            chain_id,
-            asset_id_u64: asset_id as i64,
-            block_number: row.block_number,
-            block_ts: row.block_ts,
-            tx_hash: row.tx_hash.clone(),
-            log_index: row.log_index,
-            kind,
-            units: u256_to_bigdecimal(units),
-            amount: amount.map(u256_to_bigdecimal),
-        },
-    )
-    .await
+) -> NewYieldFeeEvent {
+    NewYieldFeeEvent {
+        chain_id,
+        asset_id_u64: asset_id as i64,
+        block_number: row.block_number,
+        block_ts: row.block_ts,
+        tx_hash: row.tx_hash.clone(),
+        log_index: row.log_index,
+        kind,
+        units: u256_to_bigdecimal(units),
+        amount: amount.map(u256_to_bigdecimal),
+    }
 }

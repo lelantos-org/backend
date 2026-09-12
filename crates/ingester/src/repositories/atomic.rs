@@ -28,7 +28,12 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 /// Postgres caps a statement at 65535 bind parameters and each row binds 10, so
 /// the hard ceiling is 6553 rows. A single backfill chunk can exceed that on a
 /// busy pool.
-const INSERT_CHUNK_ROWS: usize = 1_000;
+///
+/// Sized just under the ceiling rather than comfortably below it: the chunking
+/// exists only to stay inside the bind limit, and every statement short of it is
+/// another round trip inside a transaction the rest of the pipeline is waiting
+/// on.
+const INSERT_CHUNK_ROWS: usize = 6_000;
 
 #[async_trait]
 pub trait AtomicWriteRepo: Send + Sync {

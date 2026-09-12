@@ -27,9 +27,9 @@ receipt_timeout_s = 60
 flush_interval_s = 5
 # A deposit mints two leaves — the depositor's note and the note paying
 # whoever flushes it — so one `flushBatch` carries at most
-# `MAX_L_BATCH / LEAVES_PER_DEPOSIT = 2` deposits. The relayer clamps to that
-# at boot; a larger number here just asserts a throughput it will not get.
-flush_max_n = 2
+# `MAX_L_BATCH / LEAVES_PER_DEPOSIT = 8 / 2 = 4` deposits. The relayer clamps to
+# that at boot; a larger number here just asserts a throughput it will not get.
+flush_max_n = 4
 flush_max_attempts = 5
 
 # swap_wrapper_address / native_adapter_address are injected by deploy.sh via
@@ -58,23 +58,19 @@ shielded_fee_grace_bps = 300
 # a payer can only pay in the asset they are already moving.
 shielded_fee_assets = []
 
-# Served verbatim by `/chains` for wallets to boot from; the relayer reads
-# none of it. `rpc_url` here is the browser-reachable endpoint, deliberately
-# not the `rpc_url` above (`http://anvil:8545` only resolves inside compose).
-[chains.public]
-name = "anvil"
-rpc_url = "http://localhost:8545"
-tree_depth = 11
-# Injected by deploy-contracts.sh as RELAYER_CHAIN_<id>_PERMIT2_ADDRESS. It was
-# a literal, which rotted whenever the deploy order shifted: DeployTest deploys
-# a fresh Permit2 when the canonical address has no code, so the stale literal
-# resolved to a contract with no `allowance` and every wallet's setup probe
-# failed with `returned no data ("0x")`.
+# The chain's name, browser RPC, explorer, Permit2 and tree depth used to live
+# here as `[chains.public]` and be served by `/chains`. They describe the
+# *deployment*, not this relayer, so they are config/dev/registry.toml's now —
+# see that file's `[[chains]]`. `/chains` publishes only what this relayer can
+# answer for itself, and the depth it reports is the compiled-in `tree::DEPTH`
+# rather than anything declared here.
 
 # ── second chain, for exercising the frontend's chain switcher ───────────
 #
 # Points at the SAME anvil and the SAME pool as 31337. It exists so `/chains`
-# returns two entries and `ChainSwitcher` stops hiding itself; it is not an
+# returns two entries and `ChainSwitcher` stops hiding itself. The wallet
+# intersects this with registry-webserver's list, so config/dev/registry.toml
+# has to declare 31338 too — it does. It is not an
 # independent deployment and nothing indexes it, so it shows zero leaves and
 # no tokens.
 #
@@ -96,28 +92,24 @@ tree_depth = 11
 #
 # A real second chain means a second anvil + deploy, and per-chain config in
 # the three indexers.
-[[chains]]
-chain_id = 31338
-rpc_url = "http://anvil:8545"
-# Overridden by RELAYER_CHAIN_31338_POOL_ADDRESS (the deployed MASP).
-pool_address = "0x0000000000000000000000000000000000000000"
-# Anvil deterministic account #1 — public test key, same as 31337 above.
-signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-receipt_timeout_s = 60
-flush_interval_s = 5
-# See the note on 31337 above: two leaves per deposit caps a batch at two.
-flush_max_n = 2
-flush_max_attempts = 5
+#
+# Disabled 2026-09-11: a relayer restart after the first deposit crash-looped on
+# the divergence described above. Uncomment to bring the switcher back; it
+# boots only on an empty pool.
+# [[chains]]
+# chain_id = 31338
+# rpc_url = "http://anvil:8545"
+# # Overridden by RELAYER_CHAIN_31338_POOL_ADDRESS (the deployed MASP).
+# pool_address = "0x0000000000000000000000000000000000000000"
+# # Anvil deterministic account #1 — public test key, same as 31337 above.
+# signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+# receipt_timeout_s = 60
+# flush_interval_s = 5
+# # See the note on 31337 above: two leaves per deposit caps a batch at four.
+# flush_max_n = 4
+# flush_max_attempts = 5
 
-[chains.public]
-name = "anvil-2"
-rpc_url = "http://localhost:8545"
-tree_depth = 11
-# Injected by deploy-contracts.sh as RELAYER_CHAIN_<id>_PERMIT2_ADDRESS. It was
-# a literal, which rotted whenever the deploy order shifted: DeployTest deploys
-# a fresh Permit2 when the canonical address has no code, so the stale literal
-# resolved to a contract with no `allowance` and every wallet's setup probe
-# failed with `returned no data ("0x")`.
+# Described in config/dev/registry.toml, as chain 31337 above is.
 
 [price_oracle]
 # The `oracle` service in docker-compose.yml, not Coinbase. Fee-token pairs are

@@ -1,9 +1,12 @@
+//! The token-scoped match feed behind `/v1/matches`.
+
 use crate::app::AppState;
 use crate::app::cache::MatchesPageKey;
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
+use crate::domain::field::pack_point_hex;
 use crate::domain::responses::{MatchOut, MatchesPage};
 use crate::repositories::matches;
-use crate::services::field::pack_point_hex;
+use crate::services::cached;
 use std::sync::Arc;
 
 /// One request for a page of matches.
@@ -39,15 +42,12 @@ impl ListRequest {
 /// low re-delivers rows rather than skipping them.
 #[tracing::instrument(skip(st))]
 pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>> {
-    let key = req.cache_key();
     let pool = st.pool.clone();
-    let probe = shared::metrics::CacheProbe::new("matches_pages");
-    let miss = probe.marker();
-    let out = st
-        .cache
-        .matches_pages
-        .try_get_with(key, async move {
-            miss.mark();
+    cached(
+        &st.cache.matches_pages,
+        "matches_pages",
+        req.cache_key(),
+        async move {
             let rows = matches::list_for_subscription(
                 &pool,
                 req.subscription_id,
@@ -56,7 +56,7 @@ pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>
                 req.limit,
             )
             .await?;
-            let out: Vec<MatchOut> = rows
+            let out = rows
                 .into_iter()
                 .map(|m| {
                     Ok(MatchOut {
@@ -70,15 +70,11 @@ pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>
                     })
                 })
                 .collect::<AppResult<Vec<_>>>()?;
-            Ok::<_, AppError>(Arc::new(MatchesPage {
+            Ok(Arc::new(MatchesPage {
                 backfilled_through_note_id: req.backfilled_through,
                 matches: out,
             }))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
-    // Recorded after the await and on the error path: a failed load is still a
-    // miss.
-    probe.record();
-    out
+        },
+    )
+    .await
 }

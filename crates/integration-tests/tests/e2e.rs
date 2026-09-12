@@ -1,6 +1,6 @@
 //! Integration tests for the indexer halves.
 //!
-//! Drives fmd-indexer and explorer-indexer over synthetic `raw_events`
+//! Drives fmd-indexer and protocol-indexer over synthetic `raw_events`
 //! representing one MASP `transact()` call:
 //!
 //! ```text
@@ -10,7 +10,7 @@
 //! ```
 //!
 //! Asserts that fmd-indexer's consume populates `notes` with `leaf_index` in
-//! {0, 1}, and that explorer-indexer's consume populates `tree_advances` with
+//! {0, 1}, and that protocol-indexer's consume populates `tree_advances` with
 //! `start_index = 0`.
 //!
 //! Anvil, the relayer and snarkjs are not booted here; they need node and
@@ -63,6 +63,7 @@ async fn fmd_consume_pairs_root_advanced_with_note_created() {
         raw_events_repo,
         notes_repo,
         spent_nfs_repo,
+        Arc::new(fmd_indexer::repositories::tree_state::PostgresTreeStateRepo::new(pool.clone())),
         fmd_indexer::adapters::locks::ChainLocks::disabled(),
     );
     use fmd_indexer::services::consume::ConsumeService;
@@ -101,7 +102,7 @@ async fn explorer_consume_writes_tree_advances() {
     .await;
     insert_asset_registered_event(&pool, CHAIN_ID, 200, 1700000100, &tx, 1, 1).await;
 
-    let cfg = Arc::new(explorer_indexer::config::ExplorerIndexerConfig {
+    let cfg = Arc::new(protocol_indexer::config::ProtocolIndexerConfig {
         database_url: String::new(),
         chains: Vec::new(),
         tick_ms: 1000,
@@ -109,14 +110,15 @@ async fn explorer_consume_writes_tree_advances() {
     });
     // No chains and no metadata RPC, so the decimals sweep is a no-op and this
     // covers event consumption only.
-    let ctx = explorer_indexer::services::consume::ConsumeCtx {
+    let ctx = protocol_indexer::services::consume::ConsumeCtx {
         pool: pool.clone(),
         cfg,
         token_meta: Arc::new(std::collections::HashMap::new()),
+        refresh: Arc::new(protocol_indexer::services::consume::RefreshGate::new()),
     };
-    let _ = explorer_indexer::services::consume::tick_chain(&ctx, CHAIN_ID, 100)
+    let _ = protocol_indexer::services::consume::tick_chain(&ctx, CHAIN_ID, 100)
         .await
-        .expect("explorer consume tick");
+        .expect("protocol consume tick");
 
     let mut conn = pool.get().await.unwrap();
     let advances: Vec<(i64, i32, Vec<u8>, Vec<u8>)> = tree_advances::table
@@ -152,6 +154,7 @@ const TABLES: &[&str] = &[
     "matches",
     "subscriptions",
     "spent_nullifiers",
+    "tree_state",
 ];
 
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
@@ -605,7 +608,7 @@ async fn list_matches_returns_only_the_requested_chains_notes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn asset_metadata_write_leaves_the_column_it_omits_alone() {
     use database::schema::assets;
-    use explorer_indexer::repositories::assets as repo;
+    use protocol_indexer::repositories::assets as repo;
 
     let (pool, _guard) = fresh_pool().await;
 

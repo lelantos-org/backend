@@ -17,11 +17,11 @@
 //! [4 + 5*MAX_L .. 3 + 6*MAX_L]   isDeposit[0 .. MAX_L-1]
 //! ```
 
-use crate::adapters::calldata::{MAX_L_BATCH, PaddedBatch};
-use crate::adapters::parse::BN254_R;
+use crate::domain::batch::{MAX_L_BATCH, PaddedBatch};
+use crate::domain::field::BN254_R;
 use alloy::primitives::{U256, keccak256};
 use alloy::sol_types::SolValue;
-use fmd_crypto::tree::Field;
+use common_crypto::tree::Field;
 
 pub fn compute_z(
     old_root: &Field,

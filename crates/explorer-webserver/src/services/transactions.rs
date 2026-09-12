@@ -1,6 +1,6 @@
 use crate::app::AppState;
-use crate::domain::amount::{plain_amount, whole_tokens};
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::amount::{plain_amount, whole_tokens_str};
+use crate::domain::error::AppResult;
 use crate::domain::responses::{KindCounts, TxKind, TxOut};
 use crate::repositories::transactions::{self, KindCountRow};
 use std::collections::BTreeMap;
@@ -15,46 +15,45 @@ pub async fn recent(
     limit: i64,
 ) -> AppResult<Arc<Vec<TxOut>>> {
     let key = (chain_id, since_ts, kind, limit);
-    let cache = st.cache.transactions.clone();
     let pool = st.pool.clone();
-    cache
-        .try_get_with(key, async move {
-            let rows =
-                transactions::recent(&pool, chain_id, since_ts, kind.map(TxKind::as_str), limit)
-                    .await?;
-            let out: Vec<TxOut> = rows
-                .into_iter()
-                .filter_map(|r| {
-                    // An unrecognised kind means the SQL and this enum have
-                    // drifted; drop the row rather than mislabel it.
-                    let Some(kind) = TxKind::parse(&r.kind) else {
-                        warn!(kind = %r.kind, "unknown transaction kind");
-                        return None;
-                    };
-                    Some(TxOut {
-                        chain_id: r.chain_id,
-                        tx_hash_hex: hex::encode(&r.tx_hash),
-                        block_number: r.block_number,
-                        block_ts: r.block_ts,
-                        kind,
-                        asset_id_u64: r.asset_id_u64,
-                        amount: r
-                            .amount
-                            .as_ref()
-                            .and_then(|a| whole_tokens(a, r.decimals))
-                            .map(|a| a.normalized().to_string()),
-                        // Passed through unconverted: the denomination is the
-                        // raw circuit integer the cohort is grouped by, and
-                        // converting it to whole tokens would key the join on a
-                        // value that moves with the yield index.
-                        public_out: r.public_out.as_ref().map(plain_amount),
-                    })
+    super::cached(&st.cache.transactions, key, async move {
+        let rows = transactions::recent(&pool, chain_id, since_ts, kind.map(TxKind::as_str), limit)
+            .await?;
+        let out: Vec<TxOut> = rows
+            .into_iter()
+            .filter_map(|r| {
+                // An unrecognised kind means the SQL and this enum have drifted;
+                // drop the row rather than mislabel it.
+                let Some(kind) = TxKind::parse(&r.kind) else {
+                    warn!(kind = %r.kind, "unknown transaction kind");
+                    return None;
+                };
+                Some(TxOut {
+                    chain_id: r.chain_id,
+                    tx_hash_hex: hex::encode(&r.tx_hash),
+                    block_number: r.block_number,
+                    block_ts: r.block_ts,
+                    kind,
+                    asset_id_u64: r.asset_id_u64,
+                    // `whole_tokens_str`, so a dust amount renders plainly
+                    // rather than in exponent form. `to_string()` here used to
+                    // emit `2E-18` for one wei of an 18-decimal token while
+                    // every other endpoint rendered it in full.
+                    amount: r
+                        .amount
+                        .as_ref()
+                        .and_then(|a| whole_tokens_str(a, r.decimals)),
+                    // Passed through unconverted: the denomination is the raw
+                    // circuit integer the cohort is grouped by, and converting it
+                    // to whole tokens would key the join on a value that moves
+                    // with the yield index.
+                    public_out: r.public_out.as_ref().map(plain_amount),
                 })
-                .collect();
-            Ok::<_, AppError>(Arc::new(out))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+            })
+            .collect();
+        Ok(Arc::new(out))
+    })
+    .await
 }
 
 pub async fn kind_counts(
@@ -64,15 +63,12 @@ pub async fn kind_counts(
     since_ts: Option<i64>,
 ) -> AppResult<Arc<Vec<KindCounts>>> {
     let key = (chain_id, bucket_sec, since_ts);
-    let cache = st.cache.tx_kinds.clone();
     let pool = st.pool.clone();
-    cache
-        .try_get_with(key, async move {
-            let rows = transactions::kind_counts(&pool, chain_id, bucket_sec, since_ts).await?;
-            Ok::<_, AppError>(Arc::new(fold(rows)))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&st.cache.tx_kinds, key, async move {
+        let rows = transactions::kind_counts(&pool, chain_id, bucket_sec, since_ts).await?;
+        Ok(Arc::new(fold(rows)))
+    })
+    .await
 }
 
 /// Pivot (bucket, kind, count) rows into one row per bucket.

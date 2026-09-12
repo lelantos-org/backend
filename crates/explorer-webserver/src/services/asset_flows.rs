@@ -1,7 +1,7 @@
 use crate::adapters::{TokenKey, TokenPrice};
 use crate::app::AppState;
 use crate::domain::amount::{plain_amount, whole_tokens};
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::responses::FlowPoint;
 use crate::repositories::asset_flows::{self, FlowBucketRow};
 use bigdecimal::{BigDecimal, ToPrimitive};
@@ -18,20 +18,18 @@ pub async fn flows(
     let key = (chain_id, asset_id_u64, bucket_sec, since_ts);
     let cache = st.cache.asset_flows.clone();
     let st = st.clone();
-    cache
-        .try_get_with(key, async move {
-            let rows =
-                asset_flows::flow_buckets(&st.pool, chain_id, asset_id_u64, bucket_sec, since_ts)
-                    .await?;
-            let keys: Vec<TokenKey> = rows
-                .iter()
-                .map(|r| (r.chain_id, r.token_hex.clone()))
-                .collect();
-            let prices = super::prices::for_tokens(&st, &keys).await;
-            Ok::<_, AppError>(Arc::new(fold(rows, &prices)))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&cache, key, async move {
+        let rows =
+            asset_flows::flow_buckets(&st.pool, chain_id, asset_id_u64, bucket_sec, since_ts)
+                .await?;
+        let keys: Vec<TokenKey> = rows
+            .iter()
+            .map(|r| TokenKey::new(r.chain_id, r.token_hex.clone()))
+            .collect();
+        let prices = super::prices::for_tokens(&st, &keys).await;
+        Ok(Arc::new(fold(rows, &prices)))
+    })
+    .await
 }
 
 #[derive(Default)]
@@ -82,7 +80,7 @@ fn fold(rows: Vec<FlowBucketRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec
         }
 
         let usd = prices
-            .get(&(r.chain_id, r.token_hex.clone()))
+            .get(&TokenKey::new(r.chain_id, r.token_hex.clone()))
             .and_then(|p| {
                 let into = super::prices::to_usd(r.in_base.to_f64()?, r.decimals, p)?;
                 let out = super::prices::to_usd(r.out_base.to_f64()?, r.decimals, p)?;
@@ -131,7 +129,7 @@ mod tests {
 
     fn priced(token: &str, price_usd: f64, decimals: u32) -> (TokenKey, TokenPrice) {
         (
-            (1, token.to_string()),
+            TokenKey::new(1, token),
             TokenPrice {
                 price_usd,
                 decimals: Some(decimals),

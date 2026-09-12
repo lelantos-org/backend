@@ -170,6 +170,9 @@ async fn spawn(pool: &database::DbPool) -> String {
     let cfg = Arc::new(RiskWebserverConfig {
         database_url: String::new(),
         bind_addr: String::new(),
+        // Never bound: this fixture serves the router directly, and no exporter
+        // is installed in a test process.
+        metrics_addr: String::new(),
         cache_ttl_s: 60,
     });
     let state = build_state(cfg, pool.clone());

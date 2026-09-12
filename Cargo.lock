@@ -1158,6 +1158,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "367c9c827ed431bff6868b7aa926e05b16eb46603cc8b6e768e4a5553fa1d155"
 dependencies = [
+ "colored",
  "num-traits",
  "rand 0.8.6",
  "rayon",
@@ -1174,6 +1175,22 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+
+[[package]]
+name = "asset-registry"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "bigdecimal",
+ "chain-types",
+ "chrono",
+ "database",
+ "diesel",
+ "diesel-async",
+ "num-bigint",
+ "shared",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "async-lock"
@@ -1675,9 +1692,12 @@ name = "chain-types"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "bigdecimal",
  "hex",
+ "reqwest",
  "shared",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -1811,6 +1831,37 @@ name = "cmov"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f88a43d011fc4a6876cb7344703e297c71dda42494fee094d5f7c76bf13f746"
+
+[[package]]
+name = "colored"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
+dependencies = [
+ "lazy_static",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "common-crypto"
+version = "0.1.0"
+dependencies = [
+ "ark-ec 0.4.2",
+ "ark-ed-on-bn254",
+ "ark-ff 0.4.2",
+ "blake2",
+ "chacha20poly1305",
+ "criterion",
+ "hex",
+ "light-poseidon",
+ "num-bigint",
+ "rand 0.8.6",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "zeroize",
+]
 
 [[package]]
 name = "concurrent-queue"
@@ -2591,12 +2642,8 @@ dependencies = [
  "diesel",
  "diesel-async",
  "dotenvy",
- "futures",
- "hex",
  "serde",
- "serde_json",
  "shared",
- "test-support",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -2608,6 +2655,7 @@ name = "explorer-webserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asset-registry",
  "axum",
  "bigdecimal",
  "chrono",
@@ -2616,16 +2664,25 @@ dependencies = [
  "diesel-async",
  "dotenvy",
  "hex",
- "moka",
  "prices",
  "serde",
  "shared",
  "tokio",
- "tower-http",
  "tracing",
  "utoipa",
  "utoipa-swagger-ui",
  "vergen-gix",
+]
+
+[[package]]
+name = "eyre"
+version = "0.6.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c08309dbcc659c5549a24ddb9b27027640641b282ef5768267c7e675558986a3"
+dependencies = [
+ "autocfg",
+ "indenter",
+ "once_cell",
 ]
 
 [[package]]
@@ -2728,27 +2785,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fmd-crypto"
-version = "0.1.0"
-dependencies = [
- "ark-ec 0.4.2",
- "ark-ed-on-bn254",
- "ark-ff 0.4.2",
- "blake2",
- "chacha20poly1305",
- "criterion",
- "hex",
- "light-poseidon",
- "num-bigint",
- "rand 0.8.6",
- "rayon",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
 name = "fmd-indexer"
 version = "0.1.0"
 dependencies = [
@@ -2760,11 +2796,11 @@ dependencies = [
  "bigdecimal",
  "chain-types",
  "chrono",
+ "common-crypto",
  "database",
  "diesel",
  "diesel-async",
  "dotenvy",
- "fmd-crypto",
  "hex",
  "metrics",
  "rayon",
@@ -2783,24 +2819,20 @@ name = "fmd-webserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ark-ed-on-bn254",
- "ark-ff 0.4.2",
  "axum",
  "bigdecimal",
  "chrono",
+ "common-crypto",
  "database",
  "diesel",
  "diesel-async",
  "dotenvy",
- "fmd-crypto",
  "hex",
- "metrics",
- "moka",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "shared",
  "tokio",
- "tower-http",
  "tracing",
  "utoipa",
  "utoipa-swagger-ui",
@@ -2919,6 +2951,12 @@ name = "futures-task"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+
+[[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
 
 [[package]]
 name = "futures-util"
@@ -3756,6 +3794,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "governor"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be93b4ec2e4710b04d9264c0c7350cdd62a8c20e5e4ac732552ebb8f0debe8eb"
+dependencies = [
+ "cfg-if",
+ "dashmap",
+ "futures-sink",
+ "futures-timer",
+ "futures-util",
+ "getrandom 0.3.4",
+ "no-std-compat",
+ "nonzero_ext",
+ "parking_lot",
+ "portable-atomic",
+ "quanta",
+ "rand 0.9.4",
+ "smallvec",
+ "spinning_top",
+ "web-time",
+]
+
+[[package]]
+name = "groth16"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254 0.6.0",
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-groth16",
+ "ark-poly 0.6.0",
+ "ark-relations 0.6.0",
+ "ark-serialize 0.6.0",
+ "ark-snark",
+ "async-trait",
+ "byteorder",
+ "circom-witnesscalc",
+ "num-bigint",
+ "num-traits",
+ "rand 0.8.6",
+ "rayon",
+ "serde",
+ "serde_json",
+ "taceo-groth16",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4233,6 +4322,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "indenter"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "964de6e86d545b246d84badc0fef527924ace5134f30641c203ef52ba83f58d5"
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4315,16 +4410,17 @@ dependencies = [
  "bigdecimal",
  "chain-types",
  "chrono",
+ "common-crypto",
  "database",
  "diesel",
  "diesel-async",
  "explorer-indexer",
  "explorer-webserver",
- "fmd-crypto",
  "fmd-indexer",
  "fmd-webserver",
  "hex",
  "ingester",
+ "protocol-indexer",
  "reqwest",
  "serde_json",
  "shared",
@@ -4708,17 +4804,19 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "chain-types",
  "dotenvy",
  "futures",
  "mockall",
  "serde",
+ "serde_json",
  "shared",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "url",
  "utoipa",
  "utoipa-swagger-ui",
+ "vergen-gix",
 ]
 
 [[package]]
@@ -4886,6 +4984,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
+name = "no-std-compat"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4894,6 +4998,12 @@ dependencies = [
  "memchr",
  "minimal-lexical",
 ]
+
+[[package]]
+name = "nonzero_ext"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 
 [[package]]
 name = "nu-ansi-term"
@@ -5374,10 +5484,11 @@ name = "prices"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "moka",
+ "async-trait",
  "reqwest",
  "serde",
  "serde_json",
+ "shared",
  "tokio",
  "tracing",
 ]
@@ -5511,6 +5622,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "protocol-indexer"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "async-trait",
+ "bigdecimal",
+ "chain-types",
+ "database",
+ "diesel",
+ "diesel-async",
+ "dotenvy",
+ "futures",
+ "hex",
+ "serde",
+ "serde_json",
+ "shared",
+ "test-support",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "vergen-gix",
 ]
 
 [[package]]
@@ -5826,38 +5962,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "registry-webserver"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "asset-registry",
+ "axum",
+ "bigdecimal",
+ "chain-types",
+ "chrono",
+ "database",
+ "diesel",
+ "diesel-async",
+ "dotenvy",
+ "hex",
+ "prices",
+ "serde",
+ "serde_json",
+ "shared",
+ "test-support",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "vergen-gix",
+]
+
+[[package]]
 name = "relayer"
 version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
- "ark-bn254 0.6.0",
- "ark-ec 0.6.0",
- "ark-ff 0.6.0",
- "ark-groth16",
- "ark-poly 0.6.0",
- "ark-relations 0.6.0",
- "ark-serialize 0.6.0",
- "ark-snark",
+ "asset-registry",
  "async-trait",
  "axum",
  "bech32",
  "bigdecimal",
- "byteorder",
- "circom-witnesscalc",
+ "chain-types",
+ "common-crypto",
  "database",
  "diesel",
  "diesel-async",
  "dotenvy",
- "fmd-crypto",
  "futures",
+ "groth16",
  "hex",
- "moka",
- "num-bigint",
- "num-traits",
  "parking_lot",
- "prices",
- "rand 0.8.6",
  "rayon",
  "reqwest",
  "serde",
@@ -5867,11 +6019,8 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
- "toml 0.8.23",
  "tower-http",
  "tracing",
- "tracing-subscriber 0.3.23",
- "url",
  "vergen-gix",
 ]
 
@@ -5950,14 +6099,12 @@ dependencies = [
  "diesel-async",
  "dotenvy",
  "mockall",
- "moka",
  "reqwest",
  "serde",
  "serde_json",
  "shared",
  "test-support",
  "tokio",
- "tower-http",
  "tracing",
  "utoipa",
  "utoipa-swagger-ui",
@@ -5972,6 +6119,31 @@ checksum = "bb919243f34364b6bd2fc10ef797edbfa75f33c252e7998527479c6d6b47e1ec"
 dependencies = [
  "bytes",
  "rustc-hex",
+]
+
+[[package]]
+name = "rpc-proxy"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chain-types",
+ "dotenvy",
+ "governor",
+ "hex",
+ "metrics",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shared",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tracing",
+ "vergen-gix",
 ]
 
 [[package]]
@@ -6511,10 +6683,12 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "hex",
  "metrics",
  "metrics-exporter-prometheus",
  "moka",
  "serde",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
@@ -6614,6 +6788,15 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spinning_top"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d96d2d1d716fb500937168cc09353ffdc7a012be8475ac7308e1bdf0e3923300"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]
@@ -6760,6 +6943,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "taceo-ark-algebra"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba6414282303de2123e0bcd5840444d7eb5cf4df40b41a33799a967a5d91584b"
+dependencies = [
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-poly 0.6.0",
+ "ark-std 0.6.0",
+ "rayon",
+]
+
+[[package]]
+name = "taceo-groth16"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c15455295f924d5d96712127577ca5857487f159c26578f05774198de328415f"
+dependencies = [
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-groth16",
+ "ark-relations 0.6.0",
+ "eyre",
+ "rayon",
+ "taceo-ark-algebra",
+ "tracing",
+]
+
+[[package]]
 name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6794,9 +7006,11 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 name = "test-support"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "database",
  "diesel",
  "diesel-async",
+ "shared",
  "testcontainers",
  "testcontainers-modules",
  "tokio",

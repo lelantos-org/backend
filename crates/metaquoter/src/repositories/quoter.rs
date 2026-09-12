@@ -1,3 +1,9 @@
+//! The venue trait.
+//!
+//! Named for its layer position; an upstream quote source is RPC-backed here
+//! rather than database-backed, but it is the same role — the one place the
+//! service layer reads routes from.
+
 use crate::domain::error::AppError;
 use crate::domain::models::{Quote, QuoteRequest, Venue};
 use async_trait::async_trait;

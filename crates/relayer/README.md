@@ -5,9 +5,11 @@ relayer builds the batch witness against its mirror of the commitment tree,
 proves `tree_update_batch` with Groth16, and submits the transaction. A cron
 worker does the same for escrowed deposits.
 
-It keeps **no tables of its own**: the tree mirror is rebuilt at startup from
-`notes` + `tree_advances`, and the pending-deposit queue is re-read from
-`deposit_escrowed_events` on every tick.
+It keeps **no tables of its own**: the tree mirror resumes at startup from
+fmd-indexer's `tree_state` frontier, checked against `tree_advances` and the
+pool's own `currentRoot()`, and the pending-deposit queue is re-read from
+`deposit_escrowed_events` on every tick. A chain with no `tree_state` row yet
+falls back to replaying `notes`.
 
 ## Run
 
@@ -34,6 +36,7 @@ leaving them unable to tell a failed spend from a landed one.
 |-------|-------|
 | `GET /health` | version + commit |
 | `GET /chains` | Per-chain registry: leaf count, current root, MASP + relayer addresses, `desynced`, the wallet-facing config block, the registered assets, and the [shielded fee](#shielded-fees) terms where one is charged |
+| `POST /v1/deposit/estimate` | Fee quote for a deposit, before one is escrowed |
 | `POST /v1/spend` | `transfer` / `withdraw` / `withdrawNative`. Honours `Idempotency-Key`. **402** when a required shielded fee is missing or short |
 | `POST /v1/spend/estimate` | Fee quote for the same payload, including the note value to pay. Does **not** prove or submit |
 | `POST /v1/swap` | Leg-1 SNARK + leg-2 escrow blob via `SwapWrapper` |
@@ -52,26 +55,17 @@ itself: the mirror mutex is held from reserve through confirmation, so locking
 it here would park the endpoint every wallet boots from behind whatever
 submission is in flight.
 
-Each yield-bearing asset also carries an estimated annual rate, `apyBps`, with
-the window it was measured over. Nothing on chain publishes a rate: `yieldState`
-returns an index and no timestamp, and `asset_yield` is overwritten on every
-indexer pass, so one has to be measured. A background worker per chain does it
-two ways, preferring the first:
+A yield-bearing asset carries its venue, `gross`, `supply` and `index` here —
+what a wallet needs to size a shield against *this* relayer's pool — but **no
+rate**. The estimated annual rate lives on
+[registry-webserver](../registry-webserver/README.md)'s `/v1/assets`, which is
+also where it is measured and stored. A rate is a property of the venue, the
+same for every relayer serving the chain, so a relayer republishing one would be
+asserting a deployment-wide fact from a service a wallet cannot check it
+against — and a self-hosted relayer could assert whatever it liked.
 
-1. **From the recorded index.** Every pass copies the current index into
-   `asset_yield_sample`, so once that history reaches back a window the rate is a
-   subtraction against a row this deployment wrote down — no archive state, no
-   RPC, and exact, since the index is already net of the performance fee and the
-   idle buffer.
-2. **From the venue's vault.** Until the history fills, the ERC-4626 vault is the
-   older object and its share price carries the history a fresh pool lacks. Two
-   `convertToAssets` reads a window apart, corrected for what the pool keeps.
-   This one needs an RPC serving state that far back, and is skipped entirely
-   once path 1 can answer.
-
-`/chains` only reads the worker's result; measuring per request would put archive
-calls on every page load. The fields are absent, never zero, when neither path
-can answer. See `services::venue_apy`.
+The fields are absent, never zero, when no estimate is available or the stored
+one has aged out, so a client renders nothing rather than `0.00%`.
 
 `/v1/deposits/stream` rejects a chain the relayer does not serve. A valid stream
 that can never emit anything reads to a client as "no deposits yet".
@@ -138,7 +132,8 @@ anyway.
 
 ### Local proof verification
 
-The wallet's `transact_3x3` proof is verified in-process before the mirror lock
+The wallet's `transact` proof — 4x6, the arity `TRANSACT_IN` / `TRANSACT_OUT`
+declare — is verified in-process before the mirror lock
 is taken. Without it, the first thing to check a wallet's proof would be the
 contract — after a multi-second `tree_update_batch` Groth16 behind a
 single-permit gate, holding the chain's tree mutex. Any unauthenticated caller
@@ -161,9 +156,17 @@ reconciled parks itself as **desynced**, which `/chains` reports per chain.
 
 ### Prover
 
-`Groth16Prover` parses the `.zkey` once at startup and runs Groth16 over
-ark-bn254 behind a **single permit** — proving is CPU-bound, and letting two run
-concurrently makes both slower rather than either faster.
+Proving itself lives in the [`groth16`](../groth16/README.md) crate, which holds
+the arkworks stack, the vendored snarkjs zkey parser and the circom witness-graph
+evaluator so no other binary links them. `Groth16Prover` parses the `.zkey` once
+at startup and runs Groth16 over ark-bn254 behind a **single permit** — proving
+is CPU-bound, and letting two run concurrently makes both slower rather than
+either faster.
+
+The relayer's side of that boundary is `services/witness.rs`, which builds the
+witness in the shape the circuit declares, and `services/transact_verifier.rs`,
+which derives the transact circuit's two public signals and hands them over as
+plain 32-byte words.
 
 ## Flush worker
 
@@ -339,10 +342,9 @@ database_url = "postgres://…"
 listen_addr  = "0.0.0.0:3003"
 
 [prover]
-wasm_path = "/circuits/tree_update_js/tree_update.wasm"
-r1cs_path = "/circuits/tree_update.r1cs"
-zkey_path = "/circuits/tree_update_final.zkey"
-transact_vkey_path = "/circuits/3x3_verification_key.json"   # optional, but set it
+graph_path = "/circuits/tree_update_batch.wcd"               # witness-calculation graph
+zkey_path  = "/circuits/tree_update_batch_final.zkey"
+transact_vkey_path = "/circuits/4x6_verification_key.json"   # optional, but set it
 
 [price_oracle]                    # optional block, all defaults shown
 base_url        = "https://api.coinbase.com/v2"
@@ -385,7 +387,11 @@ signer_key_hex = "0x…"
 | `public` | no | — | Wallet-facing block, served verbatim by `/chains`: `name`, `rpc_url`, `tree_depth`, `permit2_address`, `explorer_url` |
 
 Per-chain env overlay:
-`RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS,SHIELDED_FEE_ADDRESS,SHIELDED_FEE_IVK}`.
+`RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS,SHIELDED_FEE_ADDRESS,SHIELDED_FEE_IVK,ACCEPTED_FEE_TOKENS}`.
+`ACCEPTED_FEE_TOKENS` is the one that is not a scalar: a JSON array of
+`{symbol,address,decimals,quote_symbol}` records, replacing the TOML list
+wholesale. Malformed JSON panics at startup rather than leaving the relayer
+quoting against the compiled-in addresses.
 
 ⚠️ The overlay only rewrites chains **already declared** in the TOML. A variable
 naming a chain with no `[[chains]]` block is silently discarded.

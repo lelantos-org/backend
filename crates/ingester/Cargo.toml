@@ -30,6 +30,9 @@ rand = { workspace = true }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
+# `test-util` gives the adaptive-window tests a paused clock, so how many
+# `eth_getLogs` overlap is asserted rather than raced for.
+tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]
 vergen-gix = { workspace = true }

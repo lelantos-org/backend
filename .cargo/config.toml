@@ -1,0 +1,17 @@
+# Codegen flags for the Groth16 prover's field arithmetic.
+#
+# `ark-ff`'s ADX/BMI2 Montgomery backend is gated on THREE things at once:
+# `feature = "asm"` (set on `ark-bn254` in crates/groth16/Cargo.toml) plus
+# `target_feature = "bmi2"` and `target_feature = "adx"`. Enabling the Cargo
+# feature without these flags compiles the generic path and measures nothing —
+# which is the usual way this optimisation is believed to be on when it is not.
+#
+# Scoped to the Linux target rather than set under `[build]` on purpose: the
+# development hosts are aarch64, where these flags do not exist, and nothing
+# outside the prover needs prover-specific codegen.
+#
+# `x86-64-v3` rather than `native`: the release image is built once and may run
+# on a different CPU than it was built on. v3 implies AVX2/BMI2/FMA and is the
+# widest baseline safe to assume for that.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+bmi2,+adx"]

@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::responses::{ChainFlowOut, CountPoint, TreeAdvanceOut};
 use crate::repositories::{chains, tree_advances};
 use std::collections::BTreeMap;
@@ -13,28 +13,25 @@ pub async fn list(
 ) -> AppResult<Arc<Vec<TreeAdvanceOut>>> {
     let key = (chain_id, since_start_index, limit);
     let pool = st.pool.clone();
-    st.cache
-        .tree_advances
-        .try_get_with(key, async move {
-            let rows = tree_advances::list(&pool, chain_id, since_start_index, limit).await?;
-            let out: Vec<TreeAdvanceOut> = rows
-                .into_iter()
-                .map(|t| TreeAdvanceOut {
-                    chain_id: t.chain_id,
-                    block_number: t.block_number,
-                    log_index: t.log_index,
-                    start_index: t.start_index,
-                    inserted: t.inserted,
-                    old_root_hex: hex::encode(&t.old_root),
-                    new_root_hex: hex::encode(&t.new_root),
-                    tx_hash_hex: hex::encode(&t.tx_hash),
-                    block_ts: t.block_ts,
-                })
-                .collect();
-            Ok::<_, AppError>(Arc::new(out))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&st.cache.tree_advances, key, async move {
+        let rows = tree_advances::list(&pool, chain_id, since_start_index, limit).await?;
+        let out: Vec<TreeAdvanceOut> = rows
+            .into_iter()
+            .map(|t| TreeAdvanceOut {
+                chain_id: t.chain_id,
+                block_number: t.block_number,
+                log_index: t.log_index,
+                start_index: t.start_index,
+                inserted: t.inserted,
+                old_root_hex: hex::encode(&t.old_root),
+                new_root_hex: hex::encode(&t.new_root),
+                tx_hash_hex: hex::encode(&t.tx_hash),
+                block_ts: t.block_ts,
+            })
+            .collect();
+        Ok(Arc::new(out))
+    })
+    .await
 }
 
 pub async fn tx_counts(
@@ -45,21 +42,18 @@ pub async fn tx_counts(
 ) -> AppResult<Arc<Vec<CountPoint>>> {
     let key = (chain_id, bucket_sec, since_ts);
     let pool = st.pool.clone();
-    st.cache
-        .tx_counts
-        .try_get_with(key, async move {
-            let rows = tree_advances::count_buckets(&pool, chain_id, bucket_sec, since_ts).await?;
-            let out: Vec<CountPoint> = rows
-                .into_iter()
-                .map(|r| CountPoint {
-                    ts: r.ts,
-                    count: r.count,
-                })
-                .collect();
-            Ok::<_, AppError>(Arc::new(out))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&st.cache.tx_counts, key, async move {
+        let rows = tree_advances::count_buckets(&pool, chain_id, bucket_sec, since_ts).await?;
+        let out: Vec<CountPoint> = rows
+            .into_iter()
+            .map(|r| CountPoint {
+                ts: r.ts,
+                count: r.count,
+            })
+            .collect();
+        Ok(Arc::new(out))
+    })
+    .await
 }
 
 const HOURS: usize = 24;
@@ -124,17 +118,14 @@ fn fold_chain_flows(
 pub async fn chain_flows_24h(st: &AppState, now_ts: i64) -> AppResult<Arc<Vec<ChainFlowOut>>> {
     let hour_start = window_start(now_ts);
     let pool = st.pool.clone();
-    st.cache
-        .chain_flows_24h
-        .try_get_with(hour_start, async move {
-            let (rows, indexed) = tokio::try_join!(
-                tree_advances::chain_flows_24h(&pool, hour_start),
-                chains::indexed(&pool),
-            )?;
-            Ok::<_, AppError>(Arc::new(fold_chain_flows(rows, indexed)))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&st.cache.chain_flows_24h, hour_start, async move {
+        let (rows, indexed) = tokio::try_join!(
+            tree_advances::chain_flows_24h(&pool, hour_start),
+            chains::indexed(&pool),
+        )?;
+        Ok(Arc::new(fold_chain_flows(rows, indexed)))
+    })
+    .await
 }
 
 #[cfg(test)]

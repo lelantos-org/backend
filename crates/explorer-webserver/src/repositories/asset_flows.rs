@@ -1,4 +1,4 @@
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use bigdecimal::BigDecimal;
 use database::DbPool;
 use diesel::prelude::*;
@@ -73,5 +73,5 @@ pub async fn flow_buckets(
     .bind::<Nullable<BigInt>, _>(since_ts)
     .load(&mut conn)
     .await
-    .map_err(|e| AppError::Db(e.to_string()))
+    .map_err(super::db_err)
 }

@@ -1,3 +1,5 @@
+//! What one chain worker is handed at startup.
+
 use crate::adapters::DynRpc;
 use crate::app::config::ChainConfig;
 use crate::repositories::ChainStateRepo;

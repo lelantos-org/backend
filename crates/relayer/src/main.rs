@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use relayer::services::prover::{Groth16Prover, TreeUpdateBatchProver};
+use groth16::{Groth16Prover, TreeUpdateBatchProver};
 use relayer::{RelayerConfig, build_router, build_state};
 use std::sync::Arc;
 use tracing::info;

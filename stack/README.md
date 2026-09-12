@@ -34,20 +34,30 @@ justfile
 
 | Service | Port | Profiles |
 |---|---|---|
-| `postgres` | 5432 | `db` `ingester` `fmd` `explorer` `relayer` `risk` `all` `prod` |
+| `postgres` | 5432 | `db` `ingester` `fmd` `explorer` `relayer` `risk` `registry` `all` `prod` |
 | `anvil` | 8545 | `anvil` `relayer` `all` |
-| `deploy` (one-shot) | — | `all` |
-| `ingester` | — | `ingester` `fmd` `explorer` `all` `prod` |
+| `deploy` (one-shot) | — | `relayer` `all` |
+| `ingester` | — | `ingester` `fmd` `explorer` `relayer` `registry` `all` `prod` |
 | `fmd-indexer` | — | `fmd` `all` `prod` |
 | `fmd-webserver` | 3001 | `fmd` `all` `prod` |
+| `protocol-indexer` | — | `explorer` `relayer` `registry` `all` `prod` |
 | `explorer-indexer` | — | `explorer` `all` `prod` |
 | `explorer-webserver` | 3002 | `explorer` `all` `prod` |
 | `relayer` | 3003 | `relayer` `all` `prod` |
 | `risk-webserver` | 3004 | `risk` `all` `prod` |
+| `registry-webserver` | 3005 | `registry` `explorer` `relayer` `all` `prod` |
+| `rpc-proxy` | 3006 | `rpc` `all` `prod` |
 | `metaquoter` | 8081 | `metaquoter` `all` `prod` |
+| `oracle` (price stub) | — | `relayer` `all` |
 
 Select a profile with `just up-profile <name>` or `just PROFILE=<name> <recipe>`.
 `db` is Postgres alone, for running `cargo test` against a real database.
+
+Every profile that reads indexed state carries `ingester` with it, which is why
+it appears under `relayer` and `registry` too. It is the head of the pipeline —
+it writes `raw_events`, which `protocol-indexer` consumes into the asset catalog,
+`tree_advances` and the escrow ledger — and it is also the service that runs the
+migrations those tables live in. `registry` without it has no migrator at all.
 
 ## Configuration
 
@@ -59,9 +69,15 @@ just up                    # config/dev/  — anvil, chain 31337
 STACK_ENV=prod just up     # config/prod/ — mainnet templates
 ```
 
-Four services mount a TOML from that directory — `ingester`, `explorer-indexer`,
-`relayer`, and `metaquoter`. The rest are configured entirely through
+Seven services mount a TOML from that directory — `ingester`,
+`protocol-indexer`, `explorer-indexer`, `relayer`, `metaquoter`,
+`registry-webserver` and `rpc-proxy`. The rest are configured entirely through
 environment variables in `docker-compose.yml`.
+
+A TOML missing from `config/<env>/` is not a compose error: Docker creates a
+directory at an absent bind source, and the service starts and then fails on a
+config it cannot read. `just check` resolves every bind mount for both envs,
+which is what catches it.
 
 The chain-aware services read their TOML and then overlay per-chain environment
 variables named `<SERVICE>_CHAIN_<id>_<FIELD>` (see `shared::config_env`).
@@ -92,7 +108,12 @@ Every backend's entrypoint sources that file before exec'ing its binary, which
 is how the freshly deployed addresses reach the per-chain overlay.
 
 Re-running the deploy mints new addresses (new nonces), so backends must be
-restarted to pick them up — `just redeploy` does both.
+restarted to pick them up — `just redeploy` does both. The services carrying
+injected per-chain values are `ingester`, `relayer`, `metaquoter`,
+`registry-webserver`, `protocol-indexer` and `rpc-proxy`; those are what it
+restarts. `rpc-proxy` is the one to watch: its contract allowlist comes from the
+seeds in `addresses.env`, so a stale one refuses every read of the freshly
+deployed tokens rather than erroring in a way that names the cause.
 
 A yield id sits *alongside* the token's plain id rather than replacing it: ids
 1,2,3 stay risk-free custody, and 4,5,6 are the same three tokens earning in a

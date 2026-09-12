@@ -1,0 +1,80 @@
+[package]
+name = "groth16"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+
+# Native Groth16 prover and verifier.
+#
+# `ark-circom` is deliberately absent: it is a hard `wasmer` dependency on every
+# target, for the circom wasm witness generator this crate no longer runs. The
+# only two things it provided — the zkey parser and the snarkjs QAP reduction —
+# are vendored in `zkey.rs` and `qap.rs`.
+#
+# Declared here rather than as `workspace = true` on purpose: the workspace pins
+# ark 0.4 for the FMD crates, which `light-poseidon` holds back (see the root
+# Cargo.toml). These 0.6 crates and those 0.4 ones never exchange types, and
+# this crate is why the two versions can coexist without either side bending:
+# nothing here is reachable from `common-crypto` or from any crate that links it.
+#
+# `parallel` is stated on every ark crate that has it, rather than left to
+# arrive through `ark-groth16`'s defaults. It is load-bearing — without it every
+# MSM and FFT below runs single-threaded — and a `default-features = false` on
+# the `ark-groth16` line alone would switch it off with no compile error.
+#
+# `asm` on `ark-bn254` pulls `ark-ff/asm`, the x86_64 ADX/BMI2 field arithmetic.
+# The feature alone is NOT enough: `ark-ff`'s Montgomery backend also gates on
+# `target_feature = "bmi2"` and `target_feature = "adx"`, which `.cargo/config.toml`
+# supplies for the Linux target. Without those flags this feature is a silent
+# no-op. On aarch64 the cfg is simply false and the generic path is used.
+ark-groth16 = { version = "0.6", features = ["parallel"] }
+ark-bn254 = { version = "0.6", features = ["asm"] }
+ark-ec = { version = "0.6", features = ["parallel"] }
+ark-ff = { version = "0.6", features = ["parallel"] }
+ark-relations = "0.6"
+ark-snark = "0.6"
+ark-serialize = "0.6"
+# The prover. `ark-groth16` stays for its types, its verifier and its
+# `PreparedVerifyingKey`, but not for `create_proof_with_reduction_and_matrices`:
+# on this circuit (113k constraints, 2^17 domain) this is measured at ~1.7x on a
+# 16-thread host, and the two agree coordinate-for-coordinate given the same
+# `(r, s)` — `measure_phase_split` asserts exactly that.
+#
+# The gap is in the MSMs, which are 86% of proving time here. `ark-ec` 0.6 shards
+# an MSM into `num_threads / 2` pieces and then sizes the Pippenger window from
+# the *piece* rather than the input, so more threads means a smaller window and
+# more bucket work; it also builds a `rayon::ThreadPoolBuilder` per piece. This
+# does neither, accumulates buckets in affine form with batched inversion, and
+# runs all five MSMs concurrently.
+taceo-groth16 = "0.2.1"
+num-bigint = { version = "0.4", features = ["rand"] }
+num-traits = "0.2"
+# Evaluates the witness-calculation graph `circuits/just build-graph` emits,
+# replacing the circom wasm generator and the wasm runtime it needed.
+#
+# Pinned to a git revision because the crates.io releases do not ship the
+# `build-circuit` producer, and the graph format is versioned: a reader from a
+# different revision rejects the file with "Invalid magic". This revision MUST
+# match `CWC_REV` in `circuits/justfile`.
+circom-witnesscalc = { git = "https://github.com/iden3/circom-witnesscalc", rev = "d48eb7c97857d46b8a75c94ab96f769207263245" }
+byteorder = "1"
+rand = "0.8"
+
+[features]
+# Prints ark-groth16's own per-phase timers (QAP witness map, and each MSM
+# block) to stderr. Measurement only — never enable in a shipped binary.
+print-trace = ["ark-groth16/print-trace"]
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+# Only `qap.rs`, the test oracle, needs this.
+ark-poly = { version = "0.6", features = ["parallel"] }

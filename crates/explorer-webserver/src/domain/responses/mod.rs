@@ -1,3 +1,6 @@
+//! Outbound response bodies. One module per endpoint's shape; every field is
+//! `camelCase` on the wire and documented for the OpenAPI spec.
+
 pub mod anonymity_set;
 pub mod asset_yield;
 pub mod assets;

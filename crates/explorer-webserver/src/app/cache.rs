@@ -1,9 +1,15 @@
-use crate::adapters::{TokenKey, TokenPrice};
+//! Per-endpoint response caches.
+//!
+//! One cache per endpoint rather than one shared map, so each carries its own
+//! key shape, capacity and TTL. Two TTLs are in play: the configured analytic
+//! one, and a fixed short one for the endpoints that track the head of the
+//! chain.
+
 use crate::domain::responses::{
     AnonymitySetOut, AssetOut, ChainFlowOut, ChainLockedOut, CountPoint, FlowPoint, KindCounts,
     PoolNotesOut, TreeAdvanceOut, TxKind, TxOut, YieldAssetOut,
 };
-use moka::future::Cache;
+use shared::cache::Cache;
 use shared::cache::build;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,21 +49,17 @@ pub struct AppCache {
     /// repolled on its own tick: serving a reading a few seconds old is what
     /// every other figure here does, and `updatedAt` carries the real age.
     pub asset_yield: Cache<YieldKey, Arc<Vec<YieldAssetOut>>>,
-    /// `None` records a token the provider could not price. Caching that answer
-    /// stops every request from re-asking upstream about tokens that will never
-    /// have a price.
-    pub prices: Cache<TokenKey, Option<TokenPrice>>,
 }
 
 impl AppCache {
     /// `ttl_s` is the analytic-endpoint TTL from `ExplorerWebserverConfig`. The
     /// paginated `tree_advances` list uses a fixed short TTL because it tracks
-    /// the head of the chain. `price_ttl_s` is longer than either: prices move
-    /// slowly and every miss costs an upstream round-trip.
-    pub fn new(ttl_s: u64, price_ttl_s: u64) -> Self {
+    /// the head of the chain. Prices are not here: `PriceService` owns its own
+    /// cache, on its own longer TTL, since a miss there costs an upstream
+    /// round-trip rather than a query.
+    pub fn new(ttl_s: u64) -> Self {
         let analytic = Duration::from_secs(ttl_s.max(1));
         let head = Duration::from_secs(5);
-        let price = Duration::from_secs(price_ttl_s.max(1));
         Self {
             assets: build(64, analytic),
             asset_flows: build(2_048, analytic),
@@ -70,7 +72,6 @@ impl AppCache {
             anonymity_set: build(512, analytic),
             pool_notes: build(32, analytic),
             asset_yield: build(32, analytic),
-            prices: build(1_024, price),
         }
     }
 }

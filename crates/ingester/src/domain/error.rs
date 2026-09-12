@@ -1,3 +1,10 @@
+//! The crate's error taxonomy.
+//!
+//! Typed rather than `anyhow` because the variants are acted on, not just
+//! reported: [`RpcError::RangeTooLarge`] narrows a query window,
+//! [`IngesterError::Config`] is what [`crate::services::retry`] refuses to
+//! retry, and every variant names a metric label.
+
 use thiserror::Error;
 
 /// What went wrong at the provider.

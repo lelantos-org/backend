@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use explorer_webserver::adapters::PriceClient;
+use explorer_webserver::adapters::{DefiLlama, PriceService};
 use explorer_webserver::app::cache::AppCache;
 use explorer_webserver::{AppState, ExplorerWebserverConfig, build_info, build_router};
 use std::sync::Arc;
@@ -12,20 +12,29 @@ async fn main() -> Result<()> {
     shared::tracing_init::init();
     build_info::log_banner();
 
-    let cfg = ExplorerWebserverConfig::from_env()?;
+    let cfg = Arc::new(ExplorerWebserverConfig::from_env()?);
+    // Installs the recorder the `track_http` layer feeds; without it the
+    // instrumentation compiles but exports nothing.
+    shared::metrics::init_addr(&cfg.metrics_addr)?;
 
     let pool = database::build_pool(&cfg.database_url, database::PoolCfg::webserver())
         .await
         .context("build pool")?;
-    let cache = AppCache::new(cfg.cache_ttl_s, cfg.price_ttl_s);
-    let prices = PriceClient::new(
-        cfg.price_base_url.clone(),
-        Duration::from_millis(cfg.price_timeout_ms),
-    )
-    .context("build price client")?;
+    let cache = AppCache::new(cfg.cache_ttl_s);
+    let prices = PriceService::new(
+        // One provider today; a second one is another entry in this vector.
+        vec![Arc::new(
+            DefiLlama::new(
+                &cfg.price_base_url,
+                Duration::from_millis(cfg.price_timeout_ms),
+            )
+            .context("build price client")?,
+        )],
+        Duration::from_secs(cfg.price_ttl_s),
+    );
     let state = AppState {
         pool,
-        cfg: Arc::new(cfg.clone()),
+        cfg: Arc::clone(&cfg),
         cache,
         prices: Arc::new(prices),
     };

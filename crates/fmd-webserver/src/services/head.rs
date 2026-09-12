@@ -1,3 +1,5 @@
+//! The sync watermarks behind `/v1/head`.
+
 use crate::app::AppState;
 use crate::domain::error::AppResult;
 use crate::domain::responses::HeadOut;

@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 database = { path = "../database" }
+shared = { path = "../shared" }
+alloy = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
 testcontainers = { workspace = true }

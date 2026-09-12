@@ -25,6 +25,11 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     info!(addr = %cfg.bind_addr, "fmd-webserver listening");
-    axum::serve(listener, app).await?;
+    // Drains in flight requests on SIGTERM, as every other service here does: a
+    // redeploy otherwise cuts off chunk fetches mid-body, and a wallet syncing
+    // the feed sees a truncated response rather than a clean reconnect.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shared::shutdown::signal())
+        .await?;
     Ok(())
 }

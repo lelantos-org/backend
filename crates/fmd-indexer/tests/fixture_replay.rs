@@ -1,17 +1,18 @@
 //! Fixture-replay tests for fmd-indexer against the `RootAdvanced` and
 //! `NotePayload` ABI.
 
-use alloy::primitives::{Address, B256, Bytes, LogData, U256};
+use alloy::primitives::{B256, Bytes, LogData, U256};
 use alloy::rpc::types::eth::Log;
 use alloy::sol_types::SolEvent;
 use ark_ed_on_bn254::Fq;
 use ark_ff::{BigInteger, PrimeField};
 use chain_types::abi::{NotePayload, NullifierConsumed, RootAdvanced};
+use common_crypto::clue;
+use common_crypto::tree::{DEPTH, Field, MerkleTree, leaf_hash};
 use database::advisory::ChainLock;
 use database::{CursorRepo, UpsertCursor};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-use fmd_crypto::clue;
 use fmd_indexer::adapters::locks::ChainLocks;
 use fmd_indexer::repositories::cursor::PostgresCursorRepo;
 use fmd_indexer::repositories::matches::PostgresMatchesRepo;
@@ -21,13 +22,14 @@ use fmd_indexer::repositories::spent_nullifiers::{
     NewSpentNullifier, PostgresSpentNullifiersRepo, SpentNullifiersRepo,
 };
 use fmd_indexer::repositories::subscriptions::{PostgresSubscriptionsRepo, SubscriptionsRepo};
+use fmd_indexer::repositories::tree_state::{PostgresTreeStateRepo, TreeStateRepo, TreeStateRow};
 use fmd_indexer::services::consume::{ConsumeService, ConsumeServiceImpl};
 use fmd_indexer::services::filter::{FilterService, FilterServiceImpl};
 use shared::entities::EventKind;
 use std::sync::Arc;
 use test_support::db_url;
+use test_support::fixtures::{self, insert_chain_state, insert_log};
 
-const POOL_ADDR: &str = "0x0000000000000000000000000000000000000abc";
 const CHAIN_A: i64 = 1;
 const CHAIN_B: i64 = 8453;
 
@@ -54,6 +56,7 @@ const TABLES: &[&str] = &[
     "assets",
     "tree_advances",
     "spent_nullifiers",
+    "tree_state",
 ];
 
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
@@ -67,6 +70,7 @@ fn build_consume(pool: &database::DbPool) -> ConsumeServiceImpl {
         Arc::new(PostgresRawEventsRepo::new(pool.clone())),
         Arc::new(PostgresNotesRepo::new(pool.clone())),
         Arc::new(PostgresSpentNullifiersRepo::new(pool.clone())),
+        Arc::new(PostgresTreeStateRepo::new(pool.clone())),
         ChainLocks::disabled(),
     )
 }
@@ -80,39 +84,6 @@ fn build_filter(pool: &database::DbPool) -> FilterServiceImpl {
     )
 }
 
-async fn insert_chain_state(pool: &database::DbPool, chain_id: i64) {
-    use database::schema::chain_state;
-    let mut conn = pool.get().await.unwrap();
-    diesel::insert_into(chain_state::table)
-        .values((
-            chain_state::chain_id.eq(chain_id),
-            chain_state::last_block.eq(0i64),
-            chain_state::last_block_hash.eq::<Vec<u8>>(vec![0u8; 32]),
-            chain_state::last_scanned_block.eq(0i64),
-        ))
-        .execute(&mut conn)
-        .await
-        .unwrap();
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = database::schema::raw_events)]
-struct InsertableRawEvent {
-    chain_id: i64,
-    block_number: i64,
-    block_hash: Vec<u8>,
-    block_ts: i64,
-    tx_hash: Vec<u8>,
-    log_index: i32,
-    event_kind: i16,
-    topics: Vec<Vec<u8>>,
-    data: Vec<u8>,
-}
-
-fn pool_addr() -> Address {
-    POOL_ADDR.parse().unwrap()
-}
-
 fn fq_to_u256(v: Fq) -> U256 {
     let bytes = v.into_bigint().to_bytes_be();
     let mut padded = [0u8; 32];
@@ -121,20 +92,10 @@ fn fq_to_u256(v: Fq) -> U256 {
     U256::from_be_bytes(padded)
 }
 
+/// Every log here sits at a timestamp derived from its block, so the shared
+/// builder's explicit `block_ts` would be noise at each call site.
 fn build_log(log_data: LogData, block_n: u64, tx_byte: u8, log_idx: u64) -> Log {
-    Log {
-        inner: alloy::primitives::Log {
-            address: pool_addr(),
-            data: log_data,
-        },
-        block_hash: Some(B256::repeat_byte(0xaa)),
-        block_number: Some(block_n),
-        block_timestamp: Some(1_700_000_000 + block_n),
-        transaction_hash: Some(B256::repeat_byte(tx_byte)),
-        transaction_index: Some(0),
-        log_index: Some(log_idx),
-        removed: false,
-    }
+    fixtures::build_log(log_data, block_n, 1_700_000_000 + block_n, tx_byte, log_idx)
 }
 
 fn root_advanced_log(
@@ -197,28 +158,6 @@ fn note_payload_log_raw(
         cvDepY: U256::from(0u64),
     };
     build_log(ev.encode_log_data(), block_n, tx_byte, log_idx)
-}
-
-async fn insert_log(pool: &database::DbPool, chain_id: i64, log: &Log, kind: EventKind) {
-    use database::schema::raw_events;
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(|t| t.0.to_vec()).collect();
-    let row = InsertableRawEvent {
-        chain_id,
-        block_number: log.block_number.unwrap() as i64,
-        block_hash: log.block_hash.unwrap().0.to_vec(),
-        block_ts: log.block_timestamp.unwrap() as i64,
-        tx_hash: log.transaction_hash.unwrap().0.to_vec(),
-        log_index: log.log_index.unwrap() as i32,
-        event_kind: kind.as_i16(),
-        topics,
-        data: log.data().data.to_vec(),
-    };
-    let mut conn = pool.get().await.unwrap();
-    diesel::insert_into(raw_events::table)
-        .values(&row)
-        .execute(&mut conn)
-        .await
-        .unwrap();
 }
 
 async fn count_notes(pool: &database::DbPool, chain_id: i64) -> i64 {
@@ -685,6 +624,7 @@ async fn standby_replica_does_no_work_until_the_leader_releases() {
         Arc::new(PostgresRawEventsRepo::new(pool.clone())),
         Arc::new(PostgresNotesRepo::new(pool.clone())),
         Arc::new(PostgresSpentNullifiersRepo::new(pool.clone())),
+        Arc::new(PostgresTreeStateRepo::new(pool.clone())),
         ChainLocks::enabled(url),
     );
 
@@ -748,6 +688,7 @@ async fn concurrent_replicas_keep_spent_nullifier_seq_dense() {
             Arc::new(PostgresRawEventsRepo::new(pool.clone())),
             Arc::new(PostgresNotesRepo::new(pool.clone())),
             Arc::new(PostgresSpentNullifiersRepo::new(pool.clone())),
+            Arc::new(PostgresTreeStateRepo::new(pool.clone())),
             ChainLocks::enabled(url),
         )
     };
@@ -846,6 +787,68 @@ async fn leaf_indices(pool: &database::DbPool, chain_id: i64) -> Vec<i64> {
         .unwrap()
 }
 
+/// The chain's stored tree state, or `None` before any leaf lands.
+async fn tree_state_of(pool: &database::DbPool, chain_id: i64) -> Option<TreeStateRow> {
+    // Fully qualified: `diesel_async::RunQueryDsl::load` is in scope here too.
+    TreeStateRepo::load(&PostgresTreeStateRepo::new(pool.clone()), chain_id)
+        .await
+        .unwrap()
+}
+
+/// The leaf a `note_payload_log` with this `cm_byte` commits: the fixtures leave
+/// both `cvDep` coordinates zero.
+fn expected_leaf(cm_byte: u8) -> Field {
+    leaf_hash(&[cm_byte; 32], &[0u8; 32], &[0u8; 32]).unwrap()
+}
+
+async fn delete_tree_state(pool: &database::DbPool, chain_id: i64) {
+    use database::schema::tree_state;
+    let mut conn = pool.get().await.unwrap();
+    diesel::delete(tree_state::table.filter(tree_state::chain_id.eq(chain_id)))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+}
+
+/// Stand in for explorer-indexer, which owns `tree_advances`. The backfill reads
+/// it as the chain's own record of the root at a given leaf count.
+async fn insert_tree_advance(
+    pool: &database::DbPool,
+    chain_id: i64,
+    start_index: i64,
+    inserted: i32,
+    new_root: &[u8],
+) {
+    use database::schema::tree_advances;
+    let mut conn = pool.get().await.unwrap();
+    diesel::insert_into(tree_advances::table)
+        .values((
+            tree_advances::chain_id.eq(chain_id),
+            tree_advances::block_number.eq(start_index + 1),
+            tree_advances::log_index.eq(0i32),
+            tree_advances::start_index.eq(start_index),
+            tree_advances::inserted.eq(inserted),
+            tree_advances::old_root.eq::<Vec<u8>>(vec![0u8; 32]),
+            tree_advances::new_root.eq::<Vec<u8>>(new_root.to_vec()),
+            tree_advances::tx_hash.eq::<Vec<u8>>(vec![0u8; 32]),
+            tree_advances::block_ts.eq(0i64),
+        ))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+}
+
+/// Root of a tree holding exactly these leaves, built with [`MerkleTree`].
+///
+/// An independent oracle: the indexer advances a `Frontier`, so a bug shared by
+/// both would have to be in code `common-crypto`'s differential test already covers.
+fn expected_root(cm_bytes: &[u8]) -> Vec<u8> {
+    let mut tree = MerkleTree::new(DEPTH).unwrap();
+    tree.extend(cm_bytes.iter().copied().map(expected_leaf))
+        .unwrap();
+    tree.root().unwrap().to_vec()
+}
+
 #[tokio::test]
 async fn an_unusable_leaf_leaves_a_hole_instead_of_wedging_the_chain() {
     let (pool, _serial) = fresh_pool().await;
@@ -902,6 +905,222 @@ async fn an_unusable_leaf_leaves_a_hole_instead_of_wedging_the_chain() {
         cursor_of(&pool, "fmd", CHAIN_A).await > 0,
         "cursor must advance past a tx it can never fully decode"
     );
+
+    // The point of storing tree state in the indexer. `notes` is missing leaf 1,
+    // so nothing reading that table can build this tree at all; the indexer holds
+    // the dropped leaf's `cm` and folds it anyway.
+    let state = tree_state_of(&pool, CHAIN_A)
+        .await
+        .expect("tree state written");
+    assert_eq!(state.leaf_count, 4, "the hole still occupies a leaf");
+    assert_eq!(
+        state.root,
+        expected_root(&[0x60, 0x61, 0x70, 0x71]),
+        "root must commit to the unusable leaf, in its own position"
+    );
+    assert_ne!(
+        state.root,
+        expected_root(&[0x60, 0x70, 0x71]),
+        "skipping the hole would shift every later leaf"
+    );
+}
+
+/// Re-presenting committed leaves must not fold them a second time. The consume
+/// cursor rewinds to 0 after a reorg, so this is the normal path, not an edge.
+#[tokio::test]
+async fn replaying_a_tick_leaves_the_tree_where_it_was() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let (rx, ry) = gamma3_r();
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        0,
+        &[0x60, 0x61],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        100,
+        0x51,
+    )
+    .await;
+
+    let consume = build_consume(&pool);
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    let first = tree_state_of(&pool, CHAIN_A).await.expect("written");
+    assert_eq!(first.leaf_count, 2);
+    assert_eq!(first.root, expected_root(&[0x60, 0x61]));
+
+    // Rewind the cursor the way `reorg::apply_pending` does and replay. The notes
+    // come back through ON CONFLICT DO NOTHING; the tree has to skip them itself.
+    PostgresCursorRepo::new(pool.clone())
+        .upsert(UpsertCursor {
+            name: "fmd".to_string(),
+            chain_id: CHAIN_A,
+            last_event_id: 0,
+            last_block_number: 0,
+        })
+        .await
+        .unwrap();
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+
+    let again = tree_state_of(&pool, CHAIN_A).await.expect("still there");
+    assert_eq!(
+        again.leaf_count, 2,
+        "a replayed leaf must not advance the tree"
+    );
+    assert_eq!(again.root, first.root);
+}
+
+/// The deployment path: a chain indexed before `tree_state` existed.
+///
+/// The consume cursor is already past the events that produced the existing
+/// notes, so nothing will replay them. The first tick that appends must fold the
+/// history in from `notes` first, or the stored tree is short by everything that
+/// came before it.
+#[tokio::test]
+async fn a_chain_with_no_stored_tree_backfills_from_notes() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let (rx, ry) = gamma3_r();
+
+    // Two leaves land normally, then the row is deleted to stand for a chain
+    // indexed before the table existed. The cursor stays where it is, so those
+    // two events are behind us for good.
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        0,
+        &[0x60, 0x61],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        100,
+        0x51,
+    )
+    .await;
+    let consume = build_consume(&pool);
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    delete_tree_state(&pool, CHAIN_A).await;
+    assert!(tree_state_of(&pool, CHAIN_A).await.is_none());
+
+    // The backfill verifies itself against the chain's published root, so
+    // `tree_advances` has to carry the real one for the first two leaves.
+    insert_tree_advance(&pool, CHAIN_A, 0, 2, &expected_root(&[0x60, 0x61])).await;
+
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        2,
+        &[0x70, 0x71],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        101,
+        0x52,
+    )
+    .await;
+    let _ = consume.tick_chain(CHAIN_A, 101).await.unwrap();
+
+    let state = tree_state_of(&pool, CHAIN_A)
+        .await
+        .expect("backfilled and advanced");
+    assert_eq!(state.leaf_count, 4, "history plus this tick");
+    assert_eq!(state.root, expected_root(&[0x60, 0x61, 0x70, 0x71]));
+}
+
+/// A backfill that disagrees with the chain must not be stored. `notes` alone
+/// cannot tell a correct fold from an incorrect one, so the published root is the
+/// only check available -- and a wrong frontier persisted here would be wrong
+/// forever after.
+#[tokio::test]
+async fn a_backfill_that_contradicts_the_published_root_is_refused() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let (rx, ry) = gamma3_r();
+
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        0,
+        &[0x60, 0x61],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        100,
+        0x51,
+    )
+    .await;
+    let consume = build_consume(&pool);
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+    delete_tree_state(&pool, CHAIN_A).await;
+
+    // A root the chain never published for this leaf set.
+    insert_tree_advance(&pool, CHAIN_A, 0, 2, &[0xab; 32]).await;
+
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        2,
+        &[0x70, 0x71],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        101,
+        0x52,
+    )
+    .await;
+    assert!(
+        consume.tick_chain(CHAIN_A, 101).await.is_err(),
+        "the tick must fail rather than store a frontier the chain disagrees with"
+    );
+    assert!(
+        tree_state_of(&pool, CHAIN_A).await.is_none(),
+        "nothing may be persisted when the check fails"
+    );
+}
+
+/// Leaves arriving across two ticks must land on the same root as one tick
+/// carrying both -- the append is incremental, so a resumed frontier is the
+/// common case rather than a special one.
+#[tokio::test]
+async fn the_tree_advances_across_ticks() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let (rx, ry) = gamma3_r();
+
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        0,
+        &[0x60, 0x61],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        100,
+        0x51,
+    )
+    .await;
+    let consume = build_consume(&pool);
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+
+    insert_tx(
+        &pool,
+        CHAIN_A,
+        2,
+        &[0x70, 0x71],
+        rx,
+        ry,
+        GAMMA3_BITS_LE,
+        101,
+        0x52,
+    )
+    .await;
+    let _ = consume.tick_chain(CHAIN_A, 101).await.unwrap();
+
+    let state = tree_state_of(&pool, CHAIN_A).await.expect("written");
+    assert_eq!(state.leaf_count, 4);
+    assert_eq!(state.root, expected_root(&[0x60, 0x61, 0x70, 0x71]));
 }
 
 #[tokio::test]

@@ -55,7 +55,7 @@ fn reserve_advances_by_two_leaves() {
 #[test]
 fn unwind_rolls_back_a_clean_failure() {
     let mut m = mirror(1);
-    let before = m.current_root().unwrap();
+    let before = m.current_root();
     advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
 
     let err = m.unwind(2, AppError::Reverted("tx reverted".into()));
@@ -63,7 +63,7 @@ fn unwind_rolls_back_a_clean_failure() {
     assert!(matches!(err, AppError::Reverted(_)));
     assert!(!m.is_desynced());
     assert_eq!(m.committed_count(), 2);
-    assert_eq!(m.current_root().unwrap(), before, "root must be restored");
+    assert_eq!(m.current_root(), before, "root must be restored");
     reserve_one(&mut m).expect("mirror should still accept work");
 }
 
@@ -120,7 +120,7 @@ fn parking_keeps_the_first_reason() {
 #[test]
 fn a_non_canonical_leaf_leaves_the_tree_untouched() {
     let mut m = mirror(1);
-    let before_root = m.current_root().unwrap();
+    let before_root = m.current_root();
     let modulus: Field = crate::adapters::parse::BN254_R.to_be_bytes();
 
     let err = m
@@ -129,7 +129,7 @@ fn a_non_canonical_leaf_leaves_the_tree_untouched() {
 
     assert!(matches!(err, AppError::Internal(_)), "got {err}");
     assert_eq!(m.committed_count(), 2, "no leaf may survive a failed batch");
-    assert_eq!(m.current_root().unwrap(), before_root);
+    assert_eq!(m.current_root(), before_root);
     assert!(!m.is_desynced(), "a rejected batch is not a desync");
     reserve_one(&mut m).expect("mirror should still accept work");
 }
@@ -178,11 +178,11 @@ fn the_snapshot_tracks_every_mutation() {
 
     advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
     assert_eq!(snap.leaf_count(), 2);
-    assert_eq!(snap.root(), m.current_root().unwrap());
+    assert_eq!(snap.root(), m.current_root());
 
     let _ = m.unwind(2, AppError::Reverted("nope".into()));
     assert_eq!(snap.leaf_count(), 0);
-    assert_eq!(snap.root(), m.current_root().unwrap());
+    assert_eq!(snap.root(), m.current_root());
 
     let _ = m.unwind(0, AppError::SubmitUnknown("no receipt".into()));
     assert!(snap.is_desynced());
@@ -193,11 +193,11 @@ fn the_snapshot_tracks_every_mutation() {
 #[test]
 fn root_history_remembers_what_the_mirror_has_held() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
-    let empty = m.current_root().unwrap();
+    let empty = m.current_root();
     assert!(m.knows_root(&empty));
 
     advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
-    let after = m.current_root().unwrap();
+    let after = m.current_root();
     assert!(m.knows_root(&empty), "the previous root is still valid");
     assert!(m.knows_root(&after));
     assert!(!m.knows_root(&[0xEEu8; 32]));
@@ -209,10 +209,10 @@ fn root_history_remembers_what_the_mirror_has_held() {
 #[test]
 fn a_rolled_back_root_stops_being_accepted() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
-    let before = m.current_root().unwrap();
+    let before = m.current_root();
 
     advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
-    let speculative = m.current_root().unwrap();
+    let speculative = m.current_root();
     assert!(m.knows_root(&speculative), "published while in flight");
 
     m.rollback(2).unwrap();
@@ -224,7 +224,7 @@ fn a_rolled_back_root_stops_being_accepted() {
         m.knows_root(&before),
         "the root it reverted to is still valid"
     );
-    assert_eq!(m.current_root().unwrap(), before);
+    assert_eq!(m.current_root(), before);
 }
 
 /// Only the newest entry is retracted. An identical root deeper in the window was
@@ -233,13 +233,13 @@ fn a_rolled_back_root_stops_being_accepted() {
 fn a_rollback_retracts_only_the_advance_it_undid() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
     advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
-    let landed = m.current_root().unwrap();
+    let landed = m.current_root();
 
     advance2(&mut m, cm(3), cm(4), cv(3), cv(4)).unwrap();
     m.rollback(2).unwrap();
 
     assert!(m.knows_root(&landed));
-    assert_eq!(m.current_root().unwrap(), landed);
+    assert_eq!(m.current_root(), landed);
 }
 
 /// A rollback restores an earlier root, which must not be pushed twice.
@@ -255,7 +255,7 @@ fn an_unchanged_root_does_not_consume_a_slot() {
 #[test]
 fn root_history_is_bounded() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
-    let first = m.current_root().unwrap();
+    let first = m.current_root();
     for i in 0..ROOT_HISTORY as u8 + 2 {
         advance2(&mut m, cm(i), cm(i + 1), cv(i), cv(i + 1)).unwrap();
     }
@@ -272,4 +272,41 @@ fn rollback_past_the_start_is_rejected() {
         2,
         "a rejected rollback changes nothing"
     );
+}
+
+/// The frontier a rollback restores is what the next proof is built against, so
+/// re-reserving after an undone advance must hand back the same starting state,
+/// not just the same root.
+#[test]
+fn a_rollback_restores_the_state_the_next_proof_builds_on() {
+    let mut m = mirror(2);
+    let (first, _) = advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    m.rollback(2).unwrap();
+
+    let (again, _) = advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    assert_eq!(again.start_index, first.start_index);
+    assert_eq!(again.old_root, first.old_root);
+    assert_eq!(again.old_frontier, first.old_frontier);
+}
+
+/// The mirror can only return to its last reserve: a frontier keeps no record of
+/// what it folded, so a count naming any other state is refused rather than
+/// silently landing somewhere neither the mirror nor the chain has been.
+#[test]
+fn rollback_of_anything_but_the_last_reserve_is_rejected() {
+    let mut m = mirror(2);
+    advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    let root = m.current_root();
+
+    assert!(m.rollback(1).is_err(), "half a batch is not a state");
+    assert!(m.rollback(4).is_err(), "an earlier reserve is gone");
+    assert_eq!(
+        m.committed_count(),
+        6,
+        "a rejected rollback changes nothing"
+    );
+    assert_eq!(m.current_root(), root);
+
+    m.rollback(2).expect("the last reserve is still undoable");
+    assert_eq!(m.committed_count(), 4);
 }

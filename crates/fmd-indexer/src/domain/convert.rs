@@ -1,12 +1,8 @@
 use ark_ed_on_bn254::Fq;
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 use bigdecimal::BigDecimal;
-use bigdecimal::num_bigint::{BigInt, Sign};
-
-pub fn u256_to_bigdecimal(v: alloy::primitives::U256) -> BigDecimal {
-    let bytes = v.to_be_bytes::<32>();
-    BigDecimal::from(BigInt::from_bytes_be(Sign::Plus, &bytes))
-}
+use bigdecimal::num_bigint::Sign;
+use common_crypto::tree::Field;
 
 /// Reinterpret a `NUMERIC(78, 0)` column as a field element.
 ///
@@ -23,9 +19,18 @@ pub fn bigdec_to_fq(v: &BigDecimal) -> Fq {
     adjusted
 }
 
+/// The same column as a big-endian 32-byte field element, which is the form the
+/// Merkle leaf hash takes its inputs in.
+pub fn bigdec_to_field(v: &BigDecimal) -> Field {
+    let bytes = bigdec_to_fq(v).into_bigint().to_bytes_be();
+    let mut out = [0u8; 32];
+    out[32 - bytes.len()..].copy_from_slice(&bytes);
+    out
+}
+
 /// Read the packed FMD clue bits from a ciphertext's 2-byte prefix.
 ///
-/// Big-endian, matching what the contract writes. `fmd_crypto::filter` documents
+/// Big-endian, matching what the contract writes. `common_crypto::filter` documents
 /// its `clue_bits` argument as little-endian, which refers to the bit order
 /// inside the u16 rather than the byte order on the wire; the two are consistent
 /// and `tests/fixture_replay.rs` pins the round trip.
@@ -40,6 +45,7 @@ pub fn clue_bits_be(ciphertext: &[u8]) -> Option<u16> {
 mod tests {
     use super::*;
     use ark_ff::BigInteger;
+    use bigdecimal::num_bigint::BigInt;
 
     fn fq_dec(v: &Fq) -> String {
         BigInt::from_bytes_be(Sign::Plus, &v.into_bigint().to_bytes_be()).to_string()

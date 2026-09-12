@@ -1,7 +1,7 @@
 use crate::adapters::{TokenKey, TokenPrice};
 use crate::app::AppState;
 use crate::domain::amount::whole_tokens_str;
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::responses::{ChainLockedOut, LockedAssetOut, LockedBasis};
 use crate::repositories::asset_locked::{self, LockedRow};
 use bigdecimal::ToPrimitive;
@@ -12,18 +12,16 @@ use std::sync::Arc;
 pub async fn by_chain(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<ChainLockedOut>>> {
     let cache = st.cache.locked.clone();
     let st = st.clone();
-    cache
-        .try_get_with(chain_id, async move {
-            let rows = asset_locked::totals(&st.pool, chain_id).await?;
-            let keys: Vec<TokenKey> = rows
-                .iter()
-                .map(|r| (r.chain_id, r.token_hex.clone()))
-                .collect();
-            let prices = super::prices::for_tokens(&st, &keys).await;
-            Ok::<_, AppError>(Arc::new(fold(rows, &prices)))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&cache, chain_id, async move {
+        let rows = asset_locked::totals(&st.pool, chain_id).await?;
+        let keys: Vec<TokenKey> = rows
+            .iter()
+            .map(|r| TokenKey::new(r.chain_id, r.token_hex.clone()))
+            .collect();
+        let prices = super::prices::for_tokens(&st, &keys).await;
+        Ok(Arc::new(fold(rows, &prices)))
+    })
+    .await
 }
 
 /// One asset's balance, priced where a price exists.
@@ -45,7 +43,7 @@ fn locked_asset(row: LockedRow, prices: &HashMap<TokenKey, TokenPrice>) -> Locke
         None => (&row.in_base - &row.out_base, LockedBasis::FlowDifference),
     };
     let locked_usd = prices
-        .get(&(row.chain_id, row.token_hex.clone()))
+        .get(&TokenKey::new(row.chain_id, row.token_hex.clone()))
         .and_then(|p| super::prices::to_usd(locked_base.to_f64()?, row.decimals, p));
     LockedAssetOut {
         asset_id_u64: row.asset_id_u64,
@@ -154,7 +152,7 @@ mod tests {
 
     fn priced(chain_id: i64, token: &str, price_usd: f64) -> (TokenKey, TokenPrice) {
         (
-            (chain_id, token.to_string()),
+            TokenKey::new(chain_id, token),
             TokenPrice {
                 price_usd,
                 // The asset's own decimals take precedence, so the feed need not

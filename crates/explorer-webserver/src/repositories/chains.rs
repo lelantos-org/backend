@@ -1,4 +1,4 @@
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use database::DbPool;
 use database::schema::chain_state;
 use diesel::prelude::*;
@@ -17,5 +17,5 @@ pub async fn indexed(pool: &DbPool) -> AppResult<Vec<i64>> {
         .order(chain_state::chain_id.asc())
         .load(&mut conn)
         .await
-        .map_err(|e| AppError::Db(e.to_string()))
+        .map_err(super::db_err)
 }

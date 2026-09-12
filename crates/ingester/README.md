@@ -54,12 +54,14 @@ costs no extra connection.
 
 ## Failure handling
 
-- Transient RPC and database errors retry with exponential backoff and jitter.
-  After `MAX_CONSECUTIVE_FAILURES` the worker surrenders the chain, which
-  releases its advisory lock so a standby can take over.
-- The supervisor in `main` restarts a worker that lost its lock or failed, up
-  to `MAX_WORKER_RESTARTS`. If every restart is exhausted the process exits
-  non-zero — a fully stalled ingester must not look healthy to its
+- Transient RPC and database errors retry with exponential backoff and full
+  jitter, under a `retry::Policy` that bounds the attempts: `Policy::LIVE_TICK`
+  for one live tick and `Policy::BACKFILL` for a backfill pass, both 8 attempts.
+  Exhausting them surrenders the chain, which releases its advisory lock so a
+  standby can take over.
+- The supervisor in `main` restarts a worker that lost its lock or failed, under
+  `Policy::WORKER_RESTART` (10 attempts). If every restart is exhausted the
+  process exits non-zero — a fully stalled ingester must not look healthy to its
   orchestrator.
 - All RPC calls carry request and connect timeouts. Without them a half-open
   socket parks a worker indefinitely while it still holds the chain lock, so no
@@ -100,6 +102,7 @@ chain lock.
 ```toml
 database_url  = "postgres://..."
 db_pool_size  = 8         # optional, overrides the shared indexer pool size
+metrics_addr  = "127.0.0.1:3013"   # optional, Prometheus scrape listener
 
 [[chains]]
 chain_id      = 1
@@ -109,9 +112,10 @@ start_block   = 18_000_000
 reorg_depth             = 32      # optional
 block_poll_ms           = 2000    # optional
 backfill_threshold      = 100     # optional, blocks behind tip to trigger backfill mode
-backfill_concurrency    = 8       # optional
+backfill_concurrency    = 16      # optional
+log_concurrency         = 16      # optional, cap on simultaneous eth_getLogs for this chain
 chunk_blocks            = 10_000  # optional, range size during backfill
-meta_concurrency        = 16      # optional
+meta_concurrency        = 32      # optional
 rpc_timeout_ms          = 30_000  # optional
 rpc_connect_timeout_ms  = 10_000  # optional
 ```
@@ -119,6 +123,7 @@ rpc_connect_timeout_ms  = 10_000  # optional
 | Key | Required | Default | Notes |
 |-----|----------|---------|-------|
 | `database_url` | yes | — | Postgres URL |
+| `metrics_addr` | no | `127.0.0.1:3013` | Prometheus scrape listener. Override with `METRICS_ADDR` |
 | `db_pool_size` | no | `PoolCfg::indexer()` | Resizes the shared bb8 pool, keeping `min_idle` in proportion. One pool serves every chain worker, so raise it when many chains contend. Override with `INGESTER_DB_POOL_SIZE`. Behind a transaction pooler the real ceiling is simultaneously executing queries, not connections |
 | `chains[].chain_id` | yes | — | EVM chain id; must be unique |
 | `chains[].rpc_url` | yes | — | HTTP RPC endpoint. Redacted to scheme+host in logs — provider API keys live in the path |
@@ -127,9 +132,10 @@ rpc_connect_timeout_ms  = 10_000  # optional
 | `chains[].reorg_depth` | no | 32 | How far back the anchor walk searches, and the backfill's safety margin below tip. Not a live head buffer |
 | `chains[].block_poll_ms` | no | 2000 | Ceiling of the live tail's idle backoff, not a fixed cadence. A tick that committed or rewound loops straight back; an idle tick waits from 50ms, doubling up to this |
 | `chains[].backfill_threshold` | no | 100 | Lag (blocks) that flips the worker into backfill mode. Must exceed `reorg_depth`, or the worker oscillates between the two modes |
-| `chains[].backfill_concurrency` | no | 8 | Parallel range fetches in backfill |
+| `chains[].backfill_concurrency` | no | 16 | Parallel range fetches in backfill |
+| `chains[].log_concurrency` | no | 16 | Cap on simultaneous `eth_getLogs` calls against this chain's provider. The whole chain's budget, shared by every backfill chunk and the live tail — not one call's |
 | `chains[].chunk_blocks` | no | 10000 | Block range per backfill chunk, and the cap on one live tick's span. Also the memory bound: the backfill decodes `backfill_concurrency` chunks at once. Need not be tuned below the provider's `eth_getLogs` cap — the adaptive window learns that once and remembers it |
-| `chains[].meta_concurrency` | no | 16 | Cap on simultaneous `eth_getBlockByNumber` calls |
+| `chains[].meta_concurrency` | no | 32 | Cap on simultaneous `eth_getBlockByNumber` calls |
 | `chains[].rpc_timeout_ms` | no | 30000 | Whole-request RPC timeout |
 | `chains[].rpc_connect_timeout_ms` | no | 10000 | RPC connect timeout |
 

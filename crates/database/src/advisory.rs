@@ -47,6 +47,29 @@ pub const MIGRATE_KEY: i64 = NS_MIGRATE;
 /// chain: they guard different tables and must not exclude one another.
 pub const NS_FMD_CONSUME: i64 = 0x1A95_0001_0000_0000_u64 as i64;
 
+/// Namespace for the venue-APY worker's per-chain measurement lock.
+///
+/// `registry-webserver` is stateless and scales freely, but its rate measurement
+/// is neither: it writes `asset_yield_sample` and issues archive `eth_call`s, so
+/// N replicas would lay down duplicate samples and multiply the archive load.
+/// One replica per chain measures and the rest serve from the row it writes.
+///
+/// Its own namespace for the same reason as [`NS_FMD_CONSUME`]: it guards
+/// different tables from the indexers and must not exclude them.
+pub const NS_VENUE_APY: i64 = 0x1A95_0003_0000_0000_u64 as i64;
+
+/// Namespace for `explorer-indexer`'s per-chain consume locks.
+///
+/// The consume loop is idempotent per window but not concurrent-safe across
+/// replicas: two processes holding the same window both refresh the same
+/// materialized views and both advance the cursor, and the slower advance is
+/// only refused because it is monotonic. One leader per chain keeps the
+/// duplicate work from happening at all.
+///
+/// Its own namespace for the same reason as [`NS_FMD_CONSUME`]: it guards
+/// different tables from the other indexers and must not exclude them.
+pub const NS_EXPLORER_CONSUME: i64 = 0x1A95_0004_0000_0000_u64 as i64;
+
 /// Advisory-lock key for one (namespace, chain) pair.
 pub fn chain_key(namespace: i64, chain_id: i64) -> i64 {
     namespace ^ chain_id

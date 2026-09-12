@@ -2,17 +2,11 @@ use crate::domain::error::{AppError, AppResult};
 use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::LazyLock;
 
-/// BN254 scalar field order: the modulus every in-circuit signal lives under, and
-/// the one `fmd_crypto::poseidon` enforces over `ark_ed_on_bn254::Fq`.
-pub static BN254_R: LazyLock<U256> = LazyLock::new(|| {
-    U256::from_str_radix(
-        "21888242871839275222246405745257275088548364400416034343698204186575808495617",
-        10,
-    )
-    .expect("BN254 modulus literal")
-});
+/// The modulus these parsers check against. It describes the circuits rather
+/// than the wire, so it lives in `domain`; re-exported here because this module
+/// is where a caller parsing a field element already looks.
+pub use crate::domain::field::BN254_R;
 
 /// Parse a `0x`-hex or decimal integer. Accepts either case of the prefix and
 /// strips it exactly once, so `"0x0x12"` is malformed rather than `0x12`.
@@ -54,7 +48,7 @@ impl NotAField {
 }
 
 /// Core field parse. Rejects anything at or above the BN254 scalar modulus: such
-/// a value is not a field element, `fmd_crypto`'s Poseidon refuses it, and the
+/// a value is not a field element, `common_crypto`'s Poseidon refuses it, and the
 /// contract's coefficient range check reverts on it. Unchecked, a non-canonical
 /// `outCm` would reach [`crate::services::tree`] and fail between two speculative
 /// leaf inserts, permanently desyncing that chain's mirror.

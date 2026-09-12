@@ -7,8 +7,18 @@ license.workspace = true
 [dependencies]
 shared = { path = "../shared" }
 alloy = { workspace = true }
+bigdecimal = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
+reqwest = { workspace = true, optional = true }
+
+[features]
+default = []
+# The shared JSON-RPC transport. Off by default: the indexers link this crate for
+# the ABI alone and must not pull a provider stack in with it.
+rpc = ["dep:reqwest"]
 
 [dev-dependencies]
 alloy = { workspace = true }
+# The rpc deadline test drives a real call against a listener that never answers.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

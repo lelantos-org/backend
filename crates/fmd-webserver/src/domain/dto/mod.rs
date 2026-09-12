@@ -1,3 +1,5 @@
+//! Request shapes: query strings and bodies, camelCase on the wire.
+
 pub mod head;
 pub mod matches;
 pub mod notes;

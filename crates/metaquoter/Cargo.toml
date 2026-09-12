@@ -3,6 +3,7 @@ name = "metaquoter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "metaquoter"
@@ -19,11 +20,15 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 dotenvy = { workspace = true }
 async-trait = { workspace = true }
+chain-types = { path = "../chain-types", features = ["rpc"] }
 alloy = { workspace = true }
-url = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 
 [dev-dependencies]
-mockall = "0.13"
+mockall = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+vergen-gix = { workspace = true }

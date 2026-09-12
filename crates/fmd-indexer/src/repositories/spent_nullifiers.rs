@@ -6,15 +6,9 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone)]
-pub struct NewSpentNullifier {
-    pub chain_id: i64,
-    pub block_number: i64,
-    pub log_index: i32,
-    pub nf: Vec<u8>,
-    pub tx_hash: Vec<u8>,
-    pub block_ts: i64,
-}
+/// The unnumbered row this repository takes. Defined in the planning domain and
+/// re-exported here, which is the path callers use.
+pub use crate::domain::pending::NewSpentNullifier;
 
 /// `NewSpentNullifier` plus the dense per-chain ordinal the repo assigns.
 /// `/v1/chains/{id}/nullifiers/chunks/*` slices on `seq`, mirroring

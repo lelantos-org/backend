@@ -9,27 +9,24 @@ name = "explorer-indexer"
 path = "src/main.rs"
 
 [dependencies]
-futures = { workspace = true }
 shared = { path = "../shared" }
 database = { path = "../database" }
 chain-types = { path = "../chain-types" }
-# NOTE: must NOT depend on fmd-crypto. Privacy gate enforced in CI.
+# NOTE: must NOT depend on common-crypto. Privacy gate; a convention caught in
+# review, not by CI — see the README.
 tokio = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
+# Primitive types only (`Address`, `U256`) as they arrive from `chain-types`'s
+# decode. No provider, no transport: this crate opens no RPC connection.
 alloy = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 dotenvy = { workspace = true }
-hex = { workspace = true }
 bigdecimal = { workspace = true }
 async-trait = { workspace = true }
 
 [build-dependencies]
 vergen-gix = { workspace = true }
-
-[dev-dependencies]
-test-support = { path = "../test-support" }

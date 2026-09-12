@@ -1,0 +1,70 @@
+//! Cached view of the `assets` table.
+//!
+//! `protocol-indexer` writes it and its readers poll it hard: the relayer's
+//! shielded-fee check runs on every submission, and the catalog route every
+//! wallet boots from reads the same rows. The relayer's pool is
+//! `PoolCfg::relayer()` with four connections, so a per-request read is costly.
+//!
+//! The registry is append-mostly: an asset appears when the indexer first sees it
+//! registered on chain and does not change afterwards. A short TTL therefore
+//! picks up new assets promptly rather than correcting stale ones.
+//!
+//! One field does move. A yield asset's row carries the index its unit is priced
+//! at, and that rises with the venue on every block, so the TTL now bounds how
+//! stale a price can be rather than only how late a new asset arrives. It is
+//! still the right order of magnitude by a wide margin: at 5% APY the index
+//! moves on the order of 1e-7 per minute, far below the grace the fee check
+//! already applies. The one discontinuity is a venue loss, after which a cached
+//! row over-values a unit until it expires — a small relayer loss, never a
+//! charge to a user.
+
+use crate::error::{Error, Result};
+use crate::repo;
+use crate::row::AssetRow;
+use database::DbPool;
+use shared::cache::{Cache, build};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// One entry per chain; a deployment serves a handful.
+const CAPACITY: u64 = 64;
+
+/// How long a chain's asset list is reused: short enough that a newly registered
+/// asset becomes spendable within the minute, long enough that a herd of wallet
+/// polls collapses onto one query.
+const TTL: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+pub struct AssetRegistry {
+    pool: DbPool,
+    by_chain: Cache<i64, Arc<Vec<AssetRow>>>,
+}
+
+impl AssetRegistry {
+    pub fn new(pool: DbPool) -> Self {
+        Self {
+            pool,
+            by_chain: build(CAPACITY, TTL),
+        }
+    }
+
+    /// Every registered asset on `chain_id`, lowest id first.
+    ///
+    /// An empty list means the indexer has not caught up rather than that the
+    /// chain supports no assets.
+    pub async fn for_chain(&self, chain_id: i64) -> Result<Arc<Vec<AssetRow>>> {
+        let pool = self.pool.clone();
+        self.by_chain
+            .try_get_with(chain_id, async move {
+                repo::list_for_chain(&pool, chain_id).await.map(Arc::new)
+            })
+            .await
+            .map_err(|e: Arc<Error>| Error::Db(e.to_string()))
+    }
+
+    /// One asset by its MASP id, or `None` if this chain has no such asset.
+    pub async fn by_asset_id(&self, chain_id: i64, asset_id: u64) -> Result<Option<AssetRow>> {
+        let rows = self.for_chain(chain_id).await?;
+        Ok(rows.iter().find(|a| a.asset_id() == asset_id).cloned())
+    }
+}

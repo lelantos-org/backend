@@ -1,3 +1,8 @@
+//! Axum route handlers.
+//!
+//! Each one parses its query into a DTO, validates it, and hands the result to a
+//! service. Nothing here decides what a number means.
+
 pub mod anonymity_set;
 pub mod asset_flows;
 pub mod asset_yield;

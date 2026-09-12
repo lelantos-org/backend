@@ -1,13 +1,21 @@
-//! Explorer indexer.
+//! Explorer indexer: flow analytics for explorer-ui.
+//!
+//! Aggregates `asset_flows` and `yield_fee_events` from rows the ingester has
+//! already written, and rebuilds the materialized views over them. Reads no
+//! chain — everything needing an RPC, and every table the wallet or the relayer
+//! depends on, belongs to `protocol-indexer`.
 //!
 //! Layered binary; see `backend/ARCHITECTURE.md`. Owns one ticking service
 //! (`ConsumeServiceImpl`) implementing `shared::tick::TickService`. Must not
-//! depend on `fmd-crypto`, which is the privacy gate.
+//! depend on `common-crypto`, which is the privacy gate.
 
 pub mod adapters;
-pub mod build_info;
-pub mod config;
-pub mod error;
+pub mod app;
+pub mod domain;
 pub mod repositories;
 pub mod services;
-pub mod util;
+
+// The three modules above used to sit at the crate root. Re-exported so the old
+// paths keep resolving.
+pub use app::{build_info, config};
+pub use domain::error;

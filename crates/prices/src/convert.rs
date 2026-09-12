@@ -1,6 +1,6 @@
 //! Base-units → USD conversion.
 
-use crate::llama::TokenPrice;
+use crate::token::TokenPrice;
 
 /// Convert a token-base-unit amount to USD.
 ///

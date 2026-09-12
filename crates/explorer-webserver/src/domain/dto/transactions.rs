@@ -5,7 +5,8 @@ use utoipa::IntoParams;
 #[serde(rename_all = "camelCase")]
 pub struct RecentTxQuery {
     pub chain_id: Option<i64>,
-    /// Only transactions at or after this unix second.
+    /// Only transactions at or after this unix second. Absent defaults to the
+    /// last 30 days; pass `0` for all history.
     pub since_ts: Option<i64>,
     /// Only transactions of this kind: `deposit`, `pending`, `transfer` or
     /// `withdraw`. Absent means every kind.
@@ -18,5 +19,7 @@ pub struct RecentTxQuery {
 pub struct TxKindsQuery {
     pub chain_id: Option<i64>,
     pub bucket_sec: Option<i64>,
+    /// Only transactions at or after this unix second. Absent defaults to the
+    /// last 30 days; pass `0` for all history.
     pub since_ts: Option<i64>,
 }

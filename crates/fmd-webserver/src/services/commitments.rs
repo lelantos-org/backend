@@ -1,30 +1,19 @@
+//! The note-commitment chunk feed.
+//!
+//! One pre-hashed Merkle leaf per entry: hashing was the only thing a client did
+//! with the raw `cm` / `cv_dep`, so serving the leaf cuts the largest feed in a
+//! cold sync roughly threefold. Clients verify the root they build against the
+//! on-chain root instead of re-deriving leaves.
+
 use crate::app::AppState;
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::field::{bigdec_to_field, bytes_to_field, field_to_hex};
+use crate::domain::poseidon::leaf_hash;
+use crate::domain::responses::{CommitmentChunkOut, CommitmentEntry, RenderedChunk};
 use crate::repositories::notes;
-use crate::services::field::{bigdec_to_field, bytes_to_field, field_to_hex};
-use crate::services::poseidon::leaf_hash;
-use std::sync::Arc;
+use crate::services::chunks;
 
-pub const CHUNK_SIZE: u64 = 1024;
-
-pub struct ChunkEntry {
-    pub leaf_index: i64,
-    /// `Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`, precomputed.
-    ///
-    /// Sending the hash rather than `cm` and the two `cv_dep` coordinates is one
-    /// field element instead of three: it saves each client 1,048,576 pure-JS
-    /// Poseidon-4 calls over a full tree and cuts the feed roughly threefold.
-    ///
-    /// Clients cannot derive the leaf themselves, so they are expected to verify
-    /// the root they build against the on-chain root.
-    pub leaf_hash: String,
-}
-
-pub struct ChunkResponse {
-    pub chunk_id: u64,
-    pub entries: Vec<ChunkEntry>,
-    pub is_complete: bool,
-}
+pub use crate::services::chunks::CHUNK_SIZE;
 
 /// Reject a chunk whose `leaf_index` values are not `from, from+1, ...`.
 ///
@@ -47,21 +36,24 @@ fn ensure_dense(rows: &[notes::LeafInputsRow], from: i64) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn get_chunk(
-    st: &AppState,
-    chain_id: i64,
-    chunk_id: u64,
-) -> AppResult<Arc<ChunkResponse>> {
-    // Only complete (immutable) chunks are cached; see `AppCache::chunks`.
-    let cached = st.cache.chunks.get(&(chain_id, chunk_id)).await;
-    shared::metrics::record_cache("chunks", cached.is_some());
-    if let Some(cached) = cached {
-        return Ok(cached);
-    }
+/// One chunk of the commitment feed, serialised and ready to write.
+///
+/// A hit returns the bytes rendered when the chunk was first assembled: a
+/// complete chunk never changes, so re-serialising 1024 entries per request
+/// would recompute a constant.
+pub async fn get_chunk(st: &AppState, chain_id: i64, chunk_id: u64) -> AppResult<RenderedChunk> {
+    chunks::serve(
+        &st.cache.chunks,
+        "chunks",
+        (chain_id, chunk_id),
+        render(st, chain_id, chunk_id),
+    )
+    .await
+}
 
-    let from = (chunk_id * CHUNK_SIZE) as i64;
-    let to = from + CHUNK_SIZE as i64;
-    let rows = notes::list_leaf_inputs(&st.pool, chain_id, from, Some(to)).await?;
+async fn render(st: &AppState, chain_id: i64, chunk_id: u64) -> AppResult<RenderedChunk> {
+    let (from, to) = chunks::range(chunk_id);
+    let rows = notes::list_leaf_inputs(&st.pool, chain_id, from, to).await?;
     let is_complete = rows.len() as u64 == CHUNK_SIZE;
     ensure_dense(&rows, from)?;
     let entries = rows
@@ -72,26 +64,18 @@ pub async fn get_chunk(
             let cm = bytes_to_field(&r.cm)?;
             let x = bigdec_to_field(&r.cv_dep_x)?;
             let y = bigdec_to_field(&r.cv_dep_y)?;
-            Ok(ChunkEntry {
+            Ok(CommitmentEntry {
                 leaf_index: r.leaf_index,
                 leaf_hash: field_to_hex(&leaf_hash(&cm, &x, &y)?),
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
-    let response = Arc::new(ChunkResponse {
+    RenderedChunk::render(&CommitmentChunkOut {
         chunk_id,
         entries,
         is_complete,
-    });
-
-    if is_complete {
-        st.cache
-            .chunks
-            .insert((chain_id, chunk_id), Arc::clone(&response))
-            .await;
-    }
-
-    Ok(response)
+    })
+    .map_err(|e| AppError::Internal(format!("serialise commitment chunk: {e}")))
 }
 
 #[cfg(test)]

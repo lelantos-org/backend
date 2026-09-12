@@ -8,16 +8,16 @@ use crate::services::asset_registry::AssetRegistry;
 use crate::services::fee_quote::FeeQuoter;
 use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::{
-    FeeContext, SPEND_LEAVES, SpendInputs, TransactBinding, build_tu_pi_for_spend,
-    check_known_root, parse_spend_inputs, prove_spend, verify_transact_proof,
+    FeeContext, SpendInputs, SubmitStage, TransactBinding, build_tu_pi_for_spend,
+    parse_spend_inputs, reserve_prove_submit, verify_transact_proof,
 };
-use crate::services::prover::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::submitter::{SubmissionReceipt, Submitter};
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, MirrorSnapshot, ReservedSlot, TreeMirror};
 use alloy::primitives::Address;
 use alloy::sol_types::SolCall;
+use groth16::{TreeUpdateBatchProof, TreeUpdateBatchProver};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, instrument};
@@ -84,34 +84,27 @@ impl SpendPipeline {
             )
             .await?;
 
-        // Hold the mirror lock through reserve, prove and submit so concurrent
-        // pipelines on this chain serialise.
-        let mut mirror = self.mirror.lock().await;
-        info!(
-            leaf_count = mirror.committed_count(),
-            "spend pipeline start"
-        );
-        check_known_root(&mirror, &payload.pub_inputs)?;
-        let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
-        let tu_proof = match prove_spend(&self.prover, &slot, &advanced, &inputs).await {
-            Ok(p) => p,
-            Err(e) => return Err(mirror.unwind(SPEND_LEAVES, e)),
+        // The mirror lock is held from reserve through the receipt; see
+        // `reserve_prove_submit`, which spend and swap share.
+        let stage = SubmitStage {
+            mirror: &self.mirror,
+            prover: &self.prover,
+            submitter: &submitter,
+            start_msg: "spend pipeline start",
         };
+        let receipt = reserve_prove_submit(stage, &payload.pub_inputs, &inputs, |slot, adv, tp| {
+            encode_spend_calldata(&payload, &inputs, slot, adv, tp)
+        })
+        .await?;
 
-        let calldata = encode_spend_calldata(&payload, &inputs, &slot, &advanced, &tu_proof)?;
-        match submitter.submit(calldata).await {
-            Ok(receipt) => {
-                self.gas_witness.observe(entry, receipt.gas_used);
-                info!(
-                    entry = entry.as_str(),
-                    tx_hash = %receipt.tx_hash,
-                    gas_used = receipt.gas_used,
-                    "spend submitted"
-                );
-                Ok(receipt)
-            }
-            Err(e) => Err(mirror.unwind(SPEND_LEAVES, e)),
-        }
+        self.gas_witness.observe(entry, receipt.gas_used);
+        info!(
+            entry = entry.as_str(),
+            tx_hash = %receipt.tx_hash,
+            gas_used = receipt.gas_used,
+            "spend submitted"
+        );
+        Ok(receipt)
     }
 
     /// Fee quote for `/v1/spend/estimate`, pricing this entry point's observed
@@ -178,7 +171,7 @@ impl SpendPipeline {
 
 fn encode_spend_calldata(
     payload: &SubmitSpendPayload,
-    _inputs: &SpendInputs,
+    inputs: &SpendInputs,
     slot: &ReservedSlot,
     advanced: &AdvancedState,
     tu_proof: &TreeUpdateBatchProof,
@@ -186,7 +179,7 @@ fn encode_spend_calldata(
     let p = build_proof(&payload.proof)?;
     let pi = build_pub_inputs(&payload.pub_inputs)?;
     let tp = build_tu_proof(tu_proof)?;
-    let tpi = build_tu_pi_for_spend(slot, advanced, _inputs);
+    let tpi = build_tu_pi_for_spend(slot, advanced, inputs);
     let aux = build_aux(&payload.aux)?;
     let out = match payload.kind {
         SpendKind::Transfer => IMasp::transferCall {
@@ -264,6 +257,19 @@ fn validate_spend_shape(
             }
         }
     }
+    // Parse every caller-supplied field the calldata encoder parses, here,
+    // before anything expensive or stateful runs. `encode_spend_calldata` runs
+    // inside `reserve_prove_submit`, after the mirror has speculatively
+    // reserved leaves and after a full Groth16 — so a malformed `proof` or
+    // `aux` found there costs a proof and an unwind. The same errors surface,
+    // just ahead of the work instead of behind it.
+    //
+    // This is also the only thing that rejects a malformed proof on a chain
+    // with no `prover.transact_vkey_path`: `verify_transact_proof` returns
+    // `Ok(())` immediately when no verifier is loaded.
+    build_proof(&payload.proof)?;
+    build_pub_inputs(&payload.pub_inputs)?;
+    build_aux(&payload.aux)?;
     Ok(())
 }
 

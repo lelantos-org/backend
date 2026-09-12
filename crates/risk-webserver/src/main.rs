@@ -10,6 +10,9 @@ async fn main() -> Result<()> {
     build_info::log_banner();
 
     let cfg = RiskWebserverConfig::from_env()?;
+    // Installs the recorder the `track_http` layer feeds; without it the
+    // instrumentation compiles but exports nothing.
+    shared::metrics::init_addr(&cfg.metrics_addr)?;
 
     // Unlike the other webservers this one runs migrations: no indexer touches
     // `screened_addresses`, so nothing else would create it.

@@ -18,3 +18,8 @@ block_poll_ms = 250
 backfill_threshold = 50
 backfill_concurrency = 4
 chunk_blocks = 1000
+# Held below the defaults on purpose. These two are the whole chain's RPC budget
+# rather than one call's, and arb1.arbitrum.io is a shared public endpoint that
+# throttles well before a paid plan would. Raise both together with the RPC URL.
+log_concurrency = 4
+meta_concurrency = 8

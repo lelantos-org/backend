@@ -19,9 +19,9 @@ receipt_timeout_s = 60
 flush_interval_s = 3
 # A deposit mints two leaves — the depositor's note and the note paying
 # whoever flushes it — so one `flushBatch` carries at most
-# `MAX_L_BATCH / LEAVES_PER_DEPOSIT = 2` deposits. The relayer clamps to that
-# at boot; a larger number here just asserts a throughput it will not get.
-flush_max_n = 2
+# `MAX_L_BATCH / LEAVES_PER_DEPOSIT = 8 / 2 = 4` deposits. The relayer clamps to
+# that at boot; a larger number here just asserts a throughput it will not get.
+flush_max_n = 4
 swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
 
 [prover]

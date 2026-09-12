@@ -8,7 +8,7 @@
 //!
 //! Must stay byte-identical to `contracts/src/MASP.sol::_depositDigest`.
 
-use crate::services::deposit_mempool::PendingDeposit;
+use crate::domain::deposit::PendingDeposit;
 use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::sol_types::SolValue;
 

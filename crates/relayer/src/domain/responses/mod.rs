@@ -1,6 +1,5 @@
-use crate::services::venue_apy::ApyEstimate;
+use ::asset_registry::AssetRow;
 use serde::Serialize;
-use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +23,15 @@ pub struct ChainsResponse {
     pub chains: Vec<ChainHealth>,
 }
 
+/// What one relayer reports about itself on a chain.
+///
+/// Deliberately holds nothing that describes the *deployment* — chain name,
+/// browser RPC, explorer, Permit2, the contract addresses and the asset catalog
+/// are registry-webserver's `/v1/chains` and `/v1/assets`, identical for every
+/// relayer serving the chain. What is left is what only this relayer can answer:
+/// the signer it will sign with, the pool it writes to, the tree it mirrors and
+/// what it charges. A self-hosted relayer is therefore configured only with what
+/// it operates.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainHealth {
@@ -39,16 +47,16 @@ pub struct ChainHealth {
     /// EIP-55 checksummed relayer signer. Wallets bind this into the SNARK,
     /// and the pool rejects a proof naming anyone else.
     pub relayer_address: String,
-    /// Flattened into the same JSON object, so a client sees one chain record
-    /// while the split keeps the live mirror readings above separate from the
-    /// static configuration below.
-    #[serde(flatten)]
-    pub config: ChainConfigOut,
-    /// Assets registered on this chain, lowest id first.
+    /// Depth of the tree this relayer actually mirrors — a reading, not a
+    /// configured value.
     ///
-    /// Empty when the indexer has not caught up, which a client must read as not
-    /// yet known rather than as the chain supporting no assets.
-    pub tokens: Vec<TokenOut>,
+    /// The second half of the wallet's cross-check, alongside `maspAddress`:
+    /// registry-webserver publishes the depth the *deployment* declares, this
+    /// publishes the depth this relayer will verify against, and a wallet that
+    /// finds them different refuses the relayer rather than discovering the
+    /// mismatch after building a proof. Taken from the compiled-in `tree::DEPTH`,
+    /// so it cannot drift from the mirror it describes.
+    pub tree_depth: u32,
     /// Shielded fee terms, when this relayer charges one.
     ///
     /// Presence means required: a client that sees this key must attach a fee
@@ -63,8 +71,8 @@ pub struct ChainHealth {
 /// Terms only, no amount. An amount is a function of the gas price and an oracle
 /// rate, both of which move within the minute, while `/chains` is a boot registry
 /// a wallet reads once and holds behind a 60s edge cache. The live number belongs
-/// to `/v1/spend/estimate`, for the same reason `/v1/prices` is its own route
-/// rather than a field on [`TokenOut`].
+/// to `/v1/spend/estimate`, for the same reason registry-webserver publishes spot
+/// prices on their own route rather than as a field on its catalog.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShieldedFeeOut {
@@ -85,8 +93,8 @@ pub struct ShieldedFeeOut {
     /// transfer.
     ///
     /// Repeated in full rather than named by id, so a client reading `shieldedFee`
-    /// has the `scale` it needs to size the note without joining back to
-    /// [`ChainHealth::tokens`].
+    /// has the `scale` it needs to size the note without joining back to the
+    /// deployment catalog registry-webserver publishes.
     pub tokens: Vec<TokenOut>,
 }
 
@@ -160,68 +168,16 @@ pub struct YieldOut {
     /// The venue is no longer being supplied. Existing backing is unaffected —
     /// the asset degrades to zero-yield custody, still fully backed.
     pub halted: bool,
-    /// Estimated annual rate for a note holder, in basis points, net of the
-    /// pool's performance fee and idle buffer.
-    ///
-    /// An **estimate**, measured from the venue's vault over `apyWindowS` and
-    /// annualized on the assumption it continues — not a promise, and not what
-    /// any particular wallet earned, which depends on when it bought in.
-    ///
-    /// Absent, never zero, when it could not be measured: an RPC without state
-    /// that far back, a vault younger than the window, or a reading too wild to
-    /// be a rate. A client must render nothing rather than `0.00%`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub apy_bps: Option<i32>,
-    /// Seconds actually spanned by the two readings behind `apyBps`. Present iff
-    /// `apyBps` is.
-    ///
-    /// Published rather than assumed: a client that says "over the last week"
-    /// while the relayer measured nine days is stating something it did not
-    /// measure, and the window is what makes the figure checkable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub apy_window_s: Option<i64>,
-}
-
-/// Spot USD prices for the registered assets, across every chain.
-///
-/// A separate route rather than a field on [`TokenOut`]: `/chains` is a boot
-/// registry a client reads once and holds, while a price is stale within the
-/// minute. Combining them would mean refetching the registry to move a price, or
-/// showing a price fixed at page load.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PricesResponse {
-    /// Shared with the response cache rather than copied out of it. `serde`'s `rc`
-    /// feature is enabled workspace-wide, which lets this serialize in place, the
-    /// same shape `explorer-webserver`'s handlers return.
-    pub prices: Arc<Vec<PriceOut>>,
-}
-
-/// One priced token.
-///
-/// A token the provider does not know, such as a local test token or one on an
-/// uncovered chain, is absent from `prices` rather than carried with a zero.
-/// Absence means unknown, so a client renders nothing rather than `$0.00`.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PriceOut {
-    pub chain_id: i64,
-    /// 0x-prefixed ERC-20 address, spelled exactly as [`TokenOut::token`] so a
-    /// client can join the two without normalising either.
-    pub token: String,
-    /// Spot USD price of one whole token.
-    pub price_usd: f64,
-    /// The provider's own timestamp for the quote rather than the fetch time, so a
-    /// client can age it.
-    pub price_at: i64,
 }
 
 impl TokenOut {
-    /// One asset, with the rate estimate the worker last measured for it.
+    /// One registered asset, shaped for the wire.
     ///
-    /// The estimate is passed in rather than read here: it comes from a cache
-    /// keyed by chain, and a row does not know which chain it was loaded for.
-    pub fn new(a: &crate::repositories::assets::AssetRow, apy: Option<ApyEstimate>) -> Self {
+    /// Carries no rate: what a venue has been paying is measured and published by
+    /// registry-webserver, on the catalog it owns. A relayer restating it would be
+    /// asserting a deployment-wide fact from a service a wallet cannot check it
+    /// against — and a self-hosted one could state whatever it liked.
+    pub fn new(a: &AssetRow) -> Self {
         Self {
             asset_id: a.asset_id_u64,
             token: format!("0x{}", hex::encode(&a.token)),
@@ -230,65 +186,25 @@ impl TokenOut {
             symbol: a.symbol.clone(),
             deposit_bps: a.deposit_bps,
             withdraw_bps: a.withdraw_bps,
-            yield_state: yield_out(a, apy),
+            yield_state: yield_out(a),
         }
     }
 }
 
 /// `None` for a plain asset, and also for a yield asset the poller has not
 /// reached yet — a client must not price the latter at `scale`.
-fn yield_out(
-    a: &crate::repositories::assets::AssetRow,
-    apy: Option<ApyEstimate>,
-) -> Option<YieldOut> {
+fn yield_out(a: &AssetRow) -> Option<YieldOut> {
     let venue = a.venue.as_ref()?;
     let gross = a.gross.as_ref()?;
     let total = a.total_normalized.as_ref()?;
     let fee_units = a.accrued_fee_normalized.as_ref()?;
-    // Bound once, so the two fields below cannot drift apart: their docs promise
-    // one is present iff the other is, and two separately written filters would
-    // hold that only by coincidence. A halted venue is no longer supplied, so
-    // whatever it last paid is not a rate this asset earns — dropped rather than
-    // published as stale.
-    let apy = apy.filter(|_| !a.halted.unwrap_or(false));
     Some(YieldOut {
         venue: format!("0x{}", hex::encode(venue)),
         gross: gross.to_string(),
         supply: (total + fee_units).to_string(),
         index: a.index_ray.as_ref()?.to_string(),
         halted: a.halted.unwrap_or(false),
-        apy_bps: apy.map(|e| e.bps),
-        apy_window_s: apy.map(|e| e.window_s),
     })
-}
-
-/// The configuration half of a chain record: static, deployment-supplied, and
-/// absent field by field until an operator fills it in.
-///
-/// Every field is optional and omitted when unset rather than serialised as
-/// `null`, so a client can distinguish an undescribed field from one described as
-/// empty and fall back to its own defaults.
-#[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChainConfigOut {
-    /// EIP-55 checksummed `NativeAdapter`, when one is deployed. Absent means
-    /// native-coin deposit and withdraw have no entry point on this chain.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_adapter_address: Option<String>,
-    /// EIP-55 checksummed `SwapWrapper`, when one is deployed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub swap_wrapper_address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chain_name: Option<String>,
-    /// Browser-reachable RPC; not the relayer's own endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rpc_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tree_depth: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub permit2_address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub explorer_url: Option<String>,
 }
 
 // `Clone` so one priced token can be fanned out into a quote per asset id
@@ -343,13 +259,9 @@ pub struct EstimateResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainConfigOut, ChainHealth, ShieldedFeeOut, TokenOut};
+    use super::{ChainHealth, ShieldedFeeOut, TokenOut};
 
-    fn health(config: ChainConfigOut) -> ChainHealth {
-        health_with(config, vec![])
-    }
-
-    fn health_with(config: ChainConfigOut, tokens: Vec<TokenOut>) -> ChainHealth {
+    fn health() -> ChainHealth {
         ChainHealth {
             chain_id: 31337,
             committed_count: 1,
@@ -357,9 +269,21 @@ mod tests {
             masp_address: "0xMASP".to_string(),
             desynced: false,
             relayer_address: "0xRELAYER".to_string(),
-            config,
-            tokens,
+            tree_depth: 11,
             shielded_fee: None,
+        }
+    }
+
+    fn token(asset_id: i64) -> TokenOut {
+        TokenOut {
+            asset_id,
+            token: "0xdead".to_string(),
+            scale: "1000000000000".to_string(),
+            decimals: Some(6),
+            symbol: Some("USDC".to_string()),
+            deposit_bps: Some(0),
+            withdraw_bps: Some(20),
+            yield_state: None,
         }
     }
 
@@ -368,28 +292,19 @@ mod tests {
     /// with unknown terms.
     #[test]
     fn a_chain_that_charges_no_shielded_fee_omits_the_key_entirely() {
-        let json = serde_json::to_value(health(ChainConfigOut::default())).expect("serialize");
+        let json = serde_json::to_value(health()).expect("serialize");
         let obj = json.as_object().expect("object");
         assert!(!obj.contains_key("shieldedFee"), "got {json}");
     }
 
     #[test]
     fn shielded_fee_terms_serialize_under_one_camel_case_key() {
-        let mut h = health(ChainConfigOut::default());
+        let mut h = health();
         h.shielded_fee = Some(ShieldedFeeOut {
             address: "lelantos1abc".to_string(),
             grace_bps: 300,
             markup_bps: 1000,
-            tokens: vec![TokenOut {
-                asset_id: 1,
-                token: "0xdead".to_string(),
-                scale: "1000000000000".to_string(),
-                decimals: Some(6),
-                symbol: Some("USDC".to_string()),
-                deposit_bps: Some(0),
-                withdraw_bps: Some(20),
-                yield_state: None,
-            }],
+            tokens: vec![token(1)],
         });
         let json = serde_json::to_value(&h).expect("serialize");
         let fee = &json["shieldedFee"];
@@ -400,76 +315,62 @@ mod tests {
         assert_eq!(fee["tokens"][0]["scale"], "1000000000000");
     }
 
-    /// The config half is `#[serde(flatten)]`ed, so a client sees one flat record.
-    /// Nesting it would break every consumer's parser.
+    /// The deployment half moved to registry-webserver. A relayer that still
+    /// published it would re-create the split this service exists to end, and
+    /// would let a self-hosted relayer assert facts it has no authority over.
     #[test]
-    fn test_serialize_chain_health_flattens_config_into_one_object() {
-        let json = serde_json::to_value(health(ChainConfigOut {
-            chain_name: Some("anvil".to_string()),
-            rpc_url: Some("http://localhost:8545".to_string()),
-            tree_depth: Some(10),
-            ..Default::default()
-        }))
-        .expect("serialize");
+    fn test_serialize_chain_health_publishes_nothing_about_the_deployment() {
+        let json = serde_json::to_value(health()).expect("serialize");
 
-        assert_eq!(json["chainId"], 31337);
-        assert_eq!(json["relayerAddress"], "0xRELAYER");
-        // Flat, not `json["config"]["chainName"]`.
-        assert_eq!(json["chainName"], "anvil");
-        assert_eq!(json["rpcUrl"], "http://localhost:8545");
-        assert_eq!(json["treeDepth"], 10);
-        assert!(json.get("config").is_none());
-    }
-
-    /// An undescribed field is omitted rather than serialised as `null`.
-    ///
-    /// The distinction matters to the wallet: absent means the deployment does not
-    /// describe the field and the client should use its own default, which keeps a
-    /// relayer predating the registry working with existing clients.
-    #[test]
-    fn test_serialize_chain_health_omits_undescribed_config_fields() {
-        let json = serde_json::to_value(health(ChainConfigOut::default())).expect("serialize");
-
-        for absent in [
+        for moved in [
             "chainName",
             "rpcUrl",
-            "treeDepth",
+            "explorerUrl",
             "permit2Address",
             "nativeAdapterAddress",
             "swapWrapperAddress",
-            "explorerUrl",
+            "tokens",
         ] {
-            assert!(json.get(absent).is_none(), "{absent} must be omitted");
+            assert!(
+                json.get(moved).is_none(),
+                "{moved} belongs to registry-webserver /v1/chains"
+            );
         }
-        // The live readings are unconditional and must survive the omission.
-        assert_eq!(json["committedCount"], 1);
-        assert_eq!(json["maspAddress"], "0xMASP");
     }
 
-    /// `tokens` is always present, so a client can distinguish no assets indexed
-    /// yet, an empty array, from a relayer predating the field, a missing key.
+    /// The readings only this relayer can make, and the two a wallet
+    /// cross-checks against the registry. All unconditional: a relayer that
+    /// cannot answer these has nothing a wallet can use.
     #[test]
-    fn test_serialize_chain_health_always_carries_a_token_array() {
-        let json = serde_json::to_value(health(ChainConfigOut::default())).expect("serialize");
-        assert_eq!(json["tokens"], serde_json::json!([]));
+    fn test_serialize_chain_health_carries_every_relayer_reading() {
+        let json = serde_json::to_value(health()).expect("serialize");
+
+        assert_eq!(json["chainId"], 31337);
+        assert_eq!(json["relayerAddress"], "0xRELAYER");
+        assert_eq!(json["committedCount"], 1);
+        assert_eq!(json["currentRootHex"], "0xab");
+        assert_eq!(json["desynced"], false);
+        // The cross-check pair.
+        assert_eq!(json["maspAddress"], "0xMASP");
+        assert_eq!(json["treeDepth"], 11);
     }
 
-    /// A token whose metadata the indexer has not resolved omits those fields
-    /// rather than sending `null`, matching how the config half behaves.
+    /// A fee token whose metadata the indexer has not resolved omits those
+    /// fields rather than sending `null`, so a client can tell an unread symbol
+    /// from a token that has none.
     #[test]
     fn test_serialize_token_omits_unresolved_metadata() {
-        let json = serde_json::to_value(health_with(
-            ChainConfigOut::default(),
-            vec![
+        let mut h = health();
+        h.shielded_fee = Some(ShieldedFeeOut {
+            address: "lelantos1abc".to_string(),
+            grace_bps: 300,
+            markup_bps: 1000,
+            tokens: vec![
                 TokenOut {
-                    asset_id: 1,
-                    token: "0xabc".to_string(),
-                    scale: "10000000000".to_string(),
-                    decimals: Some(18),
                     symbol: Some("WETH".to_string()),
-                    deposit_bps: Some(0),
-                    withdraw_bps: Some(20),
-                    yield_state: None,
+                    decimals: Some(18),
+                    scale: "10000000000".to_string(),
+                    ..token(1)
                 },
                 TokenOut {
                     asset_id: 2,
@@ -484,15 +385,16 @@ mod tests {
                     yield_state: None,
                 },
             ],
-        ))
-        .expect("serialize");
+        });
+        let json = serde_json::to_value(&h).expect("serialize");
+        let tokens = &json["shieldedFee"]["tokens"];
 
-        assert_eq!(json["tokens"][0]["symbol"], "WETH");
-        assert_eq!(json["tokens"][0]["decimals"], 18);
+        assert_eq!(tokens[0]["symbol"], "WETH");
+        assert_eq!(tokens[0]["decimals"], 18);
         // Scale is a decimal string; it does not fit a JSON number safely.
-        assert_eq!(json["tokens"][0]["scale"], "10000000000");
-        assert!(json["tokens"][1].get("symbol").is_none());
-        assert!(json["tokens"][1].get("decimals").is_none());
-        assert_eq!(json["tokens"][1]["assetId"], 2);
+        assert_eq!(tokens[0]["scale"], "10000000000");
+        assert!(tokens[1].get("symbol").is_none());
+        assert!(tokens[1].get("decimals").is_none());
+        assert_eq!(tokens[1]["assetId"], 2);
     }
 }

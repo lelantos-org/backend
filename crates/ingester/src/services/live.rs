@@ -15,34 +15,108 @@
 use crate::adapters::DynRpc;
 use crate::app::config::ChainConfig;
 use crate::domain::error::IngesterError;
-use crate::domain::models::TickOutcome;
+use crate::domain::models::{Checkpoint, TickOutcome, scanned_watermark};
 use crate::repositories::ChainStateRepo;
 use crate::services::ingest::IngestService;
 use crate::services::log_range::{LogWindow, fetch_rows};
-use crate::services::reorg::{Checkpoint, ReorgService, anchor_of};
+use crate::services::reorg::{ReorgService, anchor_of};
 use alloy::primitives::{Address, B256};
 use async_trait::async_trait;
 use shared::metrics::{
     ingest_stage, record_chain_lag, record_event_age, stage, timed_ingest_stage,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tracing::{debug, info, warn};
 
 #[async_trait]
 pub trait LiveService: Send + Sync {
     async fn tick(&self) -> Result<TickOutcome, IngesterError>;
+    /// Drop anything remembered about the cursor, forcing the next tick to read
+    /// it from Postgres.
+    ///
+    /// Called on entry to live mode, because the backfill writes the same row and
+    /// this service is reused across the alternation between the two.
+    fn forget_cursor(&self);
     fn poll_ms(&self) -> u64;
     fn chain_id(&self) -> i64;
 }
 
+/// What the previous tick left the cursor at.
+///
+/// Only the two things [`Survey`] takes from it, so nothing here can outlive its
+/// usefulness or disagree with the row it mirrors.
+#[derive(Debug, Clone)]
+struct CachedCursor {
+    last_scanned: i64,
+    anchor: Option<Checkpoint>,
+}
+
+/// Fields are private because one of them is an invariant rather than a setting:
+/// see `cursor`.
 pub struct LiveServiceImpl {
-    pub cfg: ChainConfig,
-    pub pool_addr: Address,
-    pub rpc: DynRpc,
-    pub chain_state: Arc<dyn ChainStateRepo>,
-    pub ingest: Arc<IngestService>,
-    pub reorg: Arc<ReorgService>,
-    pub log_window: Arc<LogWindow>,
+    cfg: ChainConfig,
+    pool_addr: Address,
+    rpc: DynRpc,
+    chain_state: Arc<dyn ChainStateRepo>,
+    ingest: Arc<IngestService>,
+    reorg: Arc<ReorgService>,
+    log_window: Arc<LogWindow>,
+    /// The cursor as this service last left it, so a steady tick costs one round
+    /// trip instead of two.
+    ///
+    /// Sound only because the writer is singular: the advisory lock keeps one
+    /// process on a chain, and within it the backfill and the live tail
+    /// alternate rather than overlap. The two ways the row can move out from
+    /// under this are both handled by clearing it — a rewind, and the backfill,
+    /// which [`LiveService::forget_cursor`] covers on the way back into live mode.
+    ///
+    /// `None` means "ask Postgres", which is also the state every failure leaves
+    /// it in: nothing is recorded here that Postgres has not already accepted.
+    cursor: Mutex<Option<CachedCursor>>,
+}
+
+impl LiveServiceImpl {
+    pub fn new(
+        cfg: ChainConfig,
+        pool_addr: Address,
+        rpc: DynRpc,
+        chain_state: Arc<dyn ChainStateRepo>,
+        ingest: Arc<IngestService>,
+        reorg: Arc<ReorgService>,
+        log_window: Arc<LogWindow>,
+    ) -> Self {
+        Self {
+            cfg,
+            pool_addr,
+            rpc,
+            chain_state,
+            ingest,
+            reorg,
+            log_window,
+            cursor: Mutex::new(None),
+        }
+    }
+
+    /// The cache, recovering from a poisoned lock rather than propagating it.
+    ///
+    /// Poisoning here would mean a tick panicked mid-write, but what it guards is
+    /// replaced wholesale and never mutated in place, so there is no torn state
+    /// to protect anyone from — and refusing the lock would wedge the chain for
+    /// good over a fault the next tick would otherwise re-read past.
+    fn cache(&self) -> MutexGuard<'_, Option<CachedCursor>> {
+        self.cursor.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Replace what the next tick will assume about the cursor.
+    ///
+    /// Only ever called with a value Postgres has already accepted.
+    fn remember(&self, cursor: CachedCursor) {
+        *self.cache() = Some(cursor);
+    }
+
+    fn forget(&self) {
+        *self.cache() = None;
+    }
 }
 
 /// Everything one tick reads before it decides anything.
@@ -77,27 +151,45 @@ enum Plan {
 }
 
 impl LiveServiceImpl {
-    /// Read the cursor, then ask the chain for the anchor's hash and the tip at
-    /// the same time.
+    /// Where the cursor stands, from memory when this service is what last moved
+    /// it and from Postgres otherwise.
     ///
-    /// One DB round trip and one pair of overlapping RPC round trips, where the
-    /// obvious spelling costs five in series: the anchor check and the plan both
-    /// need the cursor, and neither RPC depends on the other's answer.
-    /// `catch_up` already overlaps its two the same way.
-    async fn survey(&self) -> Result<Survey, IngesterError> {
+    /// The read is skippable rather than merely overlappable: the anchor lookup
+    /// needs the cursor, so the two cannot be joined, and a tail that is caught
+    /// up would otherwise spend a round trip every poll being told what it
+    /// already knows.
+    async fn cursor(&self) -> Result<CachedCursor, IngesterError> {
+        if let Some(cached) = self.cache().clone() {
+            return Ok(cached);
+        }
         let chain_id = self.cfg.chain_id;
-        let cursor = timed_ingest_stage(
+        let row = timed_ingest_stage(
             ingest_stage::PLAN,
             chain_id,
             self.chain_state.fetch(chain_id),
         )
         .await?;
-        let last_scanned = cursor
-            .as_ref()
-            .map(|c| c.last_scanned_block)
-            .unwrap_or(self.cfg.start_block - 1);
-        let anchor = cursor.as_ref().and_then(anchor_of);
-        let anchor_block = anchor.as_ref().map(|(b, _)| *b as u64);
+        let cursor = CachedCursor {
+            last_scanned: scanned_watermark(row.as_ref(), self.cfg.start_block),
+            anchor: row.as_ref().and_then(anchor_of),
+        };
+        self.remember(cursor.clone());
+        Ok(cursor)
+    }
+
+    /// Read the cursor, then ask the chain for the anchor's hash and the tip at
+    /// the same time.
+    ///
+    /// The two RPCs overlap because neither depends on the other's answer; the
+    /// obvious spelling costs five round trips in series. `catch_up` already
+    /// overlaps its two the same way.
+    async fn survey(&self) -> Result<Survey, IngesterError> {
+        let chain_id = self.cfg.chain_id;
+        let CachedCursor {
+            last_scanned,
+            anchor,
+        } = self.cursor().await?;
+        let anchor_block = anchor.as_ref().map(|a| a.block as u64);
 
         // A chain with no anchor still needs the tip, so the hash lookup
         // resolves to `None` rather than becoming a second call shape.
@@ -146,6 +238,11 @@ impl LiveServiceImpl {
             return Ok(None);
         };
         warn!(chain_id, rewind_to = divergence.rewind_to, "reorg detected");
+        // Cleared rather than recomputed. A rewind rewrites the anchor from
+        // whatever survived the fork, and re-deriving that here would be a second
+        // copy of `ReorgService::rewind`'s rule; the next tick pays one read
+        // instead, which a reorg is rare enough to afford.
+        self.forget();
         self.reorg.rewind(chain_id, &divergence).await?;
         Ok(Some(TickOutcome::Reorg {
             rewind_to: divergence.rewind_to,
@@ -173,13 +270,20 @@ impl LiveServiceImpl {
         Plan::Scan { from, to }
     }
 
+    /// Fetch `[from, to]`, commit whatever it holds, and record where that left
+    /// the cursor.
+    ///
+    /// Takes the whole survey because the outcome describes it: whether the scan
+    /// reached the tip, and which anchor survives an empty range, are both facts
+    /// about what was surveyed rather than about the range.
     async fn scan(
         &self,
+        survey: &Survey,
         from: i64,
         to: i64,
-        reached_tip: bool,
     ) -> Result<TickOutcome, IngesterError> {
         let chain_id = self.cfg.chain_id;
+        let reached_tip = to == survey.tip;
         // The same adaptive fetcher the backfill uses, so a provider-side range
         // cap narrows the window rather than failing the tick.
         let rows = fetch_rows(
@@ -193,9 +297,23 @@ impl LiveServiceImpl {
         .await?;
         if rows.is_empty() {
             self.ingest.advance_empty(chain_id, to).await?;
+            // An empty range moves the watermark and nothing else: it holds no
+            // block whose hash was seen, so the surveyed anchor still stands.
+            self.remember(CachedCursor {
+                last_scanned: to,
+                anchor: survey.anchor.clone(),
+            });
             return Ok(TickOutcome::Empty { to, reached_tip });
         }
+        let committed = IngestService::cursor_for(chain_id, &rows, to);
         let inserted = self.ingest.commit_batch(chain_id, &rows, to).await?;
+        // After the commit, so nothing is remembered that Postgres rejected. The
+        // anchor comes from `cursor_for` rather than being rebuilt here, so what
+        // is remembered and what was written cannot disagree.
+        self.remember(CachedCursor {
+            last_scanned: to,
+            anchor: committed.as_ref().and_then(anchor_of),
+        });
 
         // Live path only. `commit_batch` also serves the backfill, where the age
         // is that of history rather than of the head, and mixing the two would
@@ -224,6 +342,9 @@ impl LiveService for LiveServiceImpl {
     fn poll_ms(&self) -> u64 {
         self.cfg.block_poll_ms
     }
+    fn forget_cursor(&self) {
+        self.forget();
+    }
 
     async fn tick(&self) -> Result<TickOutcome, IngesterError> {
         let survey = self.survey().await?;
@@ -237,7 +358,7 @@ impl LiveService for LiveServiceImpl {
         match self.plan(&survey) {
             Plan::UpToDate => Ok(TickOutcome::Idle),
             Plan::Lagging { lag } => Ok(TickOutcome::Lagging { lag }),
-            Plan::Scan { from, to } => self.scan(from, to, to == survey.tip).await,
+            Plan::Scan { from, to } => self.scan(&survey, from, to).await,
         }
     }
 }

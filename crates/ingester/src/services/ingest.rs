@@ -1,3 +1,9 @@
+//! The single commit path.
+//!
+//! Both the live tick and the backfill land here, so the rule that decides
+//! what a batch is allowed to move — the watermark always, the reorg anchor
+//! only alongside a block whose hash was actually seen — exists once.
+
 use crate::domain::error::IngesterError;
 use crate::domain::models::{BlockCursor, RawEvent};
 use crate::repositories::{AtomicWriteRepo, ChainStateRepo};
@@ -65,7 +71,11 @@ impl IngestService {
     /// The anchor is the highest block present in the rows rather than the top of
     /// the scanned range: only a block a log was observed in has a hash that can
     /// be checked later.
-    fn cursor_for(chain_id: i64, rows: &[RawEvent], last_scanned: i64) -> Option<BlockCursor> {
+    pub(crate) fn cursor_for(
+        chain_id: i64,
+        rows: &[RawEvent],
+        last_scanned: i64,
+    ) -> Option<BlockCursor> {
         let anchor = rows.iter().max_by_key(|r| r.block_number)?;
         Some(BlockCursor {
             chain_id,

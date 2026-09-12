@@ -1,4 +1,4 @@
-use crate::error::ExplorerIndexerError;
+use crate::domain::error::ExplorerIndexerError;
 use bigdecimal::BigDecimal;
 use database::DbPool;
 use database::schema::yield_fee_events;
@@ -26,10 +26,18 @@ pub struct NewYieldFeeEvent {
 
 /// `do_nothing` on the `(chain_id, tx_hash, log_index)` unique index: a cursor
 /// rewind re-reads the same logs, and a fee event is a fact about one log.
-pub async fn insert(pool: &DbPool, row: NewYieldFeeEvent) -> Result<(), ExplorerIndexerError> {
+/// Insert a whole tick's fee events in one statement; see
+/// [`super::asset_flows::insert_batch`].
+pub async fn insert_batch(
+    pool: &DbPool,
+    rows: &[NewYieldFeeEvent],
+) -> Result<(), ExplorerIndexerError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
     let mut conn = super::conn(pool).await?;
     diesel::insert_into(yield_fee_events::table)
-        .values(&row)
+        .values(rows)
         .on_conflict_do_nothing()
         .execute(&mut conn)
         .await?;

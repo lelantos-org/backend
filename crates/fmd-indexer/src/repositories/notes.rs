@@ -1,30 +1,11 @@
 use crate::domain::error::{Result, log_unique_violation};
 use async_trait::async_trait;
-use bigdecimal::BigDecimal;
 use database::DbPool;
 use database::listen::{self, CHANNEL_NOTES_APPENDED};
-pub use database::models::NoteRow;
+pub use database::models::{LeafInputsRow, NewNote, NoteRow};
 use database::schema::notes;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-
-#[derive(Debug, Clone, Insertable)]
-#[diesel(table_name = notes)]
-pub struct NewNote {
-    pub chain_id: i64,
-    pub block_number: i64,
-    pub tx_hash: Vec<u8>,
-    pub log_index: i32,
-    pub cm: Vec<u8>,
-    pub clue_rx: BigDecimal,
-    pub clue_ry: BigDecimal,
-    pub eph_pub_x: BigDecimal,
-    pub eph_pub_y: BigDecimal,
-    pub ciphertext: Vec<u8>,
-    pub leaf_index: i64,
-    pub cv_dep_x: BigDecimal,
-    pub cv_dep_y: BigDecimal,
-}
 
 #[async_trait]
 pub trait NotesRepo: Send + Sync {
@@ -38,6 +19,13 @@ pub trait NotesRepo: Send + Sync {
 
     /// Highest ingested `notes.id` across all chains, or 0 when empty.
     async fn max_id(&self) -> Result<i64>;
+
+    /// Leaf inputs for `chain_id` in `[from, to)`, ordered by `leaf_index`.
+    ///
+    /// Only the one-shot tree backfill reads this, so it is paged rather than
+    /// streamed: a chain with millions of notes would otherwise materialise every
+    /// leaf at once.
+    async fn leaf_inputs(&self, chain_id: i64, from: i64, to: i64) -> Result<Vec<LeafInputsRow>>;
 
     /// Wake the filter loop after a commit.
     ///
@@ -126,6 +114,18 @@ impl NotesRepo for PostgresNotesRepo {
             .first(&mut conn)
             .await?;
         Ok(max.unwrap_or(0))
+    }
+
+    async fn leaf_inputs(&self, chain_id: i64, from: i64, to: i64) -> Result<Vec<LeafInputsRow>> {
+        let mut conn = super::conn(&self.pool).await?;
+        Ok(notes::table
+            .filter(notes::chain_id.eq(chain_id))
+            .filter(notes::leaf_index.ge(from))
+            .filter(notes::leaf_index.lt(to))
+            .order(notes::leaf_index.asc())
+            .select(LeafInputsRow::as_select())
+            .load(&mut conn)
+            .await?)
     }
 
     async fn notify_appended(&self, chain_id: i64) {

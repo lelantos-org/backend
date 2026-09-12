@@ -83,7 +83,7 @@ impl FeeQuoter {
             decimals: token.decimals,
             amount: amount.to_string(),
             // Filled in by the pipeline, which owns the asset registry this
-            // service does not depend on. See `pipeline::common::decorate_estimate`.
+            // service does not depend on. See `pipeline::common::FeeContext::quote`.
             asset_id: None,
             scale: None,
             circuit_amount: None,
@@ -140,9 +140,7 @@ impl FeeQuoter {
             shielded_fee_address: None,
         })
     }
-}
 
-impl FeeQuoter {
     /// The accepted fee token deployed at `address`, if any.
     ///
     /// The asset registry keys on a MASP asset id and this table keys on an

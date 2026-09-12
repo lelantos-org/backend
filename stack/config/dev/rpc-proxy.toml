@@ -1,0 +1,84 @@
+# rpc-proxy — DEV (local anvil stack). Mounted at /etc/rpc-proxy.toml.
+#
+# The read endpoint browsers use, in front of anvil here and in front of a paid
+# archive provider in production. See crates/rpc-proxy/README.md.
+#
+# `apply_env_overlay` only rewrites chains that ALREADY EXIST here, so this block
+# is what makes the RPC_PROXY_CHAIN_31337_* vars take effect. In particular the
+# contract addresses below are injected by deploy-contracts.sh; delete the block
+# and every eth_call on this chain is refused.
+
+listen_addr = "0.0.0.0:3006"
+metrics_addr = "0.0.0.0:3017"
+
+# Unset: nothing sits in front of this in dev, so the socket peer is the only
+# honest source. Setting it here would let any caller pick its own rate-limit
+# bucket by sending the header.
+#
+# In production this is CF-Connecting-IP, which Cloudflare overwrites and so
+# cannot be spoofed through — but only while the origin is unreachable except
+# through Cloudflare.
+# trusted_client_ip_header = "CF-Connecting-IP"
+
+max_batch = 100
+max_log_range = 5000
+max_call_data_bytes = 8192
+max_call_gas = 50000000
+
+# Higher than production: anvil is local and free, and the e2e suite's fan-out
+# would otherwise queue against its own request deadline.
+upstream_max_inflight = 256
+
+[rate_limit]
+# Far looser than production. A dev stack runs e2e suites that legitimately
+# hammer this, and a 429 there would look like a product bug rather than a
+# limit doing its job.
+#
+# These are shared across both chains below, not per chain.
+client_units_per_second = 2000
+client_burst_units = 20000
+client_long_units = 500000
+client_long_window_s = 300
+
+[[chains]]
+chain_id = 31337
+# The compose alias, not localhost: this is what the proxy dials, unlike the
+# registry's `rpc_url`, which is what a browser dials.
+upstream_url = "http://anvil:8545"
+# anvil retains all state, so historical reads work and the earned column
+# resolves in dev exactly as it should against a paid archive tier.
+upstream_archive = true
+# One block is final almost immediately on a dev chain; the mainnet default of
+# 64 would keep everything in the two-second class and mask cache behaviour.
+reorg_depth = 2
+# Injected by deploy-contracts.sh as RPC_PROXY_CHAIN_<id>_DEPLOY_BLOCK, captured
+# just before the first forge script runs. Declared here so the overlay has a
+# key to rewrite; 0 is "no floor", which is also what an anvil restart wants.
+deploy_block = 0
+upstream_units_per_second = 10000
+upstream_burst_units = 100000
+# Injected by deploy-contracts.sh as RPC_PROXY_CHAIN_31337_{MASP,PERMIT2}_ADDRESS.
+# Declared as zero rather than omitted because the overlay only rewrites keys
+# this file already carries.
+masp_address = "0x0000000000000000000000000000000000000000"
+permit2_address = "0x0000000000000000000000000000000000000000"
+# Also injected, as RPC_PROXY_CHAIN_31337_{ERC20,VENUE}_SEED — comma-separated.
+# Empty here means every token read is refused until the deploy step runs.
+erc20_seed = []
+venue_seed = []
+
+[[chains]]
+chain_id = 31338
+upstream_url = "http://anvil:8545"
+upstream_archive = true
+reorg_depth = 2
+# Injected by deploy-contracts.sh as RPC_PROXY_CHAIN_<id>_DEPLOY_BLOCK, captured
+# just before the first forge script runs. Declared here so the overlay has a
+# key to rewrite; 0 is "no floor", which is also what an anvil restart wants.
+deploy_block = 0
+upstream_units_per_second = 10000
+upstream_burst_units = 100000
+masp_address = "0x0000000000000000000000000000000000000000"
+permit2_address = "0x0000000000000000000000000000000000000000"
+erc20_seed = []
+venue_seed = []

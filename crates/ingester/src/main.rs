@@ -86,7 +86,7 @@ fn build_deps(pool: &DbPool, cfg: ChainConfig, database_url: &str) -> Result<Wor
     let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
     let ingest = Arc::new(IngestService::new(writes.clone(), chain_state.clone()));
     let reorg = Arc::new(ReorgService::new(writes, raw_events));
-    let log_window = Arc::new(LogWindow::new());
+    let log_window = Arc::new(LogWindow::new(cfg.log_concurrency));
     let backfill = Arc::new(BackfillService::new(
         rpc.clone(),
         ingest.clone(),

@@ -1,0 +1,83 @@
+# registry-webserver — DEV (local anvil stack). Mounted at /etc/registry.toml.
+#
+# The deployment half of what a wallet used to read from the relayer's `/chains`:
+# what each chain *is*, rather than what any one relayer will do on it. A
+# self-hosted relayer needs none of this, which is why it lives here.
+#
+# `apply_env_overlay` only rewrites chains that ALREADY EXIST here, so these
+# blocks are what make the REGISTRY_CHAIN_<id>_* vars take effect. Delete one and
+# the deploy output for that chain is silently discarded.
+
+# Overridden by DATABASE_URL, which compose always sets. Kept identical to the
+# other dev configs so a run outside compose reaches the same database rather
+# than a nonexistent one.
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+bind_addr = "0.0.0.0:3005"
+cache_ttl_s = 30
+
+[token_prices]
+# DefiLlama. Dev tokens are unknown to it, so prices come back absent — which is
+# the documented behaviour rather than a failure.
+base_url = "https://coins.llama.fi"
+ttl_s = 300
+timeout_ms = 5000
+
+[[chains]]
+chain_id = 31337
+name = "anvil"
+# Browser-reachable, so `localhost` rather than the compose alias: this value is
+# published to a wallet running outside the network.
+rpc_url = "http://localhost:8545"
+# The `rpc-proxy` service. This is what the SDK issues its own eth_call/eth_getLogs
+# against; `rpc_url` above stays the general-purpose endpoint a wallet installs,
+# because the proxy serves reads only. Absent, the SDK falls back to `rpc_url`
+# and the proxy — which the `all` profile runs — sees no traffic at all.
+#
+# App-origin path, not `http://localhost:3006`, for two reasons. The proxy routes
+# on `/v1/{chain_id}`, so the bare origin posts to `/` and 404s. And no backend
+# crate carries a `CorsLayer`, so a cross-origin post fails preflight before the
+# 404 is even visible — the browser reports only the missing
+# `Access-Control-Allow-Origin`. The webapp's dev server proxies `/rpc` here,
+# which is the same shape prod publishes (see the `read_rpc_url` test in
+# registry-webserver's `services/chains.rs`).
+read_rpc_url = "/rpc/v1/31337"
+tree_depth = 11
+# Injected by deploy-contracts.sh as REGISTRY_CHAIN_31337_{MASP,PERMIT2}_ADDRESS.
+# Declared here as zero rather than omitted, because the overlay only rewrites
+# keys this file already carries.
+#
+# These two are the deployment half of the wallet's cross-check against a
+# relayer's own `/chains`, so a zero here does not merely look wrong — it makes
+# that check unpassable.
+masp_address = "0x0000000000000000000000000000000000000000"
+permit2_address = "0x0000000000000000000000000000000000000000"
+# Also injected, as REGISTRY_CHAIN_31337_{NATIVE_ADAPTER,SWAP_WRAPPER}_ADDRESS.
+# Absent, a wallet withholds the native-ETH option and the swap route rather
+# than offering either and failing at submit — so a zero here is not cosmetic.
+native_adapter_address = "0x0000000000000000000000000000000000000000"
+swap_wrapper_address = "0x0000000000000000000000000000000000000000"
+# The endpoint the rate measurement reads with — inside the network, and needing
+# archive state, unlike the browser-facing `rpc_url` above. Also injected, as
+# REGISTRY_CHAIN_31337_APY_RPC_URL; `rpc_url` deliberately is not, because
+# `http://anvil:8545` does not resolve in a browser.
+apy_rpc_url = "http://anvil:8545"
+
+# ── second chain, for exercising the frontend's chain switcher ───────────
+#
+# Points at the SAME anvil and the SAME pool as 31337, mirroring the relayer's
+# dev config: it exists so the registry lists two chains, not so anything
+# different happens on this one.
+[[chains]]
+chain_id = 31338
+name = "anvil-2"
+rpc_url = "http://localhost:8545"
+# Same proxy as 31337: it serves both chain blocks, as config/dev/rpc-proxy.toml
+# declares. App-origin path for the reasons given on 31337 above.
+read_rpc_url = "/rpc/v1/31338"
+tree_depth = 11
+# Injected as REGISTRY_CHAIN_31338_*, same as 31337 above.
+masp_address = "0x0000000000000000000000000000000000000000"
+permit2_address = "0x0000000000000000000000000000000000000000"
+native_adapter_address = "0x0000000000000000000000000000000000000000"
+swap_wrapper_address = "0x0000000000000000000000000000000000000000"
+apy_rpc_url = "http://anvil:8545"

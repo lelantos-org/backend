@@ -2,18 +2,12 @@ use crate::app::AppState;
 use crate::handlers::http as handlers;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use shared::request_span;
+use shared::router::cache_control as cc;
 use std::time::Duration;
-use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
-
-/// Cache-Control for one route, matching the helper of the same name in
-/// fmd-webserver's router.
-fn cc(value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
-    SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static(value))
-}
 
 /// Largest submission body accepted. A transact payload is a few kB plus the
 /// per-output ciphertexts, so 256 kB is ample and well below the 2 MB axum would
@@ -54,15 +48,6 @@ pub fn build(state: AppState) -> Router {
         .route(
             "/chains",
             get(handlers::chains).layer(cc("public, max-age=60")),
-        )
-        // Spot USD prices for the registered assets. Identical for every caller,
-        // like `/chains`, but on its own route because it goes stale on its own
-        // schedule; see `PricesResponse`. 60s matches the registry: long enough to
-        // collapse a herd of wallet polls, short enough that a moving market shows
-        // up within the minute.
-        .route(
-            "/v1/prices",
-            get(handlers::prices).layer(cc("public, max-age=60")),
         )
         .route("/v1/deposit/estimate", post(handlers::estimate_deposit))
         .route("/v1/spend", post(handlers::submit_spend))

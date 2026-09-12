@@ -1,10 +1,9 @@
-use crate::adapters::calldata::MAX_DEPOSITS_PER_BATCH;
 use crate::adapters::parse::{FieldRef, parse_field};
-use crate::adapters::rpc::RpcEndpoint;
-use crate::app::config::{ChainCfg, ChainPublicCfg, RelayerConfig};
+use crate::adapters::rpc::{RpcEndpoint, endpoint};
+use crate::app::config::{ChainCfg, RelayerConfig};
+use crate::domain::batch::MAX_DEPOSITS_PER_BATCH;
 use crate::domain::error::AppError;
 use crate::domain::error::AppResult;
-use crate::domain::responses::{ChainConfigOut, PriceOut};
 use crate::services::asset_registry::AssetRegistry;
 use crate::services::deposit_mempool::DepositMempool;
 use crate::services::escrow::EscrowReader;
@@ -17,17 +16,14 @@ use crate::services::nullifier_guard::NullifierGuards;
 use crate::services::oracle::{CoinbaseOracle, PriceOracle};
 use crate::services::pipeline::deposit_failures::DepositFailures;
 use crate::services::pipeline::{FlushPipeline, NativeRoute, SpendPipeline, SwapPipeline};
-use crate::services::prover::TreeUpdateBatchProver;
 use crate::services::shielded_fee::ShieldedFeeChecker;
 use crate::services::submitter::Submitter;
 use crate::services::transact_verifier::TransactVerifier;
-use crate::services::tree::{self, TreeMirror};
-use crate::services::venue_apy::{self, VenueApyCache};
+use crate::services::tree::TreeMirror;
 use alloy::primitives::Address;
+use common_crypto::tree::Field;
 use database::DbPool;
-use fmd_crypto::tree::Field;
-use moka::future::Cache;
-use prices::{PriceCache, PriceClient};
+use groth16::TreeUpdateBatchProver;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -57,68 +53,9 @@ pub struct AppState {
     /// Replays a submission a caller already made under the same
     /// `Idempotency-Key`. See `services::idempotency`.
     pub idempotency: Arc<IdempotencyCache>,
-    /// Wallet-facing description of each chain, resolved once at boot and served
-    /// by `/chains`. Holds only what a client may see, never the signer key or the
-    /// relayer's internal RPC.
-    pub descriptors: Arc<HashMap<i64, ChainDescriptor>>,
-    /// Upstream spot-price provider for `/v1/prices`.
-    pub prices: Arc<PriceClient>,
-    /// Per-token price cache, negatives included: a token the provider cannot
-    /// price is asked about once per TTL rather than once per request.
-    pub price_cache: PriceCache,
-    /// The whole `/v1/prices` body, cached under the unit key.
-    ///
-    /// Distinct from `price_cache`, which spares the provider; this spares the
-    /// database. The handler reads the asset table once per chain, as `/chains`
-    /// does, and the relayer's pool is `PoolCfg::relayer()` with four connections,
-    /// so without this every open wallet tab's poll lands on those four.
-    pub prices_response: Cache<(), Arc<Vec<PriceOut>>>,
     /// The `assets` table, cached and shared by `/chains` and the shielded-fee
     /// check so neither reads it per request.
     pub assets: Arc<AssetRegistry>,
-    /// Estimated venue rates, refreshed by a per-chain worker and read by
-    /// `/chains`. Empty until this deployment has recorded a window's worth of
-    /// index history, which on a node with archive state the venue's vault
-    /// covers in the meantime — see `services::venue_apy`.
-    pub venue_apy: VenueApyCache,
-}
-
-/// The half of `ChainCfg` that is safe to publish.
-///
-/// Built at boot rather than read per request, so the handler cannot reach the
-/// rest of the config and a malformed address fails startup rather than a
-/// wallet's first call.
-pub struct ChainDescriptor {
-    pub native_adapter_address: Option<String>,
-    pub swap_wrapper_address: Option<String>,
-    pub public: ChainPublicCfg,
-}
-
-impl ChainDescriptor {
-    fn from_cfg(c: &ChainCfg) -> Self {
-        Self {
-            native_adapter_address: c.native_adapter_address.clone(),
-            swap_wrapper_address: c.swap_wrapper_address.clone(),
-            public: c.public.clone(),
-        }
-    }
-}
-
-/// Owned by the descriptor rather than assembled in the handler: it is the only
-/// place that knows which parts of a `ChainCfg` may be published, so adding a
-/// config field cannot leak into `/chains`.
-impl From<&ChainDescriptor> for ChainConfigOut {
-    fn from(d: &ChainDescriptor) -> Self {
-        Self {
-            native_adapter_address: d.native_adapter_address.clone(),
-            swap_wrapper_address: d.swap_wrapper_address.clone(),
-            chain_name: d.public.name.clone(),
-            rpc_url: d.public.rpc_url.clone(),
-            tree_depth: d.public.tree_depth,
-            permit2_address: d.public.permit2_address.clone(),
-            explorer_url: d.public.explorer_url.clone(),
-        }
-    }
 }
 
 impl AppState {
@@ -166,27 +103,24 @@ pub async fn build_state(
     let mut spend_pipelines: HashMap<i64, Arc<SpendPipeline>> = HashMap::new();
     let mut swap_pipelines: HashMap<i64, Arc<SwapPipeline>> = HashMap::new();
     let mut flush_pipelines: HashMap<i64, Arc<FlushPipeline>> = HashMap::new();
-    let venue_apy = venue_apy::new_cache();
-    for c in &cfg.chains {
-        let chain = build_chain(c, &shared).await?;
+    // Built concurrently rather than one after another: each chain's mirror
+    // bootstrap is a database read and an RPC `currentRoot()`, and the chains
+    // share nothing that a build mutates. Boot then costs the slowest chain
+    // rather than their sum. Registration below stays sequential and in config
+    // order, so a restart still logs the same sequence.
+    //
+    // Each future carries its own `ChainCfg` back rather than the loop re-pairing
+    // by position: the config is what supplies the `chain_id` every pipeline is
+    // registered under, and a mispairing would serve one chain's tree from
+    // another's.
+    let built = futures::future::try_join_all(cfg.chains.iter().map(async |c| {
+        let runtime = build_chain(c, &shared).await?;
+        Ok::<_, AppError>((c, runtime))
+    }))
+    .await?;
+    for (c, chain) in built {
         flush_pipelines.insert(c.chain_id, chain.flush.clone());
         spawn_flush_worker(chain.flush, Duration::from_secs(c.flush_interval_s));
-        // Its own endpoint rather than a pipeline's provider: this worker issues
-        // historical reads, which are slow and can be refused, and it must not
-        // share a connection pool with the submission path.
-        match RpcEndpoint::new(&c.rpc_url) {
-            Ok(rpc) => venue_apy::spawn(
-                c.chain_id,
-                shared.pool.clone(),
-                &rpc,
-                venue_apy.clone(),
-                shared.assets.clone(),
-            ),
-            // Non-fatal, alone among this loop's failures: a chain whose rate
-            // cannot be measured still serves every route. `build_chain` above
-            // has already rejected an unusable URL.
-            Err(e) => warn!(chain_id = c.chain_id, error = %e, "venue apy: worker not started"),
-        }
         spend_pipelines.insert(c.chain_id, chain.spend);
         if let Some(swap) = chain.swap {
             swap_pipelines.insert(c.chain_id, swap);
@@ -201,39 +135,9 @@ pub async fn build_state(
         pool,
         nullifiers: Arc::new(NullifierGuards::new(cfg.chains.iter().map(|c| c.chain_id))),
         idempotency: Arc::new(IdempotencyCache::new()),
-        descriptors: Arc::new(
-            cfg.chains
-                .iter()
-                .map(|c| (c.chain_id, ChainDescriptor::from_cfg(c)))
-                .collect(),
-        ),
-        prices: Arc::new(
-            PriceClient::new(
-                cfg.token_prices.base_url.clone(),
-                Duration::from_millis(cfg.token_prices.timeout_ms),
-            )
-            .map_err(|e| AppError::Internal(format!("build price client: {e}")))?,
-        ),
-        price_cache: shared::cache::build(
-            PRICE_CACHE_CAPACITY,
-            Duration::from_secs(cfg.token_prices.ttl_s.max(1)),
-        ),
-        prices_response: shared::cache::build(1, PRICES_RESPONSE_TTL),
-        venue_apy,
         assets,
     })
 }
-
-/// Room for every registered asset on every chain a deployment serves, with
-/// slack. The value is two `f64`s and an `i64`, so the ceiling is cheap.
-const PRICE_CACHE_CAPACITY: u64 = 1_024;
-
-/// How long one `/v1/prices` body is reused.
-///
-/// Shorter than the per-token TTL: this bounds how long a price that has already
-/// refreshed upstream stays invisible, while `token_prices.ttl_s` bounds how
-/// often upstream is asked at all.
-const PRICES_RESPONSE_TTL: Duration = Duration::from_secs(30);
 
 /// Dependencies every chain's pipelines share. Built once so the per-chain code
 /// below states what each chain adds rather than repeating a list of clones.
@@ -292,7 +196,7 @@ struct ChainRuntime {
 }
 
 async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<ChainRuntime> {
-    let rpc = RpcEndpoint::new(&c.rpc_url).map_err(|e| boot_err(c.chain_id, "rpc endpoint", e))?;
+    let rpc = endpoint(&c.rpc_url).map_err(|e| boot_err(c.chain_id, "rpc endpoint", e))?;
     let mirror = bootstrap_mirror(c, shared, &rpc).await?;
 
     // Taken before the mirror goes behind its mutex, so `/chains` can read the
@@ -368,19 +272,6 @@ async fn bootstrap_mirror(
     shared: &Shared,
     rpc: &RpcEndpoint,
 ) -> AppResult<TreeMirror> {
-    if let Some(declared) = c.public.tree_depth
-        && declared as usize != tree::DEPTH
-    {
-        return Err(boot_err(
-            c.chain_id,
-            "tree depth",
-            format!(
-                "public.tree_depth is {declared} but this relayer mirrors a depth-{} tree; \
-                 wallets would build proofs against the wrong shape",
-                tree::DEPTH
-            ),
-        ));
-    }
     let mut mirror =
         TreeMirror::new(c.chain_id).map_err(|e| boot_err(c.chain_id, "mirror init", e))?;
     mirror
@@ -621,51 +512,4 @@ async fn validate_fee_token_pairs(
         "fee token oracle pairs validated"
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ChainConfigOut, ChainDescriptor, ChainPublicCfg};
-
-    /// The conversion hand-copies seven fields, so a dropped one would leave a
-    /// wallet falling back to its own default instead of the deployment's value.
-    #[test]
-    fn test_chain_config_out_carries_every_described_field() {
-        let d = ChainDescriptor {
-            native_adapter_address: Some("0xNATIVE".to_string()),
-            swap_wrapper_address: Some("0xSWAP".to_string()),
-            public: ChainPublicCfg {
-                name: Some("anvil".to_string()),
-                rpc_url: Some("http://localhost:8545".to_string()),
-                tree_depth: Some(10),
-                permit2_address: Some("0xPERMIT2".to_string()),
-                explorer_url: Some("http://explorer".to_string()),
-            },
-        };
-
-        let out = ChainConfigOut::from(&d);
-
-        assert_eq!(out.native_adapter_address.as_deref(), Some("0xNATIVE"));
-        assert_eq!(out.swap_wrapper_address.as_deref(), Some("0xSWAP"));
-        assert_eq!(out.chain_name.as_deref(), Some("anvil"));
-        assert_eq!(out.rpc_url.as_deref(), Some("http://localhost:8545"));
-        assert_eq!(out.tree_depth, Some(10));
-        assert_eq!(out.permit2_address.as_deref(), Some("0xPERMIT2"));
-        assert_eq!(out.explorer_url.as_deref(), Some("http://explorer"));
-    }
-
-    /// An unfilled block yields an empty record rather than a partly synthesised
-    /// one.
-    #[test]
-    fn test_chain_config_out_is_empty_when_nothing_is_described() {
-        let out = ChainConfigOut::from(&ChainDescriptor {
-            native_adapter_address: None,
-            swap_wrapper_address: None,
-            public: ChainPublicCfg::default(),
-        });
-
-        assert_eq!(out.chain_name, None);
-        assert_eq!(out.rpc_url, None);
-        assert_eq!(out.tree_depth, None);
-    }
 }

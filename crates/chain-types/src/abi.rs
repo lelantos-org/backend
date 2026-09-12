@@ -233,3 +233,56 @@ sol! {
         function getBlockNumber() external view returns (uint256 blockNumber);
     }
 }
+
+sol! {
+    /// The read surface of a yield venue. Must match
+    /// `contracts/src/yield/IYieldVenue.sol`.
+    ///
+    /// Unioned here from two half-declarations that could not see each other:
+    /// `protocol-indexer` polled `totalAssets`/`POOL` while `registry-webserver`
+    /// read `VAULT`, so a change to the contract had two places to drift and
+    /// neither crate held the whole interface.
+    ///
+    /// Read-only on purpose: moving a position is the pool's job and `onlyPool`
+    /// would reject anything here, so nothing that writes belongs in it.
+    ///
+    /// Unlike the events above, these declarations are **not** covered by
+    /// `tests/sig_check.rs` — the contract ships no ABI JSON into this repo, so
+    /// there is nothing independent to pin a selector against. See that file.
+    #[sol(rpc)]
+    interface IYieldVenue {
+        /// The ERC-4626 vault this venue holds shares of. Immutable, which is
+        /// what lets a caller resolve it once and keep it.
+        function VAULT() external view returns (address);
+        function totalAssets() external view returns (uint256);
+        function POOL() external view returns (address);
+    }
+
+    /// The optional ERC-20 metadata calls the asset catalog fills in from chain.
+    ///
+    /// `AssetRegistered` carries `scale`, a circuit capacity parameter rather
+    /// than a decimals normalizer, so rendering a human-readable amount needs the
+    /// token's own `decimals()`.
+    #[sol(rpc)]
+    interface IERC20Metadata {
+        function decimals() external view returns (uint8);
+        /// Optional in ERC-20, and some early tokens return `bytes32` rather than
+        /// `string`, which does not decode here. A caller leaves the column NULL
+        /// and retries.
+        function symbol() external view returns (string);
+        /// Read off an ERC-4626 vault's share token, whose label is what tells
+        /// an earning asset from the plain asset sharing its underlying.
+        function name() external view returns (string);
+    }
+
+    /// The ERC-4626 surface the venue rate estimate reads.
+    ///
+    /// `convertToAssets` is the vault's share price: two readings of the same
+    /// probe, at two blocks, are the whole measurement. `decimals` sizes that
+    /// probe.
+    #[sol(rpc)]
+    interface IERC4626 {
+        function convertToAssets(uint256 shares) external view returns (uint256);
+        function decimals() external view returns (uint8);
+    }
+}

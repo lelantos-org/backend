@@ -1,10 +1,12 @@
+//! The OpenAPI document, assembled from the per-handler `utoipa::path`
+//! annotations. Mounted by [`super::router::build`].
+
 use crate::domain::dto::CreateSubscription;
 use crate::domain::responses::{
-    HeadOut, MatchOut, MatchesPage, NoteOut, SubscriptionOut, TreeStateOut,
+    CommitmentChunkOut, HeadOut, MatchOut, MatchesPage, NoteOut, NullifierChunkOut,
+    SubscriptionOut, TreeStateOut,
 };
 use crate::handlers::http as handlers;
-use crate::handlers::http::commitments::CommitmentChunkOut;
-use crate::handlers::http::nullifiers::NullifierChunkOut;
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]

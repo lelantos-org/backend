@@ -19,8 +19,9 @@ use alloy::primitives::B256;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-/// A block height paired with the hash recorded for it.
-pub type Checkpoint = (i64, Vec<u8>);
+/// Re-exported at its historical path; the type itself is domain data, since
+/// the repository layer reads checkpoints back out of `raw_events`.
+pub use crate::domain::models::Checkpoint;
 
 /// A confirmed fork: what to discard, and the last block known to survive it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +62,7 @@ impl ReorgService {
         anchor: &Checkpoint,
         chain_hash: Option<B256>,
     ) -> Result<Option<Divergence>, IngesterError> {
-        if hash_matches(chain_hash, &anchor.1) {
+        if hash_matches(chain_hash, &anchor.hash) {
             return Ok(None);
         }
         self.locate_fork(chain_id, rpc, floor, max_depth, anchor)
@@ -84,7 +85,7 @@ impl ReorgService {
         max_depth: u64,
         anchor: &Checkpoint,
     ) -> Result<Divergence, IngesterError> {
-        let anchor_block = anchor.0;
+        let anchor_block = anchor.block;
         let limit = anchor_block.saturating_sub(max_depth as i64).max(floor);
 
         // Starts below the anchor: it is the block that just failed.
@@ -96,19 +97,18 @@ impl ReorgService {
             Vec::new()
         };
 
-        for (block, stored) in below {
-            if !still_canonical(rpc, block, &stored).await? {
+        for stored in below {
+            if !still_canonical(rpc, stored.block, &stored.hash).await? {
                 continue;
             }
+            let survived = stored.block;
             warn!(
                 chain_id,
-                anchor_block,
-                survived = block,
-                "chain diverged above block {block}"
+                anchor_block, survived, "chain diverged above block {survived}"
             );
             return Ok(Divergence {
-                rewind_to: block + 1,
-                anchor: Some((block, stored)),
+                rewind_to: survived + 1,
+                anchor: Some(stored),
             });
         }
 
@@ -133,8 +133,10 @@ impl ReorgService {
         divergence: &Divergence,
     ) -> Result<usize, IngesterError> {
         let new_scan = (divergence.rewind_to - 1).max(0);
-        let (last_block, last_block_hash) =
-            divergence.anchor.clone().unwrap_or((new_scan, Vec::new()));
+        let survivor = divergence.anchor.clone().unwrap_or(Checkpoint {
+            block: new_scan,
+            hash: Vec::new(),
+        });
 
         info!(
             chain_id,
@@ -155,8 +157,8 @@ impl ReorgService {
                 divergence.rewind_to,
                 &BlockCursor {
                     chain_id,
-                    last_block,
-                    last_block_hash,
+                    last_block: survivor.block,
+                    last_block_hash: survivor.hash,
                     last_scanned_block: new_scan,
                 },
             )
@@ -178,7 +180,10 @@ pub fn anchor_of(cursor: &BlockCursor) -> Option<Checkpoint> {
     if cursor.last_block_hash.is_empty() {
         return None;
     }
-    Some((cursor.last_block, cursor.last_block_hash.clone()))
+    Some(Checkpoint {
+        block: cursor.last_block,
+        hash: cursor.last_block_hash.clone(),
+    })
 }
 
 /// Does the chain's hash at some height match what was recorded for it?
@@ -269,7 +274,10 @@ mod tests {
             *store.hashes.lock().unwrap() = range
                 .clone()
                 .rev()
-                .map(|n| (n, B256::repeat_byte(tag ^ (n as u8)).0.to_vec()))
+                .map(|n| Checkpoint {
+                    block: n,
+                    hash: B256::repeat_byte(tag ^ (n as u8)).0.to_vec(),
+                })
                 .collect();
             *store.cursor.lock().unwrap() = Some(BlockCursor {
                 chain_id: 1,
@@ -301,7 +309,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(n, _)| *n >= from_block && *n <= to_block)
+                .filter(|c| c.block >= from_block && c.block <= to_block)
                 .cloned()
                 .collect())
         }
@@ -341,7 +349,7 @@ mod tests {
     async fn check(store: &Arc<FakeStore>, chain: &DynRpc, max_depth: u64) -> Option<Divergence> {
         let cursor = store.cursor.lock().unwrap().clone();
         let anchor = cursor.as_ref().and_then(anchor_of)?;
-        let chain_hash = chain.block_hash_at(anchor.0 as u64).await.unwrap();
+        let chain_hash = chain.block_hash_at(anchor.block as u64).await.unwrap();
         service(store)
             .check_anchor(1, chain, FLOOR, max_depth, &anchor, chain_hash)
             .await
@@ -403,7 +411,7 @@ mod tests {
         let divergence = check(&store, &chain, DEPTH).await.expect("fork detected");
 
         assert_eq!(divergence.rewind_to, 108);
-        assert_eq!(divergence.anchor.expect("survivor").0, 107);
+        assert_eq!(divergence.anchor.expect("survivor").block, 107);
     }
 
     /// A chain that has committed nothing has no anchor to check. Treating the
@@ -473,7 +481,10 @@ mod tests {
         let store = FakeStore::seeded(100..=110, 0xa0);
         let divergence = Divergence {
             rewind_to: 108,
-            anchor: Some((107, hash(0x07))),
+            anchor: Some(Checkpoint {
+                block: 107,
+                hash: hash(0x07),
+            }),
         };
 
         service(&store).rewind(1, &divergence).await.unwrap();

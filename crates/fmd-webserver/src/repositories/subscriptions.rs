@@ -1,4 +1,4 @@
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::token::TokenHash;
 use database::DbPool;
 pub use database::models::SubscriptionRow;
@@ -25,7 +25,27 @@ pub async fn id_by_token(pool: &DbPool, token: &TokenHash) -> AppResult<Option<i
         .first(&mut conn)
         .await
         .optional()
-        .map_err(|e| AppError::Db(e.to_string()))
+        .map_err(super::db_err)
+}
+
+/// Internal id and backfill watermark behind a token, without the row.
+///
+/// Two columns rather than `SubscriptionRow::as_select()`, which is what
+/// `/v1/matches` used to call: that carries `detection_key`, γ * 32 bytes,
+/// across the wire on every poll of the hottest authenticated endpoint, to read
+/// two `i64`s. Nothing on the read path needs the key.
+pub async fn cursor_state_by_token(
+    pool: &DbPool,
+    token: &TokenHash,
+) -> AppResult<Option<(i64, i64)>> {
+    let mut conn = super::conn(pool).await?;
+    subscriptions::table
+        .filter(subscriptions::token_hash.eq(token.as_bytes()))
+        .select((subscriptions::id, subscriptions::backfilled_through_note_id))
+        .first(&mut conn)
+        .await
+        .optional()
+        .map_err(super::db_err)
 }
 
 /// Full row behind a token. The create path uses it to distinguish a client
@@ -38,7 +58,7 @@ pub async fn find_by_token(pool: &DbPool, token: &TokenHash) -> AppResult<Option
         .first(&mut conn)
         .await
         .optional()
-        .map_err(|e| AppError::Db(e.to_string()))
+        .map_err(super::db_err)
 }
 
 /// `Ok(None)` when the token is already taken. The unique index on `token_hash`
@@ -66,7 +86,7 @@ pub async fn create(
     {
         Ok(row) => Ok(Some(row)),
         Err(DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => Ok(None),
-        Err(e) => Err(AppError::Db(e.to_string())),
+        Err(e) => Err(super::db_err(e)),
     }
 }
 
@@ -75,5 +95,5 @@ pub async fn delete_by_token(pool: &DbPool, token: &TokenHash) -> AppResult<usiz
     diesel::delete(subscriptions::table.filter(subscriptions::token_hash.eq(token.as_bytes())))
         .execute(&mut conn)
         .await
-        .map_err(|e| AppError::Db(e.to_string()))
+        .map_err(super::db_err)
 }

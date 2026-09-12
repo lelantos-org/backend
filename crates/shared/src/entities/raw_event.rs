@@ -1,4 +1,3 @@
-use crate::chain::ChainId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,20 +69,71 @@ impl EventKind {
     pub fn as_i16(self) -> i16 {
         self as i16
     }
+
+    /// Which consumer owns the derived state this event produces.
+    ///
+    /// The partition [`ALL`](Self::ALL) refers to, written once. Each indexer
+    /// derives its `WHERE event_kind = ANY(...)` filter from
+    /// [`kinds_for`](Self::kinds_for) rather than restating a list, so a new
+    /// variant cannot be handled by one consumer and silently fetched by none —
+    /// the failure that once left `asset_yield` permanently empty.
+    ///
+    /// Exhaustive with no wildcard arm: adding a variant fails the build here
+    /// until it is consciously assigned.
+    pub const fn consumer(self) -> Consumer {
+        match self {
+            // Note and nullifier state.
+            Self::NoteCreated | Self::NullifierConsumed => Consumer::Fmd,
+
+            // The asset catalog and yield bindings the wallet boots from, plus
+            // the two ledgers the relayer drains: `tree_advances` bootstraps its
+            // Merkle mirror and `deposit_escrowed_events` feeds its flush
+            // pipeline. Those two look like explorer analytics and are not.
+            Self::AssetRegistered
+            | Self::AssetFeeSet
+            | Self::YieldAssetAdded
+            | Self::YieldParamsSet
+            | Self::HaltedSet
+            | Self::RootAdvanced
+            | Self::DepositEscrowed
+            | Self::DepositFlushed
+            | Self::DepositCanceled => Consumer::Protocol,
+
+            // Flow analytics and the fee ledger behind them.
+            Self::AssetMoved | Self::PerfFeeAccrued | Self::NormalizedFeeSwept => {
+                Consumer::Explorer
+            }
+
+            // Decoded, but writing no derived state anywhere. Fetched by no
+            // consumer: a cursor advances past them on the next event it does
+            // fetch.
+            Self::Rebalanced | Self::EmergencyUnwound => Consumer::None,
+        }
+    }
+
+    /// The kinds `consumer` reads, ascending.
+    pub fn kinds_for(consumer: Consumer) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|k| k.consumer() == consumer)
+            .collect()
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RawEvent {
-    pub id: i64,
-    pub chain_id: ChainId,
-    pub block_number: i64,
-    pub block_hash: Vec<u8>,
-    pub block_ts: i64,
-    pub tx_hash: Vec<u8>,
-    pub log_index: i32,
-    pub event_kind: EventKind,
-    pub topics: Vec<Vec<u8>>,
-    pub data: Vec<u8>,
+/// Which indexer owns the state an [`EventKind`] produces.
+///
+/// One event, one owner. A table is written by exactly one consumer, so a kind
+/// that fed two would mean two writers racing on one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Consumer {
+    /// State the wallet boots from and the relayer transacts against.
+    Protocol,
+    /// Analytics served to explorer-ui.
+    Explorer,
+    /// Notes and spent nullifiers.
+    Fmd,
+    /// Produces no derived state.
+    None,
 }
 
 #[cfg(test)]
@@ -103,6 +153,52 @@ mod event_kind_tests {
                 i as i16 + 1,
                 "ALL[{i}] is {kind:?}; discriminants must be 1..=N with no gaps or repeats"
             );
+        }
+    }
+
+    /// The four sets must partition `ALL`: every kind assigned, none twice. A
+    /// kind belonging to no consumer would be fetched by nobody and its arm
+    /// unreachable; one belonging to two would mean two writers on one table.
+    #[test]
+    fn every_consumer_set_together_partitions_all() {
+        use super::Consumer;
+
+        let sets = [
+            Consumer::Protocol,
+            Consumer::Explorer,
+            Consumer::Fmd,
+            Consumer::None,
+        ]
+        .map(EventKind::kinds_for);
+
+        let total: usize = sets.iter().map(Vec::len).sum();
+        assert_eq!(
+            total,
+            EventKind::ALL_COUNT,
+            "the sets must cover every kind exactly once"
+        );
+
+        let mut seen: Vec<i16> = sets.iter().flatten().map(|k| k.as_i16()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), EventKind::ALL_COUNT, "a kind appears twice");
+    }
+
+    /// The two ledgers that look like explorer analytics but are read by the
+    /// relayer's write path: `tree_advances` bootstraps its Merkle mirror and
+    /// `deposit_escrowed_events` feeds its flush pipeline. Classing them as
+    /// analytics would put that path behind a service that may lag.
+    #[test]
+    fn the_relayers_ledgers_belong_to_the_protocol_consumer() {
+        use super::Consumer;
+
+        for kind in [
+            EventKind::RootAdvanced,
+            EventKind::DepositEscrowed,
+            EventKind::DepositFlushed,
+            EventKind::DepositCanceled,
+        ] {
+            assert_eq!(kind.consumer(), Consumer::Protocol, "{kind:?}");
         }
     }
 

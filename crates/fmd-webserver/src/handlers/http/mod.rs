@@ -1,3 +1,6 @@
+//! One module per endpoint, plus the router that mounts them, the capability
+//! token extractor and the OpenAPI document.
+
 pub mod auth;
 pub mod commitments;
 pub mod head;

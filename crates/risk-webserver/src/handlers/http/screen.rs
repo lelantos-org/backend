@@ -22,9 +22,14 @@ pub async fn screen(
     Json(req): Json<ScreenRequest>,
 ) -> AppResult<Json<Arc<ScreenOut>>> {
     let addr = normalize(&req.chain, &req.address)?;
-    let mut out = st.screening.screen(vec![addr]).await?;
     // `screen` returns one verdict per input, in order.
-    Ok(Json(out.remove(0)))
+    st.screening
+        .screen(vec![addr])
+        .await?
+        .into_iter()
+        .next()
+        .map(Json)
+        .ok_or_else(|| AppError::Internal("screening returned no verdict".to_string()))
 }
 
 #[utoipa::path(

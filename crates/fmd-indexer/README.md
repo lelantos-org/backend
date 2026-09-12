@@ -5,7 +5,7 @@ Fuzzy Message Detection indexer. Two concurrent loops:
 - **consume** — drains ingested clue events into the FMD pipeline.
 - **filter** — runs FMD detection across `filter_workers` rayon threads in batches of `filter_batch`.
 
-Depends on `fmd-crypto` (private side of the privacy gate).
+Depends on `common-crypto` (private side of the privacy gate).
 
 ## Replicas
 
@@ -69,9 +69,10 @@ filter_batch    = 1000    # default 1000
 filter_tick_ms  = 500     # default 500 (idle ceiling, not a fixed period)
 consume_batch   = 1000    # default: filter_batch
 consume_tick_ms = 500     # default: filter_tick_ms (idle ceiling)
+metrics_addr    = "127.0.0.1:3012"   # default; Prometheus scrape listener
 ```
 
-If the config file does not exist, the binary falls back to env vars (`DATABASE_URL` required) and defaults for the rest.
+If the config file does not exist, the binary falls back to env vars (`DATABASE_URL` required) and defaults for the rest. `METRICS_ADDR` overrides `metrics_addr` either way.
 
 | Key | Default | Notes |
 |-----|---------|-------|
@@ -124,6 +125,10 @@ consume tick calls `database::reorg::apply_pending` **before reading**, which
 drops `notes` and `spent_nullifiers` at or above the fork block — `matches`
 follows by `ON DELETE CASCADE` from `notes` — and rewinds the cursor so the
 replay rebuilds them. See [database](../database/README.md#reorg-retraction).
+
+`tree_state` is dropped whole rather than trimmed: it holds one current row per
+chain, not per-block rows, and its frontier already commits to the leaves being
+deleted. The replay folds it back from leaf 0.
 
 Retraction rewinds the cursor, so the tick reports `Saturated` and comes
 straight back rather than sleeping on work it has just queued.

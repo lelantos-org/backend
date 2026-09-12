@@ -16,7 +16,7 @@ parallel = ["dep:rayon"]
 shared = { path = "../shared", features = ["metrics-exporter"] }
 database = { path = "../database" }
 chain-types = { path = "../chain-types" }
-fmd-crypto = { path = "../fmd-crypto" }
+common-crypto = { path = "../common-crypto" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 diesel = { workspace = true }
@@ -41,7 +41,7 @@ vergen-gix = { workspace = true }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
-fmd-crypto = { path = "../fmd-crypto" }
+common-crypto = { path = "../common-crypto" }
 chain-types = { path = "../chain-types" }
 shared = { path = "../shared" }
 hex = { workspace = true }

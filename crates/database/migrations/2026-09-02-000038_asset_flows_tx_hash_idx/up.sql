@@ -1,0 +1,37 @@
+-- Index the anti-join the classified-transaction feed runs on `asset_flows`.
+--
+-- `CLASSIFIED` in explorer-webserver's `repositories::transactions` decides a
+-- `tree_advances` row is a plain transfer by proving no public movement shares
+-- its transaction hash:
+--
+--     NOT EXISTS (SELECT 1 FROM asset_flows f2
+--                  WHERE f2.chain_id = t.chain_id AND f2.tx_hash = t.tx_hash)
+--     NOT EXISTS (SELECT 1 FROM deposit_escrowed_events d2
+--                  WHERE d2.chain_id = t.chain_id AND d2.flushed_tx_hash = t.tx_hash)
+--
+-- The second is served by `deposit_escrowed_flushed_tx_idx (chain_id,
+-- flushed_tx_hash)`. The first had nothing: no index on `asset_flows` leads with
+-- `tx_hash`, and none of the three that lead with `chain_id` carry it at all, so
+-- the planner had to read every `asset_flows` row for the chain to answer it.
+-- The asymmetry looks like an oversight when the deposit branch was added, not a
+-- decision — both branches are the same shape and both feed `/v1/transactions`
+-- and `/v1/tx-kinds`.
+--
+-- `(chain_id, tx_hash)` in that order to match the correlated predicate and to
+-- stay useful for a chain-scoped lookup by hash. No `INCLUDE`: a semi-join stops
+-- at the first match and reads no payload, so the key alone makes it index-only.
+--
+-- Not partial. Unlike the deposit index, whose `flushed_tx_hash` is NULL for
+-- every unflushed row, `asset_flows.tx_hash` is NOT NULL on every row, so there
+-- is no subset to exclude.
+--
+-- On a deployment where `asset_flows` is already large, build it out of band
+-- first, as migrations 29 and 33 describe:
+--
+--     CREATE INDEX CONCURRENTLY asset_flows_chain_tx_idx ON asset_flows (chain_id, tx_hash);
+--
+-- and this migration then no-ops. It runs at process startup behind the
+-- migration advisory lock, and a standby gives up on that lock after 120s, so a
+-- long in-migration build would fail the deploy rather than block on it.
+CREATE INDEX IF NOT EXISTS asset_flows_chain_tx_idx
+    ON asset_flows (chain_id, tx_hash);

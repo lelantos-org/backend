@@ -1,0 +1,38 @@
+# Protocol indexer — DEV (local anvil stack).
+# Mounted at /etc/protocol-indexer.toml. See config/prod/ for the deployment
+# template.
+#
+# Owns the state the wallet boots from and the relayer transacts against: the
+# asset catalog, the yield bindings and their polled index, `tree_advances` for
+# the relayer's Merkle mirror, and `deposit_escrowed_events` for its flush
+# pipeline.
+#
+# The [[chains]] block drives the two paths that read a chain:
+#
+#   1. ERC20 `decimals()` for registered assets. `AssetRegistered` does not
+#      carry decimals, and `scale` is a circuit capacity parameter rather than a
+#      decimals normalizer, so without it no token amount can be rendered.
+#   2. The yield-state poller, which writes `asset_yield`'s polled columns.
+#
+# A chain omitted here still indexes events; it loses `decimals` and ALL yield
+# state, which leaves `/v1/assets` publishing no yield and the wallet's
+# "of which earned" column with nothing to read.
+#
+# Fields below are the complete set (see ProtocolIndexerConfig).
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+
+# Poll interval for new raw events. Tight in dev so the indexer keeps up with
+# anvil's 1s blocks.
+tick_ms = 500
+
+# Max raw events consumed per tick.
+batch = 500
+
+# Keep [[chains]] last: in TOML every bare key after a table header belongs to
+# that table, so a scalar moved below this line would silently become part of
+# the chain entry instead of the top-level config.
+[[chains]]
+chain_id = 31337
+# Overridden by PROTOCOL_INDEXER_CHAIN_31337_RPC_URL.
+rpc_url = "http://anvil:8545"

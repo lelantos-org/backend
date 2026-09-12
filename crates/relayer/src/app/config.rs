@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use crate::adapters::calldata::MAX_DEPOSITS_PER_BATCH;
+use crate::domain::batch::MAX_DEPOSITS_PER_BATCH;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RelayerConfig {
@@ -13,8 +13,6 @@ pub struct RelayerConfig {
     pub prover: ProverCfg,
     #[serde(default)]
     pub price_oracle: PriceOracleCfg,
-    #[serde(default)]
-    pub token_prices: TokenPricesCfg,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -116,40 +114,6 @@ pub struct ChainCfg {
     /// relayer will not move at all.
     #[serde(default)]
     pub shielded_fee_assets: Vec<u64>,
-    /// Wallet-facing description, served verbatim by `/chains`.
-    #[serde(default)]
-    pub public: ChainPublicCfg,
-}
-
-/// What a wallet needs in order to talk to this chain, and nothing the relayer
-/// itself reads.
-///
-/// It lives here because the relayer is the only service that already enumerates
-/// every chain, making it the registry a wallet boots from: a deployment can add
-/// a chain without rebuilding any frontend.
-///
-/// Every field is optional so existing configs keep booting. A client that finds
-/// one absent falls back to its own build-time configuration.
-#[derive(Debug, Deserialize, Clone, Default)]
-pub struct ChainPublicCfg {
-    /// Human label; also what `wallet_addEthereumChain` registers.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Browser-reachable RPC.
-    ///
-    /// Separate from `ChainCfg::rpc_url`, which is the relayer's own endpoint and
-    /// is typically cluster-internal; serving that to a browser would hand out an
-    /// unreachable URL.
-    #[serde(default)]
-    pub rpc_url: Option<String>,
-    /// Merkle depth of the deployed pool.
-    #[serde(default)]
-    pub tree_depth: Option<u32>,
-    #[serde(default)]
-    pub permit2_address: Option<String>,
-    /// Block-explorer base, for transaction links.
-    #[serde(default)]
-    pub explorer_url: Option<String>,
 }
 
 /// The `shielded_fee_*` keys, grouped once they are known to be coherent.
@@ -220,36 +184,6 @@ impl Default for PriceOracleCfg {
             cache_ttl_s: default_oracle_ttl_s(),
             max_stale_s: default_oracle_max_stale_s(),
             allow_usd_cross: default_oracle_allow_usd_cross(),
-        }
-    }
-}
-
-/// Spot USD prices for the registered assets, as `/v1/prices` publishes them.
-///
-/// Distinct from `price_oracle` above. That one prices a fee from a symbol pair
-/// and a failure there fails a submission; this one prices a token from its
-/// address so a wallet can label a balance, and a failure here only omits a
-/// label. Different keys, provider and consequence.
-#[derive(Debug, Deserialize, Clone)]
-pub struct TokenPricesCfg {
-    /// DefiLlama-compatible price API root.
-    #[serde(default = "default_token_price_base_url")]
-    pub base_url: String,
-    /// How long a spot price is served without refetching.
-    #[serde(default = "default_token_price_ttl_s")]
-    pub ttl_s: u64,
-    /// Upstream deadline. Prices are decoration, so a slow provider must not hold
-    /// the endpoint open.
-    #[serde(default = "default_token_price_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-impl Default for TokenPricesCfg {
-    fn default() -> Self {
-        Self {
-            base_url: default_token_price_base_url(),
-            ttl_s: default_token_price_ttl_s(),
-            timeout_ms: default_token_price_timeout_ms(),
         }
     }
 }
@@ -334,18 +268,6 @@ fn default_oracle_max_stale_s() -> u64 {
 
 fn default_oracle_allow_usd_cross() -> bool {
     true
-}
-
-fn default_token_price_base_url() -> String {
-    "https://coins.llama.fi".to_string()
-}
-
-fn default_token_price_ttl_s() -> u64 {
-    300
-}
-
-fn default_token_price_timeout_ms() -> u64 {
-    5_000
 }
 
 fn default_shielded_fee_grace_bps() -> u32 {
@@ -503,14 +425,6 @@ impl RelayerConfig {
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "NATIVE_SYMBOL") {
                 c.native_symbol = v;
             }
-            // Wallet-facing, and the relayer itself never reads it — but it is a
-            // deployed address, so a literal in the TOML rots the moment the
-            // deploy order shifts. The stale value then resolves to a contract
-            // without Permit2's `allowance`, and every wallet's setup probe fails
-            // with "returned no data".
-            if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "PERMIT2_ADDRESS") {
-                c.public.permit2_address = Some(v);
-            }
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "FEE_MARKUP_BPS")
                 && let Ok(n) = v.parse::<u32>()
             {
@@ -577,7 +491,6 @@ mod tests {
             shielded_fee_ivk: None,
             shielded_fee_grace_bps: default_shielded_fee_grace_bps(),
             shielded_fee_assets: vec![],
-            public: ChainPublicCfg::default(),
         }
     }
 
@@ -633,29 +546,6 @@ mod tests {
                 transact_vkey_path: None,
             },
             price_oracle: PriceOracleCfg::default(),
-            token_prices: TokenPricesCfg::default(),
-        }
-    }
-
-    /// The shipped TOMLs declare no `[token_prices]` section, so every field comes
-    /// from a serde default. A field losing its `#[serde(default)]` would stop the
-    /// relayer booting, and only in a deployment, since nothing else here parses a
-    /// real config file.
-    #[test]
-    fn the_shipped_configs_still_parse_without_a_token_prices_section() {
-        for path in [
-            "../../stack/config/dev/relayer.toml",
-            "../../stack/config/prod/relayer.toml",
-        ] {
-            let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-            assert!(
-                !raw.contains("[token_prices]"),
-                "{path} now sets the section; this test no longer proves the defaults work",
-            );
-            let cfg: RelayerConfig = toml::from_str(&raw).unwrap_or_else(|e| panic!("{path}: {e}"));
-            assert_eq!(cfg.token_prices.base_url, "https://coins.llama.fi");
-            assert_eq!(cfg.token_prices.ttl_s, 300);
-            assert_eq!(cfg.token_prices.timeout_ms, 5_000);
         }
     }
 

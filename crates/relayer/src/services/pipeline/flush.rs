@@ -4,6 +4,7 @@ use crate::adapters::calldata::{
 };
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::fiat_shamir;
+use crate::domain::responses::EstimateResponse;
 use crate::services::asset_registry::AssetRegistry;
 use crate::services::deposit_fee::{FeeNote, assess};
 use crate::services::deposit_mempool::{DepositMempool, EscrowLeaf, PendingDeposit};
@@ -14,13 +15,13 @@ use crate::services::gas_witness::{EntryPoint, GasWitness};
 use crate::services::pipeline::common::FeeContext;
 use crate::services::pipeline::deposit_failures::DepositFailures;
 use crate::services::pipeline::deposit_preflight::{FeeGate, Verdict, classify};
-use crate::services::prover::{Priority, TreeUpdateBatchProver};
 use crate::services::shielded_fee::ShieldedFeeChecker;
-use crate::services::submitter::Submitter;
-use crate::services::tree::TreeMirror;
+use crate::services::submitter::{SubmissionReceipt, Submitter};
+use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use crate::services::witness::{self, LeafDeposit};
 use alloy::primitives::{Address, B256, FixedBytes, U256};
 use alloy::sol_types::SolCall;
+use groth16::{Priority, TreeUpdateBatchProof, TreeUpdateBatchProver};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info, instrument, warn};
@@ -60,15 +61,21 @@ impl FlushPipeline {
     /// `flushBatch`, rather than against a transaction the caller is about to send.
     /// It is the number `fee_gate` holds the deposit to, so a wallet can build a
     /// note that will be accepted.
-    pub async fn estimate(&self) -> AppResult<crate::domain::responses::EstimateResponse> {
+    pub async fn estimate(&self) -> AppResult<EstimateResponse> {
+        self.fees()
+            .quote(self.gas_witness.gas_for(EntryPoint::Flush))
+            .await
+    }
+
+    /// This chain's quoting and charging context, as `SpendPipeline` and
+    /// `SwapPipeline` build it.
+    fn fees(&self) -> FeeContext<'_> {
         FeeContext {
             chain_id: self.chain_id,
             fee_quoter: &self.fee_quoter,
             assets: &self.assets,
             shielded_fee: self.shielded_fee.as_deref(),
         }
-        .quote(self.gas_witness.gas_for(EntryPoint::Flush))
-        .await
     }
 
     /// One flush attempt. Returns `Ok(None)` if no pending deposits.
@@ -107,157 +114,86 @@ impl FlushPipeline {
         if pending.is_empty() {
             return Ok(None);
         }
-        let n = pending.len();
-        // Summed before `pending` is consumed below. Deposits in one batch can name
-        // different assets, so this is a batch total rather than an amount of a
-        // single token, and is meaningful only alongside the per-deposit lines
-        // `fee_gate` emits.
-        let fees_collected: u64 = pending.iter().map(|p| p.fee_in).sum();
+        let plan = BatchPlan::new(&pending);
+        let n = plan.n;
         tracing::Span::current().record("n", n);
         info!("flush batch starting");
 
-        // Both leaves of every deposit, in the order the tree inserts them; see
-        // `PendingDeposit::leaves`. Every leaf-indexed array below derives from
-        // this one vector, so they cannot disagree.
-        let leaves: Vec<EscrowLeaf> = pending.iter().flat_map(PendingDeposit::leaves).collect();
-        let n_leaves = leaves.len();
+        let receipt = self.prove_and_submit(&plan).await?;
+        self.failures.note_success();
+        self.record_flush(&plan, &receipt).await;
+        Ok(Some(receipt.tx_hash))
+    }
 
-        let cms_real: Vec<FixedBytes<32>> = leaves.iter().map(|l| l.cm.into()).collect();
-        let tree_leaves: Vec<(fmd_crypto::tree::Field, [U256; 2])> =
-            leaves.iter().map(|l| (l.cm, l.cv_dep)).collect();
-        let ids_u64: Vec<u64> = pending.iter().map(|p| p.id).collect();
-        // Digest preimage the contract dropped from storage; a wrong field here
-        // reverts `DigestMismatch` for the whole batch.
-        let meta: Vec<IMasp::DepositMeta> = pending
-            .iter()
-            .map(|p| IMasp::DepositMeta {
-                payer: Address::from(p.payer),
-                submittedAt: p.submitted_at,
-                fbps: p.fee_bps_at_submit,
-            })
-            .collect();
-        // The public half of each leaf, at the circuit's full width...
-        let batch = PaddedBatch::from_deposits(
-            &leaves
-                .iter()
-                .map(|l| DepositLeaf {
-                    cm: l.cm.into(),
-                    cv_dep: l.cv_dep,
-                    leaf_asset: l.asset_id,
-                    leaf_public_in: l.public_in,
-                })
-                .collect::<Vec<_>>(),
-        );
-        // ...and the private blinder the circuit binds it against.
-        let deposits: Vec<LeafDeposit> = leaves
-            .iter()
-            .map(|l| LeafDeposit {
-                cv_dep: l.cv_dep,
-                leaf_asset: l.asset_id,
-                leaf_public_in: l.public_in,
-                rcv: l.rcv,
-            })
-            .collect();
-
-        // Hold the mirror lock through prove and submit. `SpendPipeline` shares
-        // this mutex, so concurrent operations on the chain serialise.
+    /// Reserve the batch's leaves, prove `tree_update_batch` over them and submit
+    /// `flushBatch`, unwinding the speculative inserts on any failure.
+    ///
+    /// The mirror lock is held from reserve through the receipt and released
+    /// before the caller's database write. `SpendPipeline` and `SwapPipeline`
+    /// share this mutex, so every operation on the chain serialises; their own
+    /// equivalent is `pipeline::common::reserve_prove_submit`, which this cannot
+    /// reuse because a flush proves deposit leaves rather than a transact payload.
+    async fn prove_and_submit(&self, plan: &BatchPlan) -> AppResult<SubmissionReceipt> {
         let mut mirror = self.mirror.lock().await;
-        let (slot, advanced) = mirror.reserve_and_advance_batch(&tree_leaves)?;
+        let (slot, advanced) = mirror.reserve_and_advance_batch(&plan.tree_leaves)?;
         let start_index = slot.start_index;
         tracing::Span::current().record("start_index", start_index);
 
-        let z = fiat_shamir::compute_z(&slot.old_root, &advanced.new_root, start_index, &batch);
-        let tu_witness = witness::build_batch(&slot, &advanced, &cms_real, &deposits, z);
+        let z =
+            fiat_shamir::compute_z(&slot.old_root, &advanced.new_root, start_index, &plan.batch);
+        let tu_witness = witness::build_batch(&slot, &advanced, &plan.cms, &plan.deposits, z);
 
         let prove_started = std::time::Instant::now();
         let tu_proof = match self.prover.prove(tu_witness, Priority::Flush).await {
             Ok(p) => p,
             // `ProverBusy` means another chain holds the prover, which is normal
             // under load, and `abandon` does not charge it to the batch.
-            Err(e) => return Err(self.abandon(&mut mirror, n_leaves, &ids_u64, e)),
+            Err(e) => return Err(self.abandon(&mut mirror, plan, e.into())),
         };
         info!(
             elapsed_ms = prove_started.elapsed().as_millis() as u64,
             "flush prove ok"
         );
 
-        let tp = build_tu_proof(&tu_proof)?;
-        let tpi =
-            build_tu_batch_pub_inputs(start_index, &slot.old_root, &advanced.new_root, &batch);
-
-        let calldata = IMasp::flushBatchCall {
-            ids: ids_u64.iter().copied().map(U256::from).collect(),
-            meta,
-            tp,
-            tpi,
-        }
-        .abi_encode();
-        let receipt = match self.submitter.submit(calldata).await {
-            Ok(r) => r,
-            Err(e) => return Err(self.abandon(&mut mirror, n_leaves, &ids_u64, e)),
+        let calldata = match plan.encode(&slot, &advanced, &tu_proof) {
+            Ok(c) => c,
+            Err(e) => return Err(self.abandon(&mut mirror, plan, e)),
         };
-        // Drop the mirror lock before the database write so other pipelines can
-        // proceed.
-        drop(mirror);
-        self.failures.note_success();
-
-        // An optimistic mark, keeping these ids out of later `pop_pending` calls
-        // until the indexer observes the on-chain `DepositFlushed` event and
-        // overwrites with the canonical block number.
-        match self
-            .mempool
-            .mark_submitted(&ids_u64, receipt.block_number)
-            .await
-        {
-            Ok(claimed) if claimed != n => {
-                // The indexer writes the canonical flush unconditionally and
-                // `submit` waits for a confirmation, so the indexer often wins this
-                // race. Nothing is lost: its row is the authoritative one.
-                match self.mempool.count_unflushed(&ids_u64).await {
-                    Ok(0) => info!(
-                        claimed,
-                        batched = n,
-                        "flush rows already marked flushed by the indexer"
-                    ),
-                    Ok(unflushed) => warn!(
-                        claimed,
-                        batched = n,
-                        unflushed,
-                        "flush claimed fewer deposits than it submitted; another relayer may share this chain"
-                    ),
-                    Err(e) => warn!(
-                        claimed,
-                        batched = n,
-                        error = %e,
-                        "flush claimed fewer deposits than it submitted; could not tell indexer race from a second relayer"
-                    ),
-                }
-            }
-            Ok(_) => {}
-            Err(e) => warn!(error = %e, "flush mark_submitted failed (ingester will catch up)"),
+        match self.submitter.submit(calldata).await {
+            Ok(r) => Ok(r),
+            Err(e) => Err(self.abandon(&mut mirror, plan, e)),
         }
+    }
+
+    /// Everything a landed `flushBatch` leaves behind: the optimistic ledger mark,
+    /// the gas observation the next quote is built on, and the SSE events.
+    ///
+    /// None of it can fail the flush — the transaction has already confirmed — so
+    /// each step reports and moves on rather than propagating.
+    async fn record_flush(&self, plan: &BatchPlan, receipt: &SubmissionReceipt) {
+        self.mark_submitted(plan, receipt.block_number).await;
 
         // Per deposit, since that is what a deposit's fee note is quoted against
         // while the receipt covers the whole batch. Recorded only on a confirmed
         // submission, so a reverted flush cannot move the quote.
-        self.gas_witness
-            .observe(EntryPoint::Flush, receipt.gas_used / n as u64);
+        let gas_per_deposit = receipt.gas_used / plan.n as u64;
+        self.gas_witness.observe(EntryPoint::Flush, gas_per_deposit);
 
         let tx_hash_hex = format!("0x{}", hex::encode(receipt.tx_hash));
         info!(
             tx_hash = %tx_hash_hex,
             gas_used = receipt.gas_used,
-            gas_per_deposit = receipt.gas_used / n as u64,
+            gas_per_deposit = gas_per_deposit,
             // Circuit units, summed over the batch. The gas above came out of the
             // relayer's own account and this is what came back. The two are in
             // different units, and converting between them needs the asset's scale
             // and a price, so this is a raw pair to reconcile from rather than a
             // margin.
-            fees_collected = fees_collected,
+            fees_collected = plan.fees_collected,
             block = receipt.block_number,
             "flushBatch submitted"
         );
-        for id in &ids_u64 {
+        for id in &plan.ids {
             self.events.publish(DepositEvent::Flushed {
                 deposit_id: *id,
                 chain_id: self.chain_id,
@@ -265,7 +201,47 @@ impl FlushPipeline {
                 block_number: receipt.block_number,
             });
         }
-        Ok(Some(receipt.tx_hash))
+    }
+
+    /// Claim the flushed rows optimistically, keeping these ids out of later
+    /// `pop_pending` calls until the indexer observes the on-chain
+    /// `DepositFlushed` event and overwrites with the canonical block number.
+    ///
+    /// Claiming fewer rows than were batched has two very different causes, so the
+    /// ledger is re-read to tell them apart rather than warning about both.
+    async fn mark_submitted(&self, plan: &BatchPlan, block_number: i64) {
+        let claimed = match self.mempool.mark_submitted(&plan.ids, block_number).await {
+            Ok(claimed) => claimed,
+            Err(e) => {
+                warn!(error = %e, "flush mark_submitted failed (ingester will catch up)");
+                return;
+            }
+        };
+        if claimed == plan.n {
+            return;
+        }
+        // The indexer writes the canonical flush unconditionally and `submit`
+        // waits for a confirmation, so the indexer often wins this race. Nothing
+        // is lost: its row is the authoritative one.
+        match self.mempool.count_unflushed(&plan.ids).await {
+            Ok(0) => info!(
+                claimed,
+                batched = plan.n,
+                "flush rows already marked flushed by the indexer"
+            ),
+            Ok(unflushed) => warn!(
+                claimed,
+                batched = plan.n,
+                unflushed,
+                "flush claimed fewer deposits than it submitted; another relayer may share this chain"
+            ),
+            Err(e) => warn!(
+                claimed,
+                batched = plan.n,
+                error = %e,
+                "flush claimed fewer deposits than it submitted; could not tell indexer race from a second relayer"
+            ),
+        }
     }
 
     /// Roll the mirror back after a failed stage and charge the batch for it.
@@ -273,15 +249,9 @@ impl FlushPipeline {
     /// [`DepositFailures::note_failure`] decides which failures are the batch's
     /// own; infrastructure faults pass through uncounted.
     #[must_use = "the returned error must be propagated"]
-    fn abandon(
-        &self,
-        mirror: &mut TreeMirror,
-        leaves: usize,
-        ids: &[u64],
-        cause: AppError,
-    ) -> AppError {
-        let cause = mirror.unwind(leaves, cause);
-        self.failures.note_failure(ids, &cause);
+    fn abandon(&self, mirror: &mut TreeMirror, plan: &BatchPlan, cause: AppError) -> AppError {
+        let cause = mirror.unwind(plan.leaf_count(), cause);
+        self.failures.note_failure(&plan.ids, &cause);
         cause
     }
 
@@ -418,5 +388,103 @@ impl FlushPipeline {
         for id in ids {
             self.failures.quarantine(*id, "escrow digest mismatch");
         }
+    }
+}
+
+/// One tick's batch, in every shape the flush path needs it.
+///
+/// Built once from the pending deposits so that the leaf-indexed arrays cannot
+/// disagree: they all derive from the single `leaves` vector, which is
+/// [`PendingDeposit::leaves`] flattened in the order `_drainDeposit` reads the
+/// pair back at `2i` and `2i + 1`.
+struct BatchPlan {
+    /// Deposits in the batch. `flushBatch` inserts `2n` leaves and the contract
+    /// enforces the doubling, so an odd leaf count is a `BadBatchSize`.
+    n: usize,
+    /// Deposit ids, in batch order.
+    ids: Vec<u64>,
+    /// Commitments as the witness builder wants them.
+    cms: Vec<FixedBytes<32>>,
+    /// `(cm, cv_dep)` pairs as `TreeMirror` wants them.
+    tree_leaves: Vec<(common_crypto::tree::Field, [U256; 2])>,
+    /// Digest preimage the contract dropped from storage; a wrong field here
+    /// reverts `DigestMismatch` for the whole batch.
+    meta: Vec<IMasp::DepositMeta>,
+    /// The public half of each leaf, at the circuit's full width.
+    batch: PaddedBatch,
+    /// The private blinders the circuit binds that public half against.
+    deposits: Vec<LeafDeposit>,
+    /// Escrowed fee, summed over the batch. Deposits in one batch can name
+    /// different assets, so this is a batch total rather than an amount of a
+    /// single token, and is meaningful only alongside the per-deposit lines
+    /// `fee_gate` emits.
+    fees_collected: u64,
+}
+
+impl BatchPlan {
+    fn new(pending: &[PendingDeposit]) -> Self {
+        let leaves: Vec<EscrowLeaf> = pending.iter().flat_map(PendingDeposit::leaves).collect();
+        Self {
+            n: pending.len(),
+            ids: pending.iter().map(|p| p.id).collect(),
+            cms: leaves.iter().map(|l| l.cm.into()).collect(),
+            tree_leaves: leaves.iter().map(|l| (l.cm, l.cv_dep)).collect(),
+            meta: pending
+                .iter()
+                .map(|p| IMasp::DepositMeta {
+                    payer: Address::from(p.payer),
+                    submittedAt: p.submitted_at,
+                    fbps: p.fee_bps_at_submit,
+                })
+                .collect(),
+            batch: PaddedBatch::from_deposits(
+                &leaves
+                    .iter()
+                    .map(|l| DepositLeaf {
+                        cm: l.cm.into(),
+                        cv_dep: l.cv_dep,
+                        leaf_asset: l.asset_id,
+                        leaf_public_in: l.public_in,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            deposits: leaves
+                .iter()
+                .map(|l| LeafDeposit {
+                    cv_dep: l.cv_dep,
+                    leaf_asset: l.asset_id,
+                    leaf_public_in: l.public_in,
+                    rcv: l.rcv,
+                })
+                .collect(),
+            fees_collected: pending.iter().map(|p| p.fee_in).sum(),
+        }
+    }
+
+    /// Leaves this batch reserved in the mirror, which is what an unwind rolls
+    /// back.
+    fn leaf_count(&self) -> usize {
+        self.tree_leaves.len()
+    }
+
+    /// `flushBatch` calldata for this batch against the proof just produced.
+    fn encode(
+        &self,
+        slot: &ReservedSlot,
+        advanced: &AdvancedState,
+        tu_proof: &TreeUpdateBatchProof,
+    ) -> AppResult<Vec<u8>> {
+        Ok(IMasp::flushBatchCall {
+            ids: self.ids.iter().copied().map(U256::from).collect(),
+            meta: self.meta.clone(),
+            tp: build_tu_proof(tu_proof)?,
+            tpi: build_tu_batch_pub_inputs(
+                slot.start_index,
+                &slot.old_root,
+                &advanced.new_root,
+                &self.batch,
+            ),
+        }
+        .abi_encode())
     }
 }

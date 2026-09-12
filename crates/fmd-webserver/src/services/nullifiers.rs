@@ -1,9 +1,15 @@
+//! The spent-nullifier chunk feed.
+//!
+//! Entries are truncated to their low `WIRE_BYTES`: the client only tests set
+//! membership, and every wallet downloads the feed whole.
+
 use crate::app::AppState;
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::responses::{NullifierChunkOut, RenderedChunk};
 use crate::repositories::nullifiers;
-use std::sync::Arc;
+use crate::services::chunks;
 
-pub const CHUNK_SIZE: u64 = 1024;
+pub use crate::services::chunks::CHUNK_SIZE;
 
 /// Width of a stored nullifier. A row of any other width is an upstream bug
 /// rather than input to be handled.
@@ -21,15 +27,6 @@ const NF_BYTES: usize = 32;
 /// the modulus while the low ones are uniform.
 const WIRE_BYTES: usize = 10;
 
-pub struct ChunkResponse {
-    pub chunk_id: u64,
-    /// 0x-prefixed hex, truncated to `WIRE_BYTES`, ascending by `seq`. The client
-    /// holds the whole set and filters its own notes locally, so the server never
-    /// learns which nullifiers a wallet cares about.
-    pub nullifiers: Vec<String>,
-    pub is_complete: bool,
-}
-
 /// Truncating hex encoder for one stored nullifier. Rejects any other width,
 /// since slicing the tail off a short row would emit a value no client could
 /// match.
@@ -43,21 +40,22 @@ fn nf_to_hex(nf: &[u8]) -> AppResult<String> {
     Ok(format!("0x{}", hex::encode(&nf[NF_BYTES - WIRE_BYTES..])))
 }
 
-pub async fn get_chunk(
-    st: &AppState,
-    chain_id: i64,
-    chunk_id: u64,
-) -> AppResult<Arc<ChunkResponse>> {
-    // Only complete, immutable chunks are cached; see
-    // `AppCache::nullifier_chunks`.
-    let cached = st.cache.nullifier_chunks.get(&(chain_id, chunk_id)).await;
-    shared::metrics::record_cache("nullifier_chunks", cached.is_some());
-    if let Some(cached) = cached {
-        return Ok(cached);
-    }
+/// One chunk of the spent-nullifier feed, serialised and ready to write.
+///
+/// Rendered once for the same reason as the commitment feed: a complete chunk is
+/// immutable, so its bytes are what the cache holds.
+pub async fn get_chunk(st: &AppState, chain_id: i64, chunk_id: u64) -> AppResult<RenderedChunk> {
+    chunks::serve(
+        &st.cache.nullifier_chunks,
+        "nullifier_chunks",
+        (chain_id, chunk_id),
+        render(st, chain_id, chunk_id),
+    )
+    .await
+}
 
-    let from = (chunk_id * CHUNK_SIZE) as i64;
-    let to = from + CHUNK_SIZE as i64;
+async fn render(st: &AppState, chain_id: i64, chunk_id: u64) -> AppResult<RenderedChunk> {
+    let (from, to) = chunks::range(chunk_id);
     let rows = nullifiers::list_chunk(&st.pool, chain_id, from, to).await?;
     let is_complete = rows.len() as u64 == CHUNK_SIZE;
     let nullifiers = rows
@@ -65,20 +63,12 @@ pub async fn get_chunk(
         .map(Vec::as_slice)
         .map(nf_to_hex)
         .collect::<AppResult<Vec<_>>>()?;
-    let response = Arc::new(ChunkResponse {
+    RenderedChunk::render(&NullifierChunkOut {
         chunk_id,
         nullifiers,
         is_complete,
-    });
-
-    if is_complete {
-        st.cache
-            .nullifier_chunks
-            .insert((chain_id, chunk_id), Arc::clone(&response))
-            .await;
-    }
-
-    Ok(response)
+    })
+    .map_err(|e| AppError::Internal(format!("serialise nullifier chunk: {e}")))
 }
 
 #[cfg(test)]

@@ -20,6 +20,10 @@ metrics-exporter-prometheus = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
+# Conditional-GET support in `router::etag`. Optional for the same reason axum
+# is: a crate that only wants the tick driver must not link a hasher.
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The metrics cardinality test drives a real axum router through the layer:
@@ -31,7 +35,11 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = []
-webserver = ["dep:axum", "dep:moka", "dep:tower-http"]
+# The moka cache builder, on its own switch. Split out of `webserver` so a
+# library that wants a cache does not have to link an HTTP framework to get
+# one; `asset-registry` is the first such consumer.
+cache = ["dep:moka"]
+webserver = ["dep:axum", "dep:tower-http", "dep:sha2", "dep:hex", "cache"]
 # Pulls in the Prometheus exporter and its listener. Only the binaries that
 # actually serve `/metrics` enable it; the `metrics` facade above is always
 # compiled, so instrumentation sites are shared without the hyper dependency.

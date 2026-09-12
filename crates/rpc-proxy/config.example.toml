@@ -1,0 +1,135 @@
+# rpc-proxy configuration.
+#
+# Every `[[chains]]` field can be overridden per chain from the environment as
+# RPC_PROXY_CHAIN_<chain_id>_<FIELD>, e.g.
+#   RPC_PROXY_CHAIN_42161_UPSTREAM_URL=https://…
+#   RPC_PROXY_CHAIN_42161_ERC20_SEED=0xaaa…,0xbbb…
+# A variable that is set but does not parse fails startup rather than falling
+# back to the value below.
+
+listen_addr = "0.0.0.0:3006"
+metrics_addr = "127.0.0.1:3017"
+
+# Header carrying the real client address when a proxy sits in front. Leave
+# unset for a bare process, which then uses the socket peer.
+#
+# NEVER set this without a proxy actually setting the header: any caller could
+# then choose its own rate-limit bucket by sending it, and mint a fresh one per
+# request.
+#
+# Behind Cloudflare use CF-Connecting-IP. Cloudflare OVERWRITES that header on
+# every request, so it carries exactly one entry and cannot be spoofed through —
+# unlike X-Forwarded-For, which Cloudflare appends to.
+#
+# That guarantee depends on the origin being unreachable except through
+# Cloudflare. If the origin IP can be hit directly, anything it is told about
+# the client is whatever the caller chose. Keep the loopback publish and the
+# Caddy hop, or use a Cloudflare Tunnel.
+# trusted_client_ip_header = "CF-Connecting-IP"
+
+# Which entry to believe when the header carries a list. Irrelevant for
+# CF-Connecting-IP, which has one. For X-Forwarded-For it is the whole
+# question: every hop appends, so the left end is whatever the caller wrote and
+# the right end is what the nearest trusted proxy observed.
+#
+# "rightmost" (the default) is the safe reading. Use "leftmost" only when every
+# hop in the chain is yours.
+# trusted_client_ip_position = "rightmost"
+
+# Largest client batch accepted. Well above the SDK's own `batchSize` of 20, so
+# a deployed SDK cannot start failing because this number moved.
+max_batch = 100
+
+# Widest `eth_getLogs` range. Above the SDK's own 3600-block window and below
+# the 10k cap most providers impose.
+max_log_range = 5000
+
+max_call_data_bytes = 8192
+max_call_gas = 50000000
+
+# Ceiling on upstream calls in flight per chain. Backpressure rather than a rate
+# limit: the buckets below bound spend over time, this bounds how much of it can
+# be outstanding at once. Nothing else does — the credit guard permits a burst of
+# `upstream_burst_units`, which at the eth_getLogs weight is around a hundred
+# concurrent calls, each a socket and a buffered response.
+#
+# Past the cap a call waits, spending its own request deadline, so overload
+# surfaces as this service's 503 rather than as an unbounded fan-out at a
+# provider that meters us.
+upstream_max_inflight = 64
+
+# All of the ceilings above are bounded at startup as well as defaulted here. A
+# value raised past its supported range fails to boot rather than starting
+# cleanly with the check it exists to be quietly removed.
+
+[rate_limit]
+# Compute units, modelled on Alchemy's meter. A wallet's boot burst is ~48 units
+# and its steady state ~3 units/s, so an honest client sits near a tenth of this.
+#
+# These buckets are SHARED ACROSS CHAINS: one client, one budget, however many
+# [[chains]] blocks are configured. Size them for a client's total traffic, not
+# per chain — a wallet reading three chains boots at ~144 units against the
+# burst below, not 48.
+#
+# A request also pays an admission charge before its body is parsed: one unit,
+# plus one per 32 KB. An honest 3 KB batch pays 1; a body at the 256 KB cap pays
+# 9. That is what stops a flood of oversized garbage being free, since nothing
+# else about a request is knowable until it has been deserialized.
+client_units_per_second = 30
+client_burst_units = 180
+client_long_units = 3000
+client_long_window_s = 300
+
+[[chains]]
+chain_id = 31337
+
+# SECRET in production: the API key lives in the URL. Mount this file rather
+# than passing the URL as an environment variable, so it does not appear in
+# `docker inspect` or /proc/<pid>/environ.
+upstream_url = "http://anvil:8545"
+
+# Whether this endpoint retains historical state.
+#
+# No browser path needs it. The portfolio's cost basis used to read `yieldState`
+# at historical heights and now comes from the registry's recorded history
+# instead, so nothing the webapp issues reaches back past the tip. Left as a
+# capability flag for SDK consumers outside the browser that do read at an
+# explicit block; set it false and such reads are refused rather than sent to a
+# node that would answer them wrongly.
+upstream_archive = true
+
+# Optional public endpoint, tried when the primary is unreachable. Public
+# endpoints prune, so leave `fallback_archive` false: a historical read sent to
+# one comes back as a JSON-RPC error, which this service treats as the chain's
+# verdict rather than as a failure to retry.
+# fallback_url = "https://arb1.arbitrum.io/rpc"
+# fallback_archive = false
+
+# How deep a block must be before a reorg cannot reach it. 64 is
+# mainnet-flavoured; L2s produce blocks far faster, so the same count is seconds
+# rather than minutes there — see the README.
+reorg_depth = 64
+
+# Block the contracts were deployed in. A historical state read below this is
+# asking a paid archive node about state that cannot exist, since every
+# eth_call target here is one of our own contracts.
+#
+# Note this floors `eth_call`/`eth_getBalance` at explicit heights and rejects an
+# `eth_getLogs` range that ends before it — but it deliberately does NOT floor a
+# log range's `fromBlock`: the SDK's own lookback returns genesis on any chain
+# whose tip is under 3600 blocks. Unset disables the floor entirely.
+# deploy_block = 21000000
+
+# The chain-wide credit guard. Per-IP limits cannot bound a distributed abuser;
+# this is what does.
+upstream_units_per_second = 300
+upstream_burst_units = 1500
+
+masp_address = "0x0000000000000000000000000000000000000000"
+permit2_address = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+
+# Generated at template time from the registry's /v1/assets — do not hand-edit.
+# `venue_seed` in particular exists nowhere else: ERC4626Venue addresses are
+# CREATE-derived at deploy and only logged.
+erc20_seed = []
+venue_seed = []

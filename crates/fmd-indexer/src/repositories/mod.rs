@@ -7,6 +7,7 @@ pub mod notes;
 pub mod raw_events;
 pub mod spent_nullifiers;
 pub mod subscriptions;
+pub mod tree_state;
 
 /// Check a connection out of the pool.
 ///

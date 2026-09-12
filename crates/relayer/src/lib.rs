@@ -1,9 +1,9 @@
 //! Tree-update relayer.
 //!
-//! Layered binary; see `backend/ARCHITECTURE.md`. Owns proof generation
-//! (native Groth16 over a snarkjs zkey, witness from a circom-witnesscalc graph)
-//! and on-chain submission. The prover serialises CPU-heavy proofs behind its own
-//! `Semaphore`; see `services::prover`.
+//! Layered binary; see `backend/ARCHITECTURE.md`. Owns the tree mirror, fee
+//! quoting and on-chain submission; the Groth16 itself — proving over a snarkjs
+//! zkey, and verifying a wallet's transact proof — lives in the `groth16` crate,
+//! which serialises CPU-heavy proofs behind its own `Semaphore`.
 
 pub mod adapters;
 pub mod app;

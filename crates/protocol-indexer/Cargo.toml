@@ -1,0 +1,36 @@
+[package]
+name = "protocol-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "protocol-indexer"
+path = "src/main.rs"
+
+[dependencies]
+futures = { workspace = true }
+shared = { path = "../shared" }
+database = { path = "../database" }
+chain-types = { path = "../chain-types", features = ["rpc"] }
+# NOTE: must NOT depend on common-crypto. The privacy gate is a convention,
+# not a CI check: a new dependency edge has to be caught in review.
+tokio = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+alloy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dotenvy = { workspace = true }
+hex = { workspace = true }
+bigdecimal = { workspace = true }
+async-trait = { workspace = true }
+
+[build-dependencies]
+vergen-gix = { workspace = true }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }

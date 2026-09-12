@@ -3,17 +3,21 @@
 //! Pure and synchronous: everything the plan needs is passed in, so the decision
 //! is testable without a database.
 
-use crate::domain::convert::u256_to_bigdecimal;
 use crate::domain::error::FmdIndexerError;
-use crate::repositories::notes::NewNote;
-use crate::repositories::raw_events::RawEventRow;
-use crate::repositories::spent_nullifiers::NewSpentNullifier;
 use alloy::primitives::U256;
 use chain_types::decode::{self, DecodedEvent};
+use chain_types::numeric::u256_to_bigdecimal;
+use common_crypto::tree::{Field, leaf_hash};
+use database::models::{NewNote, RawEventRow};
 use shared::entities::EventKind;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use tracing::{error, warn};
+
+/// The escrow side lookup [`plan_commit`] reads. Defined in
+/// [`crate::domain::escrow`], which owns the decode; re-exported here because
+/// it is part of this module's signature.
+pub use crate::domain::escrow::{EscrowedLeaves, EscrowedMap};
 
 /// Bytes of clueBits the FMD filter reads off the front of every ciphertext.
 /// A leaf whose ciphertext is shorter cannot be scanned, so it is not stored.
@@ -36,9 +40,37 @@ pub struct LeafPayload {
     pub cv_dep_y: U256,
 }
 
+/// One leaf as the commitment tree sees it, whether or not it became a note.
+///
+/// This is the difference between the tree state the indexer can produce and the
+/// one a reader of `notes` can. A leaf whose ciphertext is too short to scan is
+/// still a leaf the contract inserted, and it still moves the root; dropping it
+/// from the tree would put every later leaf one position out.
+#[derive(Debug)]
+pub struct TreeLeaf {
+    /// Absolute once the transaction's root is known, and the bare ordinal until
+    /// then, exactly like [`NewNote::leaf_index`]. [`PendingTx::set_root`]
+    /// rebases both together.
+    pub leaf_index: i64,
+    pub hash: Field,
+}
+
 impl LeafPayload {
     fn has_clue_bits(&self) -> bool {
         self.ciphertext.len() >= CLUE_BITS_PREFIX
+    }
+
+    /// `Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`, the value the contract
+    /// inserted. Depends on none of the fields that can make a leaf unusable.
+    fn tree_hash(&self) -> Result<Field, FmdIndexerError> {
+        let cm = common_crypto::tree::field_from_bytes(&self.cm)
+            .map_err(|e| FmdIndexerError::Decode(format!("leaf cm: {e}")))?;
+        leaf_hash(
+            &cm,
+            &self.cv_dep_x.to_be_bytes::<32>(),
+            &self.cv_dep_y.to_be_bytes::<32>(),
+        )
+        .map_err(|e| FmdIndexerError::Decode(format!("leaf hash: {e}")))
     }
 
     /// Carries block coordinates only. A tx hash in the log would point from an
@@ -62,25 +94,27 @@ impl LeafPayload {
     }
 }
 
-/// The two leaves one deposit mints, in the order `flushBatch` inserts them:
-/// the depositor's note, then the note paying whoever flushed it.
-///
-/// The order is the leaf order the tree commits, so swapping them assigns both
-/// notes the wrong `leaf_index` and every Merkle proof built against them fails.
-#[derive(Clone)]
-pub struct EscrowedLeaves {
-    pub principal: LeafPayload,
-    pub fee: LeafPayload,
+/// One spend the plan records, before the repository assigns its per-chain
+/// ordinal. Plain data: the numbered, `Insertable` form is repository-private.
+#[derive(Debug, Clone)]
+pub struct NewSpentNullifier {
+    pub chain_id: i64,
+    pub block_number: i64,
+    pub log_index: i32,
+    pub nf: Vec<u8>,
+    pub tx_hash: Vec<u8>,
+    pub block_ts: i64,
 }
-
-/// Maps a deposit id, as a decimal string, to that deposit's two leaves.
-pub type EscrowedMap = HashMap<String, EscrowedLeaves>;
 
 /// Debug-printable: these are public chain values, and a plan is the first thing
 /// to dump when a tick commits something unexpected.
 #[derive(Debug)]
 pub struct CommitPlan {
     pub notes: Vec<NewNote>,
+    /// Contiguous from `leaves[0].leaf_index`, and a superset of `notes`: it
+    /// carries the leaves dropped as holes too, so it advances the tree exactly
+    /// as the contract did.
+    pub leaves: Vec<TreeLeaf>,
     pub spent_nfs: Vec<NewSpentNullifier>,
     pub last_event_id: i64,
     pub last_block_number: i64,
@@ -123,6 +157,9 @@ struct PendingTx {
     leaf_seen: u64,
     skipped: u64,
     notes: Vec<NewNote>,
+    /// Every leaf the root announced, including those `notes` had to drop. This
+    /// is what advances the stored tree frontier.
+    leaves: Vec<TreeLeaf>,
     spent_nfs: Vec<NewSpentNullifier>,
     /// Highest row of this transaction seen so far. The cursor commits through
     /// these, so they advance for every row, including ones this batch could not
@@ -141,6 +178,7 @@ impl PendingTx {
             leaf_seen: 0,
             skipped: 0,
             notes: Vec::new(),
+            leaves: Vec::new(),
             spent_nfs: Vec::new(),
             last_id: row.id,
             last_block: row.block_number,
@@ -169,7 +207,11 @@ impl PendingTx {
         for note in &mut self.notes {
             note.leaf_index += root.start_index as i64;
         }
+        for leaf in &mut self.leaves {
+            leaf.leaf_index += root.start_index as i64;
+        }
         self.notes.reserve(root.inserted as usize);
+        self.leaves.reserve(root.inserted as usize);
         self.root = Some(root);
         Ok(())
     }
@@ -331,6 +373,7 @@ impl Batch {
     fn commit_through(mut self, chain_id: i64, after: i64) -> Option<CommitPlan> {
         let mut plan = CommitPlan {
             notes: Vec::new(),
+            leaves: Vec::new(),
             spent_nfs: Vec::new(),
             last_event_id: after,
             last_block_number: 0,
@@ -353,6 +396,7 @@ impl Batch {
             plan.last_event_id = tx.last_id;
             plan.last_block_number = tx.last_block;
             plan.notes.append(&mut tx.notes);
+            plan.leaves.append(&mut tx.leaves);
             plan.spent_nfs.append(&mut tx.spent_nfs);
         }
 
@@ -394,7 +438,7 @@ impl PendingTx {
                     cv_dep_y,
                 },
                 LeafOrder::RootLeads,
-            ),
+            )?,
 
             DecodedEvent::NullifierConsumed { nf } => self.spent_nfs.push(NewSpentNullifier {
                 chain_id: cx.chain_id,
@@ -406,15 +450,14 @@ impl PendingTx {
             }),
 
             DecodedEvent::DepositFlushed { id, .. } => {
-                let deposit_id = id.to_string();
-                let Some(payload) = cx.escrowed.get(&deposit_id) else {
+                let Some(payload) = cx.escrowed.get(&id) else {
                     // The escrow event may not be ingested yet, so this is a wait
                     // rather than a drop. Logged because the wait is unbounded: if
                     // the escrow log predates the ingester's start block it never
                     // arrives and the chain stops here.
                     warn!(
                         chain_id = cx.chain_id,
-                        deposit_id,
+                        deposit_id = %id,
                         block_number = cx.row.block_number,
                         log_index = cx.row.log_index,
                         "DepositEscrowed not ingested; deferring tx"
@@ -427,8 +470,8 @@ impl PendingTx {
                 // fee leaf has no event of its own and would otherwise leave the
                 // transaction's leaf count short of `inserted`.
                 let leaves = payload.clone();
-                self.push_leaf(cx, leaves.principal, LeafOrder::LeafLeads);
-                self.push_leaf(cx, leaves.fee, LeafOrder::LeafLeads);
+                self.push_leaf(cx, leaves.principal, LeafOrder::LeafLeads)?;
+                self.push_leaf(cx, leaves.fee, LeafOrder::LeafLeads)?;
             }
 
             _ => {}
@@ -439,7 +482,12 @@ impl PendingTx {
     /// Claim a leaf ordinal and store the note, or account for the leaf as a
     /// hole. Either way the ordinal is consumed, so the transaction's leaf count
     /// stays reconcilable against `inserted`.
-    fn push_leaf(&mut self, cx: &RowCtx<'_>, payload: LeafPayload, order: LeafOrder) {
+    fn push_leaf(
+        &mut self,
+        cx: &RowCtx<'_>,
+        payload: LeafPayload,
+        order: LeafOrder,
+    ) -> Result<(), FmdIndexerError> {
         let Some(ordinal) = self.claim_leaf() else {
             warn!(
                 chain_id = cx.chain_id,
@@ -447,8 +495,17 @@ impl PendingTx {
                 log_index = cx.row.log_index,
                 "leaf event beyond the root's inserted count; ignoring"
             );
-            return;
+            return Ok(());
         };
+
+        let leaf_index = self.leaf_index(ordinal);
+        // Recorded before the usability check below: the contract inserted this
+        // leaf whatever the indexer can do with it, so the tree must advance past
+        // it or every later leaf lands one position early.
+        self.leaves.push(TreeLeaf {
+            leaf_index,
+            hash: payload.tree_hash()?,
+        });
 
         let unusable = match order {
             LeafOrder::RootLeads if self.root.is_none() => Some("no RootAdvanced yet"),
@@ -458,12 +515,12 @@ impl PendingTx {
         if let Some(reason) = unusable {
             self.skipped += 1;
             cx.warn_leaf_dropped(reason);
-            return;
+            return Ok(());
         }
 
-        let leaf_index = self.leaf_index(ordinal);
         self.notes
             .push(payload.into_note(cx.chain_id, cx.row, leaf_index));
+        Ok(())
     }
 }
 
@@ -577,7 +634,7 @@ mod tests {
             // twice.
             fee: leaf(deposit_id as u8 ^ 0xff, ciphertext),
         };
-        EscrowedMap::from([(deposit_id.to_string(), leaves)])
+        EscrowedMap::from([(U256::from(deposit_id), leaves)])
     }
 
     fn leaf_indices(plan: &CommitPlan) -> Vec<i64> {

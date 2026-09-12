@@ -2,7 +2,7 @@
 
 Read-only HTTP API for FMD clients: register a detection key, pull matches and
 note payloads, and sync the commitment and nullifier sets locally. Axum +
-Postgres, over the tables `fmd-indexer` writes. Depends on `fmd-crypto`.
+Postgres, over the tables `fmd-indexer` writes. Depends on `common-crypto`.
 
 It writes exactly one table — `subscriptions` — and reads everything else.
 
@@ -18,6 +18,7 @@ DATABASE_URL=postgres://… cargo run -p fmd-webserver
 |-----|----------|---------|-------|
 | `DATABASE_URL` | yes | — | Postgres URL |
 | `BIND_ADDR` | no | `0.0.0.0:3001` | Listen address |
+| `METRICS_ADDR` | no | `127.0.0.1:3011` | Prometheus scrape listener |
 | `INDEXER_LAG_WARN_BLOCKS` | no | `50` | Parsed, but **nothing reads it** — see below |
 
 ⚠️ `INDEXER_LAG_WARN_BLOCKS` is dead config. It is loaded into
@@ -29,16 +30,27 @@ round-trip and no lag check. Setting it does nothing.
 | Route | Auth | Cache-Control |
 |-------|------|---------------|
 | `GET /health` | — | `no-store` |
-| `GET /v1/notes?chainId=&after=&limit=` | — | `public, max-age=3` |
+| `GET /v1/head?chainId=` | — | `no-store` |
+| `GET /v1/notes?chainId=&after=&limit=` | — | `public, max-age=1` |
 | `GET /v1/matches?chainId=&after=&limit=` | Bearer | `no-store` |
 | `POST /v1/subscriptions` | — | `no-store` |
 | `DELETE /v1/subscriptions` | Bearer | `no-store` |
-| `GET /v1/chains/:chain_id/commitments/chunks/:chunk_id` | — | (default) |
-| `GET /v1/chains/:chain_id/nullifiers/chunks/:chunk_id` | — | (default) |
+| `GET /v1/chains/{chain_id}/commitments/chunks/{chunk_id}` | — | per response † |
+| `GET /v1/chains/{chain_id}/nullifiers/chunks/{chunk_id}` | — | per response † |
 | `GET /v1/tree-state?chainId=` | — | `public, max-age=5` |
 
+† The chunk feeds set `Cache-Control` on the response rather than the route,
+because the policy depends on the chunk: a complete one is
+`public, max-age=31536000, immutable` and the growing tail chunk is
+`public, max-age=5`. See `domain::responses::RenderedChunk`.
+
+`/v1/notes` and `/v1/tree-state` also carry an `ETag`: a client that re-polls
+with `If-None-Match` gets a `304` instead of the body. The chunk feeds do not —
+a complete chunk is served `immutable` and never re-fetched — and neither do the
+`no-store` routes, which a client may not store in the first place.
+
 Query and body fields are camelCase on the wire. `limit` defaults to 100 and is
-clamped to `1..=1000`. `chainId` is required on `/v1/matches` and
+clamped to `1..=1000`. `chainId` is required on `/v1/head`, `/v1/matches` and
 `/v1/tree-state`, optional on `/v1/notes`.
 
 Cache-control is per route rather than global. Token-keyed responses are

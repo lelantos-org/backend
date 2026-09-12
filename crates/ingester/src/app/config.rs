@@ -1,3 +1,8 @@
+//! The TOML schema, its env overlay and the validation both run through.
+//!
+//! Validated before any worker spawns, so a typo fails the process at startup
+//! rather than after a standby has waited out a chain's advisory lock.
+
 use crate::adapters::rpc::RpcConfig;
 use crate::domain::error::IngesterError;
 use crate::domain::models::parse_address;
@@ -42,8 +47,23 @@ pub struct ChainConfig {
     pub block_poll_ms: u64,
     #[serde(default = "default_backfill_threshold")]
     pub backfill_threshold: u64,
+    /// How many chunks are fetched and decoded at once.
+    ///
+    /// Not the RPC budget — `log_concurrency` and `meta_concurrency` are, and
+    /// both are shared across chunks. This is the pipeline's depth, and with
+    /// `chunk_blocks` it is the memory bound: peak resident rows are the product
+    /// of the two.
     #[serde(default = "default_backfill_concurrency")]
     pub backfill_concurrency: usize,
+    /// Cap on simultaneous `eth_getLogs` calls against this chain's provider.
+    ///
+    /// Shared by every backfill chunk and the live tail, so it is the whole
+    /// chain's budget rather than one call's. Once the provider's range cap is
+    /// known a single chunk splits into `chunk_blocks / cap` windows that need no
+    /// feedback from each other, and this is what decides how many of them go out
+    /// together.
+    #[serde(default = "default_log_concurrency")]
+    pub log_concurrency: usize,
     /// Block range per backfill chunk, and the cap on one live tick's span.
     ///
     /// Also the memory bound: the backfill decodes `backfill_concurrency` chunks
@@ -79,13 +99,16 @@ fn default_backfill_threshold() -> u64 {
     100
 }
 fn default_backfill_concurrency() -> usize {
-    8
+    16
+}
+fn default_log_concurrency() -> usize {
+    16
 }
 fn default_chunk_blocks() -> u64 {
     10_000
 }
 fn default_meta_concurrency() -> usize {
-    16
+    32
 }
 fn default_rpc_timeout_ms() -> u64 {
     30_000
@@ -128,14 +151,12 @@ impl IngesterConfig {
     /// value, so the process refuses to start instead of ingesting from the wrong
     /// height.
     pub fn apply_env_overlay(&mut self) -> Result<(), IngesterError> {
-        // Chain-independent, so it does not go through `config_env::lookup`.
-        if let Ok(v) = std::env::var("METRICS_ADDR") {
+        // Chain-independent, so these do not go through `config_env::lookup`.
+        if let Some(v) = shared::config_env::string("METRICS_ADDR") {
             self.metrics_addr = v;
         }
-        if let Ok(v) = std::env::var("INGESTER_DB_POOL_SIZE") {
-            self.db_pool_size = Some(v.parse::<u32>().map_err(|e| {
-                IngesterError::Config(format!("INGESTER_DB_POOL_SIZE={:?}: {}", v, e))
-            })?);
+        if let Some(v) = env_parse("INGESTER_DB_POOL_SIZE")? {
+            self.db_pool_size = Some(v);
         }
         for c in &mut self.chains {
             if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "POOL_ADDRESS") {
@@ -144,13 +165,8 @@ impl IngesterConfig {
             if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "RPC_URL") {
                 c.rpc_url = v;
             }
-            if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "START_BLOCK") {
-                c.start_block = v.parse::<i64>().map_err(|e| {
-                    IngesterError::Config(format!(
-                        "INGESTER_CHAIN_{}_START_BLOCK={:?}: {}",
-                        c.chain_id, v, e
-                    ))
-                })?;
+            if let Some(v) = lookup_parse(c.chain_id, "START_BLOCK")? {
+                c.start_block = v;
             }
         }
         Ok(())
@@ -207,9 +223,10 @@ impl ChainConfig {
     fn validate(&self) -> Result<(), String> {
         // Each of these is a divisor, a loop bound or a concurrency limit, and a
         // zero would panic or stall.
-        let positive: [(u64, &str); 5] = [
+        let positive: [(u64, &str); 6] = [
             (self.chunk_blocks, "chunk_blocks"),
             (self.backfill_concurrency as u64, "backfill_concurrency"),
+            (self.log_concurrency as u64, "log_concurrency"),
             (self.meta_concurrency as u64, "meta_concurrency"),
             (self.block_poll_ms, "block_poll_ms"),
             (self.rpc_timeout_ms, "rpc_timeout_ms"),
@@ -246,6 +263,20 @@ impl ChainConfig {
     }
 }
 
+/// [`shared::config_env::parse`] in this crate's error type.
+fn env_parse<T: std::str::FromStr>(key: &str) -> Result<Option<T>, IngesterError> {
+    shared::config_env::parse(key).map_err(|e| IngesterError::Config(e.to_string()))
+}
+
+/// [`shared::config_env::lookup_parse`] for this binary's `INGESTER` prefix.
+fn lookup_parse<T: std::str::FromStr>(
+    chain_id: i64,
+    field: &str,
+) -> Result<Option<T>, IngesterError> {
+    shared::config_env::lookup_parse("INGESTER", chain_id, field)
+        .map_err(|e| IngesterError::Config(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +291,7 @@ mod tests {
             block_poll_ms: default_block_poll_ms(),
             backfill_threshold: default_backfill_threshold(),
             backfill_concurrency: default_backfill_concurrency(),
+            log_concurrency: default_log_concurrency(),
             chunk_blocks: default_chunk_blocks(),
             meta_concurrency: default_meta_concurrency(),
             rpc_timeout_ms: default_rpc_timeout_ms(),
@@ -292,9 +324,15 @@ mod tests {
 
     #[test]
     fn rejects_zero_concurrency() {
-        let mut c = chain(1);
-        c.backfill_concurrency = 0;
-        assert!(cfg(vec![c]).validate().is_err());
+        for set in [
+            |c: &mut ChainConfig| c.backfill_concurrency = 0,
+            |c: &mut ChainConfig| c.log_concurrency = 0,
+            |c: &mut ChainConfig| c.meta_concurrency = 0,
+        ] {
+            let mut c = chain(1);
+            set(&mut c);
+            assert!(cfg(vec![c]).validate().is_err());
+        }
     }
 
     /// The loser of the advisory lock waits indefinitely with no diagnostic, so a

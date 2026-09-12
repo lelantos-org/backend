@@ -1,0 +1,39 @@
+# Protocol indexer — PROD template.
+# Selected with STACK_ENV=prod. Point database_url at the real cluster.
+#
+# Owns the state the wallet boots from and the relayer transacts against.
+# Event indexing consumes rows the ingester has already written and needs no
+# RPC. The [[chains]] block drives the two paths that do:
+#
+#   1. ERC20 `decimals()` for registered assets. `AssetRegistered` does not
+#      carry decimals, and `scale` is a circuit capacity parameter rather than a
+#      decimals normalizer, so without it no token amount can be rendered.
+#   2. The yield-state poller, which reads `MASP.yieldState` and writes
+#      `asset_yield`'s polled columns. Its chain list comes from the RPC readers
+#      built here, so a chain with no block is never polled.
+#
+# A chain omitted here still indexes events. What it loses is `decimals` and,
+# more importantly, ALL yield state: `index_ray` stays NULL, `/v1/assets`
+# publishes no yield, no APY is measured, and the wallet's "of which earned"
+# column has nothing to read. Configure every chain that carries a yield asset.
+#
+# Fields below are the complete set (see ProtocolIndexerConfig).
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+
+# Poll interval for new raw events.
+tick_ms = 1000
+
+# Max raw events consumed per tick.
+batch = 500
+
+# Keep [[chains]] last: in TOML every bare key after a table header belongs to
+# that table, so a scalar moved below this line would silently become part of
+# the chain entry instead of the top-level config.
+#
+# One block per chain. `apply_env_overlay` only rewrites chains that ALREADY
+# EXIST here, so a chain with no block gets neither decimals nor yield state
+# regardless of what PROTOCOL_INDEXER_CHAIN_<id>_RPC_URL is set to.
+# [[chains]]
+# chain_id = 1
+# rpc_url = "https://eth.example"   # or PROTOCOL_INDEXER_CHAIN_1_RPC_URL

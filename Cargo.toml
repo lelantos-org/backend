@@ -3,16 +3,21 @@ resolver = "2"
 members = [
     "crates/shared",
     "crates/chain-types",
-    "crates/fmd-crypto",
+    "crates/common-crypto",
+    "crates/groth16",
     "crates/database",
+    "crates/asset-registry",
     "crates/prices",
     "crates/ingester",
     "crates/fmd-indexer",
     "crates/explorer-indexer",
+    "crates/protocol-indexer",
     "crates/fmd-webserver",
     "crates/explorer-webserver",
+    "crates/registry-webserver",
     "crates/relayer",
     "crates/metaquoter",
+    "crates/rpc-proxy",
     "crates/risk-webserver",
     "crates/integration-tests",
     "crates/test-support",
@@ -94,15 +99,15 @@ dotenvy = "0.15"
 
 # crypto (FMD crates only)
 #
-# Pinned to arkworks 0.4 by `light-poseidon`, not by preference. `fmd-crypto`
+# Pinned to arkworks 0.4 by `light-poseidon`, not by preference. `common-crypto`
 # calls `get_poseidon_parameters::<Fq>()` with its own field type, and that
 # function is bounded on `light-poseidon`'s ark-ff, so the two versions cannot
 # diverge. light-poseidon 0.2 requires ark 0.4; its latest release (0.4) requires
 # ark 0.5. Neither supports 0.6.
 #
-# The relayer is therefore on ark 0.6 and declares those deps locally rather than
-# here — `ark-groth16 0.6` is what its Groth16 prover needs. The two sets never
-# exchange types, so the split is inert. Unifying would mean dropping
+# The `groth16` crate is therefore on ark 0.6 and declares those deps in its own
+# manifest rather than here — `ark-groth16 0.6` is what it needs. The two sets
+# never exchange types, so the split is inert. Unifying would mean dropping
 # light-poseidon and vendoring circomlib's `bn254_x5` tables (~43k generated
 # lines of round constants), which is not worth it to tidy a manifest.
 light-poseidon = "0.2"
@@ -143,14 +148,6 @@ vergen-gix = { version = "9", features = ["build", "cargo", "rustc"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
-# The FMD filter is field arithmetic throughout, with arkworks generics inlined
-# across crate boundaries, so cross-crate optimisation pays off. Measured on the
-# `clue_breakdown` bench: batched scalar multiplication -10%, Poseidon -3%, the
-# whole `test_clue_batch` path -3%.
-#
-# `thin` rather than `fat`: it measured the same here and builds far faster.
-# `target-cpu=native` gained about 0.5% and would tie the release binary to the
-# machine that built it, so it is not used.
 [profile.release]
 lto = "thin"
 codegen-units = 1

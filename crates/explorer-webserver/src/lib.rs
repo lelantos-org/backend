@@ -1,8 +1,13 @@
 //! Explorer webserver.
 //!
-//! Layered binary; see `backend/ARCHITECTURE.md`. Read-only HTTP API for assets,
-//! asset flows and tree advances, using the error type from `shared::http`. Must
-//! not depend on `fmd-crypto`, which is the privacy gate.
+//! Layered binary; see `backend/ARCHITECTURE.md`. Read-only HTTP API over the
+//! tables `explorer-indexer` writes: the asset catalog, flows, escrowed
+//! balances, tree advances, classified transactions, withdrawal anonymity sets,
+//! pool occupancy and yield state. Errors come from `shared::http`.
+//!
+//! Must not depend on `common-crypto`, which is the privacy gate. It is a
+//! convention, not a CI check, so a new dependency edge has to be caught in
+//! review.
 
 pub mod adapters;
 pub mod app;

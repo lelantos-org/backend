@@ -1,4 +1,4 @@
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use database::DbPool;
 pub use database::models::TreeAdvanceRow;
 use database::schema::tree_advances;
@@ -29,7 +29,7 @@ pub async fn list(
     .select(TreeAdvanceRow::as_select())
     .load(&mut conn)
     .await
-    .map_err(|e| AppError::Db(e.to_string()))
+    .map_err(super::db_err)
 }
 
 #[derive(Debug, Clone, QueryableByName)]
@@ -61,7 +61,7 @@ pub async fn count_buckets(
     .bind::<Nullable<BigInt>, _>(since_ts)
     .load(&mut conn)
     .await
-    .map_err(|e| AppError::Db(e.to_string()))
+    .map_err(super::db_err)
 }
 
 #[derive(Debug, Clone, QueryableByName)]
@@ -87,5 +87,5 @@ pub async fn chain_flows_24h(pool: &DbPool, hour_start: i64) -> AppResult<Vec<Ch
     .bind::<BigInt, _>(hour_start)
     .load(&mut conn)
     .await
-    .map_err(|e| AppError::Db(e.to_string()))
+    .map_err(super::db_err)
 }

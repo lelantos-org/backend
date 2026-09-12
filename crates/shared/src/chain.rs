@@ -19,3 +19,13 @@ impl std::fmt::Display for ChainId {
         self.0.fmt(f)
     }
 }
+
+/// Chain ids are read as plain `i64` from config, the database and RPC. The
+/// conversion is here so callers keying by chain — `prices::TokenKey` first —
+/// can take an `impl Into<ChainId>` instead of making each of them spell the
+/// newtype out.
+impl From<i64> for ChainId {
+    fn from(id: i64) -> Self {
+        Self(id)
+    }
+}

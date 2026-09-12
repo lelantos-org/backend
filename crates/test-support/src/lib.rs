@@ -4,6 +4,8 @@
 //! serialises the tests sharing it. Tests run against a real schema rather than
 //! a mock, so a migration that breaks a query fails here.
 
+pub mod fixtures;
+
 use database::{DbPool, PoolCfg};
 use diesel_async::RunQueryDsl;
 use std::sync::{Arc, OnceLock};

@@ -1,4 +1,4 @@
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use bigdecimal::BigDecimal;
 use database::DbPool;
 use database::schema::{matches, notes};
@@ -50,5 +50,5 @@ pub async fn list_for_subscription(
         ))
         .load::<MatchedNote>(&mut conn)
         .await
-        .map_err(|e| AppError::Db(e.to_string()))
+        .map_err(super::db_err)
 }

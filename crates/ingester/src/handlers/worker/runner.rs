@@ -4,7 +4,7 @@ use crate::adapters::DynRpc;
 use crate::app::config::{ChainConfig, redact_url};
 use crate::app::state::WorkerDeps;
 use crate::domain::error::IngesterError;
-use crate::domain::models::parse_address;
+use crate::domain::models::{parse_address, scanned_watermark};
 use crate::handlers::worker::live::run as run_live;
 use crate::repositories::ChainStateRepo;
 use crate::services::backfill::BackfillService;
@@ -162,15 +162,15 @@ impl Chain {
             database_url: _,
         } = deps;
         let pool_addr = parse_address(&cfg.pool_address)?;
-        let live = Arc::new(LiveServiceImpl {
-            cfg: cfg.clone(),
+        let live = Arc::new(LiveServiceImpl::new(
+            cfg.clone(),
             pool_addr,
-            rpc: rpc.clone(),
-            chain_state: chain_state.clone(),
+            rpc.clone(),
+            chain_state.clone(),
             ingest,
             reorg,
             log_window,
-        }) as Arc<dyn LiveService>;
+        )) as Arc<dyn LiveService>;
         Ok(Self {
             cfg,
             pool_addr,
@@ -203,9 +203,7 @@ impl Chain {
         // The cursor comes from Postgres and the tip from the RPC provider, so the
         // two round trips overlap rather than sum.
         let (cursor, tip) = tokio::try_join!(self.chain_state.fetch(chain_id), self.rpc.tip())?;
-        let last_scanned = cursor
-            .map(|c| c.last_scanned_block)
-            .unwrap_or(self.cfg.start_block - 1);
+        let last_scanned = scanned_watermark(cursor.as_ref(), self.cfg.start_block);
         let tip = tip as i64;
         // Computed in i64 throughout: `last_scanned` is -1 before the first
         // commit, and casting that to u64 would make the lag `u64::MAX` and skip

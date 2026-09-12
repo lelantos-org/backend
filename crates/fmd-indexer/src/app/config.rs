@@ -33,20 +33,19 @@ impl FmdIndexerConfig {
     pub fn consume_batch(&self) -> usize {
         self.consume_batch.unwrap_or(self.filter_batch)
     }
+
     pub fn consume_tick_ms(&self) -> u64 {
         self.consume_tick_ms.unwrap_or(self.filter_tick_ms)
     }
-}
 
-impl FmdIndexerConfig {
     pub fn load() -> Result<Self> {
-        let path = std::env::var(ENV_PATH).unwrap_or_else(|_| DEFAULT_PATH.to_string());
+        let path = shared::config_env::string(ENV_PATH).unwrap_or_else(|| DEFAULT_PATH.to_string());
         let mut cfg = if Path::new(&path).exists() {
             toml::from_str(&std::fs::read_to_string(&path)?)?
         } else {
             Self {
-                database_url: std::env::var(ENV_DATABASE_URL)
-                    .map_err(|_| FmdIndexerError::Config("DATABASE_URL not set".into()))?,
+                database_url: shared::config_env::string(ENV_DATABASE_URL)
+                    .ok_or_else(|| FmdIndexerError::Config("DATABASE_URL not set".into()))?,
                 filter_workers: default_filter_workers(),
                 filter_batch: default_filter_batch(),
                 filter_tick_ms: default_filter_tick_ms(),
@@ -65,10 +64,10 @@ impl FmdIndexerConfig {
     /// `CONSUME_*` variables the deployment sets take effect on either load
     /// path.
     fn apply_env_overlay(&mut self) -> Result<()> {
-        if let Ok(v) = std::env::var(ENV_DATABASE_URL) {
+        if let Some(v) = shared::config_env::string(ENV_DATABASE_URL) {
             self.database_url = v;
         }
-        if let Ok(v) = std::env::var("METRICS_ADDR") {
+        if let Some(v) = shared::config_env::string("METRICS_ADDR") {
             self.metrics_addr = v;
         }
         if let Some(v) = parse_env("FILTER_WORKERS")? {
@@ -90,17 +89,9 @@ impl FmdIndexerConfig {
     }
 }
 
-/// Read and parse `key`, or `None` when it is unset.
-///
-/// A malformed value is an error rather than a fallback to the default, so a
-/// setting cannot read as set while behaving as unset.
+/// [`shared::config_env::parse`] in this crate's error type.
 fn parse_env<T: std::str::FromStr>(key: &str) -> Result<Option<T>> {
-    let Ok(raw) = std::env::var(key) else {
-        return Ok(None);
-    };
-    raw.parse()
-        .map(Some)
-        .map_err(|_| FmdIndexerError::Config(format!("{key}={raw:?} is not valid")))
+    shared::config_env::parse(key).map_err(|e| FmdIndexerError::Config(e.to_string()))
 }
 
 fn default_metrics_addr() -> String {

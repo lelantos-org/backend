@@ -6,7 +6,7 @@
 //! is reported per chain because each chain has its own tree — notes on one
 //! chain are no cover on another, so the totals must never be summed.
 
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use database::DbPool;
 use diesel::prelude::*;
 use diesel::sql_query;
@@ -63,5 +63,5 @@ pub async fn per_chain(pool: &DbPool, chain_id: Option<i64>) -> AppResult<Vec<Po
     .bind::<Nullable<BigInt>, _>(chain_id)
     .load(&mut conn)
     .await
-    .map_err(|e| AppError::Db(e.to_string()))
+    .map_err(super::db_err)
 }

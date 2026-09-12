@@ -1,50 +1,48 @@
-//! Fiat-Shamir compression for the `transact_3x3` circuit.
+//! Fiat-Shamir compression for the `transact_4x6` circuit.
 //!
 //! Mirrors `contracts/src/libs/PubInputs.sol :: compress(Transact, aux)` and
 //! `SnarkCompression.evaluatePolyAtRaw`, so the relayer derives the same `(y, z)`
 //! public-signal pair the on-chain verifier does. That lets it check a wallet's
 //! proof locally rather than after paying for a `tree_update_batch` Groth16.
 //!
-//! Coefficient layout (42 entries), pinned by `circuits/src/3x3.circom`:
-//!   [ 0]      merkleRoot
-//!   [ 1.. 3]  nullifier[0..2]
-//!   [ 4.. 6]  outCm[0..2]
-//!   [ 7]      publicAssetId
-//!   [ 8]      publicIn
-//!   [ 9]      publicOut
-//!   [10..15]  inCv flattened
-//!   [16..21]  outCv flattened
-//!   [22]      recipient
-//!   [23]      chainId
-//!   [24]      payer
-//!   [25]      relayer
-//!   [26..31]  outCvDep flattened
-//!   [32..40]  (clueRx, clueRy, clueBits) per output
-//!   [41]      auxDigest
+//! Two spans over one preimage (circuits >= v0.14.0). All 69 words are hashed
+//! into `z`; only the leading 46, the ones `4x6.circom` constrains, are
+//! evaluated into `y`. The rest bind to the proof through `z` alone:
+//!   [ 0]      merkleRoot                              coefficient
+//!   [ 1.. 4]  nullifier[0..3]                         coefficient
+//!   [ 5..10]  outCm[0..5]                             coefficient
+//!   [11]      publicAssetId                           coefficient
+//!   [12]      publicIn                                coefficient
+//!   [13]      publicOut                               coefficient
+//!   [14..21]  inCv flattened                          coefficient
+//!   [22..33]  outCv flattened                         coefficient
+//!   [34..45]  outCvDep flattened                      coefficient
+//!   [46]      recipient                               challenge only
+//!   [47]      chainId                                 challenge only
+//!   [48]      payer                                   challenge only
+//!   [49]      relayer                                 challenge only
+//!   [50..67]  (clueRx, clueRy, clueBits) per output   challenge only
+//!   [68]      auxDigest                               challenge only
 
 use crate::adapters::abi::IMasp;
-use crate::adapters::parse::BN254_R;
 use crate::domain::dto::{TRANSACT_IN, TRANSACT_OUT};
+use crate::domain::field::BN254_R;
 use alloy::primitives::{U256, keccak256};
 use alloy::sol_types::SolValue;
 
-/// ABI calldata words of the `Transact` struct itself: the coefficients copied
-/// verbatim before any are derived from `aux`.
-///
-/// Derived rather than written out: `merkleRoot`, one word per nullifier and per
-/// `outCm`, the three public-value words, `inCv` as a coordinate pair per input,
-/// the four address and chain words, and `outCv` plus `outCvDep` as two
-/// coordinate pairs per output. 40 at 4x4 and 50 at 4x6; a literal here would
-/// stop matching the circuit when the arity moves.
-const STRUCT_WORDS: usize =
-    1 + TRANSACT_IN + TRANSACT_OUT + 3 + 2 * TRANSACT_IN + 4 + 4 * TRANSACT_OUT;
-/// Word index of the first `(clueRx, clueRy, clueBits)` triple: they start
-/// where the struct's own words end.
-const CLUE_BASE: usize = STRUCT_WORDS;
-/// The struct words, one clue triple per output, then the aux digest: 53 at 4x4
-/// and 69 at 4x6. `contracts/test/fixtures/transact_4x6_vector.json` publishes
-/// `coeffCount` for the deployed shape, which the tests check.
-pub const TRANSACT_COEFFS: usize = STRUCT_WORDS + 3 * TRANSACT_OUT + 1;
+/// The pinned words the circuit evaluates into `y`: `merkleRoot`, one word per
+/// nullifier and per `outCm`, the three public-value words, `inCv` as a
+/// coordinate pair per input, and `outCv` plus `outCvDep` as two coordinate
+/// pairs per output. 46 at 4x6. `contracts/test/fixtures/transact_4x6_vector.json`
+/// publishes `coeffCount` for the deployed shape, which the tests check.
+pub const TRANSACT_COEFFS: usize =
+    1 + TRANSACT_IN + TRANSACT_OUT + 3 + 2 * TRANSACT_IN + 4 * TRANSACT_OUT;
+/// ABI calldata words of the `Transact` struct itself: the coefficients, then
+/// the four address and chain words. The clue triples start here.
+const STRUCT_WORDS: usize = TRANSACT_COEFFS + 4;
+/// Every word hashed into `z`: the struct words, one clue triple per output,
+/// then the aux digest. 69 at 4x6, published as `challengeWords`.
+pub const TRANSACT_CHALLENGE_WORDS: usize = STRUCT_WORDS + 3 * TRANSACT_OUT + 1;
 
 /// The `(y, z)` pair the deployed verifier is handed as its two public
 /// signals, in that order: `y` is the circuit's output, `z` the challenge.
@@ -54,7 +52,11 @@ pub struct TransactPublicSignals {
     pub z: U256,
 }
 
-/// Build the coefficient vector ([`TRANSACT_COEFFS`] of them), then compress it.
+/// Build the challenge preimage ([`TRANSACT_CHALLENGE_WORDS`] of them), hash all
+/// of it into `z`, and evaluate its leading [`TRANSACT_COEFFS`] into `y`.
+///
+/// Evaluating the whole preimage, as circuits before v0.14.0 did, yields a `y`
+/// the deployed verifier never sees, so every honest proof fails the local check.
 ///
 /// Takes the already-built ABI structs rather than the wire DTOs, so one place
 /// decides what a field means: the same builders the calldata uses.
@@ -62,19 +64,19 @@ pub fn compress(
     pi: &IMasp::Transact,
     aux: &[IMasp::OutputAux; TRANSACT_OUT],
 ) -> TransactPublicSignals {
-    let c = coefficients(pi, aux);
+    let c = challenge(pi, aux);
     let z = U256::from_be_bytes(keccak256(c.abi_encode()).0) % *BN254_R;
     TransactPublicSignals {
-        y: eval_poly(&c, z),
+        y: eval_poly(&c[..TRANSACT_COEFFS], z),
         z,
     }
 }
 
-/// The coefficients, in the order `PubInputs.compress(Transact)` lays them out.
-/// Separate from [`compress`] so the layout can be pinned against the published
-/// circuit vectors without a proof.
-pub fn coefficients(pi: &IMasp::Transact, aux: &[IMasp::OutputAux; TRANSACT_OUT]) -> Vec<U256> {
-    let mut c: Vec<U256> = Vec::with_capacity(TRANSACT_COEFFS);
+/// The challenge preimage, in the order `PubInputs.compress(Transact)` lays it
+/// out. Separate from [`compress`] so the layout can be pinned against the
+/// published circuit vectors without a proof.
+pub fn challenge(pi: &IMasp::Transact, aux: &[IMasp::OutputAux; TRANSACT_OUT]) -> Vec<U256> {
+    let mut c: Vec<U256> = Vec::with_capacity(TRANSACT_CHALLENGE_WORDS);
     c.push(U256::from_be_bytes(pi.merkleRoot.0));
     for nf in &pi.nullifier {
         c.push(U256::from_be_bytes(nf.0));
@@ -93,15 +95,17 @@ pub fn coefficients(pi: &IMasp::Transact, aux: &[IMasp::OutputAux; TRANSACT_OUT]
         c.push(pt[0]);
         c.push(pt[1]);
     }
-    c.push(U256::from_be_slice(pi.recipient.as_slice()));
-    c.push(pi.chainId);
-    c.push(U256::from_be_slice(pi.payer.as_slice()));
-    c.push(U256::from_be_slice(pi.relayer.as_slice()));
     for pt in &pi.outCvDep {
         c.push(pt[0]);
         c.push(pt[1]);
     }
-    debug_assert_eq!(c.len(), CLUE_BASE);
+    debug_assert_eq!(c.len(), TRANSACT_COEFFS);
+
+    c.push(U256::from_be_slice(pi.recipient.as_slice()));
+    c.push(pi.chainId);
+    c.push(U256::from_be_slice(pi.payer.as_slice()));
+    c.push(U256::from_be_slice(pi.relayer.as_slice()));
+    debug_assert_eq!(c.len(), STRUCT_WORDS);
 
     for o in aux.iter() {
         c.push(o.clueRx);
@@ -109,7 +113,7 @@ pub fn coefficients(pi: &IMasp::Transact, aux: &[IMasp::OutputAux; TRANSACT_OUT]
         c.push(U256::from(clue_bits(&o.ciphertext)));
     }
     c.push(aux_digest(aux));
-    debug_assert_eq!(c.len(), TRANSACT_COEFFS);
+    debug_assert_eq!(c.len(), TRANSACT_CHALLENGE_WORDS);
     c
 }
 
@@ -152,11 +156,11 @@ const _: () = assert!(TRANSACT_IN == 4 && TRANSACT_OUT == 6);
 mod tests {
     use super::*;
 
-    /// Published `transact_4x6` vectors, carrying the coefficient vector the
-    /// reference implementation built plus the `z` and `y` derived from it, which
-    /// is what this module must reproduce. A layout that drifts from the
-    /// contract's produces proofs the chain rejects and a local check that rejects
-    /// proofs the chain would accept.
+    /// Published `transact_4x6` vectors, carrying the challenge preimage and
+    /// coefficient vector the reference implementation built plus the `z` and `y`
+    /// derived from them, which is what this module must reproduce. A layout that
+    /// drifts from the contract's produces proofs the chain rejects and a local
+    /// check that rejects proofs the chain would accept.
     ///
     /// A missing file is a hard failure rather than a skip, so a renamed fixture
     /// cannot stop these tests from running unnoticed.
@@ -184,8 +188,14 @@ mod tests {
             .collect()
     }
 
+    /// A published array of decimal field elements.
+    fn words(v: &serde_json::Value) -> Vec<U256> {
+        strs(v).iter().map(|s| u256(s)).collect()
+    }
+
     /// `z` and `y` must match the published derivation for every vector, pinning
-    /// the ABI preimage, the modular reduction and the Horner order at once.
+    /// the ABI preimage, the modular reduction, the Horner order and the split
+    /// between the hashed and the evaluated spans at once.
     #[test]
     fn z_and_y_match_the_published_vectors() {
         let v = vectors();
@@ -193,13 +203,13 @@ mod tests {
         assert!(!cases.is_empty());
         for case in cases {
             let name = case["name"].as_str().unwrap_or("?");
-            let coeffs: Vec<U256> = strs(&case["compression"]["coeffs"])
-                .iter()
-                .map(|s| u256(s))
-                .collect();
+            let challenge = words(&case["compression"]["challenge"]);
+            let coeffs = words(&case["compression"]["coeffs"]);
+            assert_eq!(challenge.len(), TRANSACT_CHALLENGE_WORDS, "{name}");
             assert_eq!(coeffs.len(), TRANSACT_COEFFS, "{name}");
+            assert_eq!(coeffs, challenge[..TRANSACT_COEFFS], "{name} coeffs prefix");
 
-            let z = U256::from_be_bytes(keccak256(coeffs.abi_encode()).0) % *BN254_R;
+            let z = U256::from_be_bytes(keccak256(challenge.abi_encode()).0) % *BN254_R;
             assert_eq!(
                 z,
                 u256(case["compression"]["z"].as_str().unwrap()),
@@ -223,25 +233,23 @@ mod tests {
     /// slot is the aux digest, derived from ciphertext bytes the vector does not
     /// carry, so it is compared separately by construction in `aux_digest`.
     #[test]
-    fn the_coefficient_layout_matches_the_published_vectors() {
+    fn the_challenge_layout_matches_the_published_vectors() {
         let v = vectors();
         for case in v["vectors"].as_array().expect("vectors") {
             let name = case["name"].as_str().unwrap_or("?");
             let w = &case["witness"];
-            let expected: Vec<U256> = strs(&case["compression"]["coeffs"])
-                .iter()
-                .map(|s| u256(s))
-                .collect();
+            let expected = words(&case["compression"]["challenge"]);
 
             let pi = transact_from_witness(w);
             let aux = aux_from_witness(w);
-            let got = coefficients(&pi, &aux);
+            let got = challenge(&pi, &aux);
+            assert_eq!(got.len(), expected.len(), "{name} length");
 
             for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
-                if i == TRANSACT_COEFFS - 1 {
+                if i == TRANSACT_CHALLENGE_WORDS - 1 {
                     continue; // auxDigest — see the doc comment above.
                 }
-                assert_eq!(g, e, "{name} coefficient {i} ({})", slot_name(i));
+                assert_eq!(g, e, "{name} word {i} ({})", slot_name(i));
             }
         }
     }
@@ -251,19 +259,19 @@ mod tests {
     fn slot_name(i: usize) -> &'static str {
         match i {
             0 => "merkleRoot",
-            1..=3 => "nullifier",
-            4..=6 => "outCm",
-            7 => "publicAssetId",
-            8 => "publicIn",
-            9 => "publicOut",
-            10..=15 => "inCv",
-            16..=21 => "outCv",
-            22 => "recipient",
-            23 => "chainId",
-            24 => "payer",
-            25 => "relayer",
-            26..=31 => "outCvDep",
-            32..=40 => "clue",
+            1..=4 => "nullifier",
+            5..=10 => "outCm",
+            11 => "publicAssetId",
+            12 => "publicIn",
+            13 => "publicOut",
+            14..=21 => "inCv",
+            22..=33 => "outCv",
+            34..=45 => "outCvDep",
+            46 => "recipient",
+            47 => "chainId",
+            48 => "payer",
+            49 => "relayer",
+            50..=67 => "clue",
             _ => "auxDigest",
         }
     }
@@ -298,11 +306,11 @@ mod tests {
             publicOut: w["public_out"].as_str().unwrap().parse().unwrap(),
             inCv: points(&w["in_cv"]),
             outCv: points(&w["out_cv"]),
+            outCvDep: points(&w["out_cv_dep"]),
             recipient: addr(w["recipient_address"].as_str().unwrap()),
             chainId: u256(w["chain_id"].as_str().unwrap()),
             payer: addr(w["payer_address"].as_str().unwrap()),
             relayer: addr(w["relayer_address"].as_str().unwrap()),
-            outCvDep: points(&w["out_cv_dep"]),
         }
     }
 
@@ -326,15 +334,19 @@ mod tests {
     }
 
     /// Checked against the circuit's own declaration rather than a second
-    /// hand-written number: the fixture publishes `coeffCount` alongside the
-    /// vectors, so a drifted layout cannot be reconciled by editing a literal.
+    /// hand-written number: the fixture publishes `coeffCount` and
+    /// `challengeWords` alongside the vectors, so a drifted layout cannot be
+    /// reconciled by editing a literal.
     #[test]
-    fn the_coefficient_vector_is_the_width_the_circuit_declares() {
+    fn the_spans_are_the_widths_the_circuit_declares() {
         let v = vectors();
-        let declared = v["circuit"]["coeffCount"]
-            .as_u64()
-            .expect("fixture declares coeffCount") as usize;
-        assert_eq!(TRANSACT_COEFFS, declared);
+        let declared = |key: &str| {
+            v["circuit"][key]
+                .as_u64()
+                .unwrap_or_else(|| panic!("fixture declares {key}")) as usize
+        };
+        assert_eq!(TRANSACT_COEFFS, declared("coeffCount"));
+        assert_eq!(TRANSACT_CHALLENGE_WORDS, declared("challengeWords"));
     }
 
     /// The fixture also publishes the arity it was generated at. A vector file for

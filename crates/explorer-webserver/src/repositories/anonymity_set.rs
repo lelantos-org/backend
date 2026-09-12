@@ -10,7 +10,7 @@
 //! withdrawals of the same denomination are one set even when their whole-token
 //! values differ.
 
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use database::DbPool;
 use diesel::prelude::*;
 use diesel::sql_query;
@@ -103,5 +103,5 @@ pub async fn denominations(
     .bind::<BigInt, _>(limit)
     .load(&mut conn)
     .await
-    .map_err(|e| AppError::Db(e.to_string()))
+    .map_err(super::db_err)
 }

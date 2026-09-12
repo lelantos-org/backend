@@ -16,6 +16,7 @@ pub mod config;
 pub mod config_env;
 pub mod entities;
 pub mod metrics;
+pub mod refresh;
 pub mod shutdown;
 pub mod tick;
 pub mod tracing_init;
@@ -24,9 +25,11 @@ pub mod tracing_init;
 /// having to name `tracing` itself.
 pub use tracing;
 
-#[cfg(feature = "webserver")]
+#[cfg(feature = "cache")]
 pub mod cache;
 #[cfg(feature = "webserver")]
 pub mod http;
 #[cfg(feature = "webserver")]
 pub mod request_span;
+#[cfg(feature = "webserver")]
+pub mod router;

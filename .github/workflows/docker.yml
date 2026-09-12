@@ -48,16 +48,19 @@ jobs:
               - 'crates/ingester/**'
             fmd-indexer:
               - 'crates/fmd-indexer/**'
-              - 'crates/fmd-crypto/**'
+              - 'crates/common-crypto/**'
             explorer-indexer:
               - 'crates/explorer-indexer/**'
+            protocol-indexer:
+              - 'crates/protocol-indexer/**'
             fmd-webserver:
               - 'crates/fmd-webserver/**'
-              - 'crates/fmd-crypto/**'
+              - 'crates/common-crypto/**'
             explorer-webserver:
               - 'crates/explorer-webserver/**'
             relayer:
               - 'crates/relayer/**'
+              - 'crates/groth16/**'
             metaquoter:
               - 'crates/metaquoter/**'
             risk-webserver:
@@ -70,6 +73,7 @@ jobs:
           CHANGED_INGESTER: ${{ steps.filter.outputs.ingester }}
           CHANGED_FMD_INDEXER: ${{ steps.filter.outputs.fmd-indexer }}
           CHANGED_EXPLORER_INDEXER: ${{ steps.filter.outputs.explorer-indexer }}
+          CHANGED_PROTOCOL_INDEXER: ${{ steps.filter.outputs.protocol-indexer }}
           CHANGED_FMD_WEBSERVER: ${{ steps.filter.outputs.fmd-webserver }}
           CHANGED_EXPLORER_WEBSERVER: ${{ steps.filter.outputs.explorer-webserver }}
           CHANGED_RELAYER: ${{ steps.filter.outputs.relayer }}
@@ -80,6 +84,7 @@ jobs:
             {"image":"ingester",           "package":"ingester",           "needs_shared":true},
             {"image":"fmd-indexer",        "package":"fmd-indexer",        "needs_shared":true},
             {"image":"explorer-indexer",   "package":"explorer-indexer",   "needs_shared":true},
+            {"image":"protocol-indexer",   "package":"protocol-indexer",   "needs_shared":true},
             {"image":"fmd-webserver",      "package":"fmd-webserver",      "needs_shared":true},
             {"image":"explorer-webserver", "package":"explorer-webserver", "needs_shared":true},
             {"image":"relayer",            "package":"relayer",            "needs_shared":true},
@@ -95,6 +100,7 @@ jobs:
               --arg ingester "$CHANGED_INGESTER" \
               --arg fmd_indexer "$CHANGED_FMD_INDEXER" \
               --arg explorer_indexer "$CHANGED_EXPLORER_INDEXER" \
+              --arg protocol_indexer "$CHANGED_PROTOCOL_INDEXER" \
               --arg fmd_webserver "$CHANGED_FMD_WEBSERVER" \
               --arg explorer_webserver "$CHANGED_EXPLORER_WEBSERVER" \
               --arg relayer "$CHANGED_RELAYER" \
@@ -104,6 +110,7 @@ jobs:
                 "ingester": $ingester,
                 "fmd-indexer": $fmd_indexer,
                 "explorer-indexer": $explorer_indexer,
+                "protocol-indexer": $protocol_indexer,
                 "fmd-webserver": $fmd_webserver,
                 "explorer-webserver": $explorer_webserver,
                 "relayer": $relayer,

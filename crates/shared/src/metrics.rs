@@ -22,9 +22,6 @@ pub mod name {
     // fmd-webserver
     pub const HTTP_REQUESTS: &str = "http_requests_total";
     pub const HTTP_DURATION: &str = "http_request_duration_seconds";
-    pub const TREE_MIRROR_LEAVES: &str = "tree_mirror_leaves";
-    pub const TREE_MIRROR_REBUILDS: &str = "tree_mirror_rebuilds_total";
-    pub const TREE_MIRROR_SYNC_DURATION: &str = "tree_mirror_sync_duration_seconds";
     pub const CACHE_REQUESTS: &str = "cache_requests_total";
     pub const TREE_STATE_REDIRECTS: &str = "tree_state_redirects_total";
     pub const TREE_STATE_BODIES: &str = "tree_state_bodies_total";
@@ -38,6 +35,7 @@ pub mod name {
     pub const RAW_EVENTS_MAX_ID: &str = "raw_events_max_id";
     pub const REORGS_APPLIED: &str = "reorgs_applied_total";
     pub const NOTES_LEAF_INDEX_MAX: &str = "notes_leaf_index_max";
+    pub const TREE_STATE_LEAVES: &str = "tree_state_leaves";
     pub const SPENT_NULLIFIERS_SEQ_MAX: &str = "spent_nullifiers_seq_max";
     pub const CHAIN_LEADER: &str = "chain_leader";
     pub const NOTES_MAX_ID: &str = "notes_max_id";
@@ -49,6 +47,17 @@ pub mod name {
     pub const INGESTER_RPC_ERRORS: &str = "ingester_rpc_errors_total";
     pub const INGESTER_CHAIN_LAG: &str = "ingester_chain_lag_blocks";
     pub const INGESTER_RETRIES: &str = "ingester_retries_total";
+
+    // rpc-proxy
+    pub const RPC_PROXY_REQUESTS: &str = "rpc_proxy_requests_total";
+    pub const RPC_PROXY_UPSTREAM_CALLS: &str = "rpc_proxy_upstream_calls_total";
+    pub const RPC_PROXY_UPSTREAM_UNITS: &str = "rpc_proxy_upstream_units_total";
+    pub const RPC_PROXY_UPSTREAM_DURATION: &str = "rpc_proxy_upstream_duration_seconds";
+    pub const RPC_PROXY_RATE_LIMITED: &str = "rpc_proxy_rate_limited_total";
+    pub const RPC_PROXY_CACHE_ENTRIES: &str = "rpc_proxy_cache_entries";
+    pub const RPC_PROXY_REJECTED_TARGET: &str = "rpc_proxy_rejected_target_total";
+    pub const RPC_PROXY_RATELIMIT_KEYS: &str = "rpc_proxy_ratelimit_keys";
+    pub const RPC_PROXY_UPSTREAM_PERMITS: &str = "rpc_proxy_upstream_permits_available";
 
     // Cross-service. Emitted by every stage that commits derived state; the
     // `stage` label makes one pipeline's latency readable end to end.
@@ -161,6 +170,16 @@ pub fn init_addr(addr: &str) -> anyhow::Result<()> {
     init(parsed).context("install metrics listener")
 }
 
+/// The default `metrics_addr` for a service that serves `/metrics` on `port`.
+///
+/// Loopback, which suits a bare process; a deployment that needs the port
+/// published overrides it with `METRICS_ADDR`, as compose does. One function so
+/// the choice — and the reason it is not enforced at the bind, documented on
+/// [`init`] — is stated once rather than in every service's config.
+pub fn default_addr(port: u16) -> String {
+    format!("127.0.0.1:{port}")
+}
+
 /// Units and help text, so a scrape is readable without cross-referencing this
 /// file.
 #[cfg(feature = "metrics-exporter")]
@@ -172,21 +191,6 @@ fn describe() {
         name::HTTP_DURATION,
         Unit::Seconds,
         "HTTP request handling time"
-    );
-    describe_gauge!(
-        name::TREE_MIRROR_LEAVES,
-        Unit::Count,
-        "leaves currently folded into the in-memory tree mirror"
-    );
-    describe_counter!(
-        name::TREE_MIRROR_REBUILDS,
-        Unit::Count,
-        "tree mirror rebuilds from leaf 0, by what triggered them"
-    );
-    describe_histogram!(
-        name::TREE_MIRROR_SYNC_DURATION,
-        Unit::Seconds,
-        "time spent bringing the tree mirror to the tip, including rebuilds"
     );
     describe_counter!(
         name::CACHE_REQUESTS,
@@ -239,6 +243,11 @@ fn describe() {
         name::NOTES_LEAF_INDEX_MAX,
         Unit::Count,
         "highest notes.leaf_index written"
+    );
+    describe_gauge!(
+        name::TREE_STATE_LEAVES,
+        Unit::Count,
+        "leaves folded into the stored commitment tree"
     );
     describe_gauge!(
         name::SPENT_NULLIFIERS_SEQ_MAX,
@@ -294,6 +303,58 @@ fn describe() {
         Unit::Seconds,
         "wall-clock age of the freshest event a stage just committed, from its \
          block timestamp; the end-to-end latency signal"
+    );
+
+    describe_counter!(
+        name::RPC_PROXY_REQUESTS,
+        Unit::Count,
+        "JSON-RPC calls received, by method and how they were served; the \
+         denominator for the cache hit ratio"
+    );
+    describe_counter!(
+        name::RPC_PROXY_UPSTREAM_CALLS,
+        Unit::Count,
+        "calls actually forwarded to a paid endpoint; requests minus this is what \
+         the cache saved"
+    );
+    describe_counter!(
+        name::RPC_PROXY_UPSTREAM_UNITS,
+        Unit::Count,
+        "compute units forwarded upstream, weighted per method; tracks the \
+         provider bill"
+    );
+    describe_histogram!(
+        name::RPC_PROXY_UPSTREAM_DURATION,
+        Unit::Seconds,
+        "time one upstream call took, by method"
+    );
+    describe_counter!(
+        name::RPC_PROXY_RATE_LIMITED,
+        Unit::Count,
+        "calls refused by a rate limit, by which bucket was exhausted"
+    );
+    describe_gauge!(
+        name::RPC_PROXY_CACHE_ENTRIES,
+        Unit::Count,
+        "entries held per cache class, for capacity tuning"
+    );
+    describe_counter!(
+        name::RPC_PROXY_REJECTED_TARGET,
+        Unit::Count,
+        "eth_call rejections by contract class; a non-zero rate on `unknown` \
+         means an asset was registered on-chain without an rpc-proxy converge"
+    );
+    describe_gauge!(
+        name::RPC_PROXY_RATELIMIT_KEYS,
+        Unit::Count,
+        "live keys held per per-client rate-limit bucket; unbounded growth here \
+         is an abuser minting buckets, since the key is an unauthenticated IP"
+    );
+    describe_gauge!(
+        name::RPC_PROXY_UPSTREAM_PERMITS,
+        Unit::Count,
+        "free slots in a chain's upstream concurrency limit; a sustained zero \
+         means requests are queueing against their own deadline"
     );
 }
 
@@ -400,13 +461,41 @@ pub fn record_chain_leader(chain_id: i64, leader: bool) {
     .set(if leader { 1.0 } else { 0.0 });
 }
 
+/// A method name from a closed set, for use as a metric label.
+///
+/// The request's own method string must never be used directly. HTTP permits
+/// any RFC-7230 token as an extension method, so a caller sending `X1`, `X2`, …
+/// would mint one time series per token — permanently, since the process-global
+/// recorder never expires a series. This layer sits above routing, so the
+/// request does not even have to be valid to do it.
+///
+/// Anything outside the standard set collapses to `<other>`, mirroring how
+/// [`UNMATCHED_ROUTE`] closes the `route` label.
+#[cfg(feature = "webserver")]
+fn method_label(method: &axum::http::Method) -> &'static str {
+    use axum::http::Method;
+    match *method {
+        Method::GET => "GET",
+        Method::POST => "POST",
+        Method::PUT => "PUT",
+        Method::DELETE => "DELETE",
+        Method::PATCH => "PATCH",
+        Method::HEAD => "HEAD",
+        Method::OPTIONS => "OPTIONS",
+        Method::TRACE => "TRACE",
+        Method::CONNECT => "CONNECT",
+        _ => "<other>",
+    }
+}
+
 /// HTTP middleware recording [`name::HTTP_REQUESTS`] and [`name::HTTP_DURATION`].
 ///
 /// The `route` label is the matched route template from
 /// [`axum::extract::MatchedPath`], so
 /// `/v1/chains/{chain_id}/commitments/chunks/{chunk_id}` is one series rather than
 /// one per chunk id. A request that matched nothing is labelled
-/// [`UNMATCHED_ROUTE`] for the same reason.
+/// [`UNMATCHED_ROUTE`] for the same reason. The `method` label is closed by
+/// [`method_label`].
 #[cfg(feature = "webserver")]
 pub async fn track_http(
     req: axum::extract::Request,
@@ -415,14 +504,15 @@ pub async fn track_http(
     use axum::extract::MatchedPath;
     use std::time::Instant;
 
-    // Cloned out of the extensions before the request is consumed; the labels
-    // outlive the request, so owned `String`s are required.
+    // Cloned out of the extensions before the request is consumed; the label
+    // outlives the request, so an owned `String` is required. The method label
+    // is `&'static str` and needs no allocation.
     let route = req
         .extensions()
         .get::<MatchedPath>()
         .map(|p| p.as_str().to_owned())
         .unwrap_or_else(|| UNMATCHED_ROUTE.to_owned());
-    let method = req.method().as_str().to_owned();
+    let method = method_label(req.method());
 
     let start = Instant::now();
     let response = next.run(req).await;
@@ -431,7 +521,7 @@ pub async fn track_http(
     ::metrics::histogram!(
         name::HTTP_DURATION,
         "route" => route.clone(),
-        "method" => method.clone(),
+        "method" => method,
     )
     .record(elapsed.as_secs_f64());
     ::metrics::counter!(
@@ -447,17 +537,12 @@ pub async fn track_http(
 
 /// Record the serialised size of a chunk-feed response body.
 ///
-/// Read from the body's exact size hint rather than re-serialising: `Json`
-/// produces a single in-memory buffer, so the hint is the byte count. `None`
-/// would mean a streaming body, which this feed never produces, and is skipped
-/// rather than estimated so the counter stays an exact total.
+/// Takes the length rather than the response: the feeds now serialise a chunk
+/// once and serve the same buffer repeatedly, so the caller holds an exact byte
+/// count and this need not reach into a body to rediscover it.
 #[cfg(feature = "webserver")]
-pub fn record_chunk_feed_bytes(kind: &'static str, resp: &axum::response::Response) {
-    use axum::body::HttpBody;
-
-    if let Some(bytes) = resp.body().size_hint().exact() {
-        ::metrics::counter!(name::CHUNK_FEED_BYTES, "kind" => kind).increment(bytes);
-    }
+pub fn record_chunk_feed_bytes(kind: &'static str, bytes: usize) {
+    ::metrics::counter!(name::CHUNK_FEED_BYTES, "kind" => kind).increment(bytes as u64);
 }
 
 /// Record a cache lookup outcome.
@@ -628,5 +713,55 @@ mod tests {
                 .any(|k| k.contains("deadbeef") || k.contains("cafebabe")),
             "a raw path leaked into a label: {keys:?}"
         );
+    }
+
+    /// The same guard on the other label.
+    ///
+    /// HTTP permits any RFC-7230 token as an extension method, and this layer
+    /// runs above routing — so a caller who never sends a valid request could
+    /// otherwise mint one permanent series per token it invents.
+    #[tokio::test]
+    async fn extension_methods_share_one_series() {
+        let capture = KeyCapture::default();
+        let keys = metrics::with_local_recorder(&capture, || {
+            futures::executor::block_on(async {
+                let app = app();
+                for m in ["X1", "X2", "WHATEVER", "PROPFIND"] {
+                    let res = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(m)
+                                .uri("/v1/chains/1/commitments/chunks/0")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+                }
+            });
+            capture.0.lock().unwrap().clone()
+        });
+
+        assert_eq!(
+            keys.len(),
+            1,
+            "four extension methods must share one series, got {keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k.contains("WHATEVER")),
+            "a caller-chosen method leaked into a label: {keys:?}"
+        );
+    }
+
+    /// The standard methods keep their own names — collapsing everything would
+    /// make the label useless.
+    #[test]
+    fn standard_methods_keep_their_names() {
+        use axum::http::Method;
+        assert_eq!(method_label(&Method::GET), "GET");
+        assert_eq!(method_label(&Method::POST), "POST");
+        assert_eq!(method_label(&Method::from_bytes(b"X1").unwrap()), "<other>");
     }
 }

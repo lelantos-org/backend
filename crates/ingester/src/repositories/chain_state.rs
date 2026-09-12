@@ -1,3 +1,9 @@
+//! The `chain_state` cursor: where each chain's scan has reached.
+//!
+//! This crate's own table, not `consumer_cursors` — the ingester produces
+//! `raw_events` rather than consuming them, so `database::CursorRepo` is not
+//! what tracks it.
+
 use crate::domain::error::IngesterError;
 use crate::domain::models::BlockCursor;
 use crate::repositories::checkout;

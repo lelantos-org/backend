@@ -1,3 +1,9 @@
+//! Inbound query parameters, and the validation every endpoint shares.
+//!
+//! A DTO carries only what the wire sends; resolving a default, clamping a range
+//! or rejecting an unknown value happens in the free functions below so the rules
+//! are stated once for every endpoint that takes the same parameter.
+
 pub mod anonymity_set;
 pub mod asset_flows;
 pub mod asset_yield;

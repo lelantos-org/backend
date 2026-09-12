@@ -6,7 +6,8 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-moka = { workspace = true }
+async-trait = { workspace = true }
+shared = { path = "../shared", features = ["cache"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }

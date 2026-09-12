@@ -1,0 +1,38 @@
+# registry-webserver — PROD. Mounted at /etc/registry.toml.
+#
+# The deployment half of the old `/chains`: what each chain is, independent of
+# which relayer serves it. Addresses arrive from the environment, since they
+# change per deployment while this file does not.
+
+database_url = "postgres://postgres:postgres@postgres:5432/postgres"
+bind_addr = "0.0.0.0:3005"
+cache_ttl_s = 30
+
+[token_prices]
+base_url = "https://coins.llama.fi"
+ttl_s = 300
+timeout_ms = 5000
+
+[[chains]]
+chain_id = 42161
+name = "arbitrum"
+# Overridden by REGISTRY_CHAIN_42161_*. Declared here because the overlay only
+# rewrites keys this file already carries — a key omitted here can never be set
+# from the environment.
+rpc_url = "https://arb1.arbitrum.io/rpc"
+# The `rpc-proxy` service, as browsers reach it — the point of which is that the
+# paid upstream key stays server-side. Read-only, so it never replaces `rpc_url`
+# above: a wallet installs that one and would ask it for eth_sendRawTransaction.
+# Overridden by REGISTRY_CHAIN_42161_READ_RPC_URL.
+read_rpc_url = "https://rpc.example/42161"
+explorer_url = "https://arbiscan.io"
+masp_address = "0x0000000000000000000000000000000000000000"
+permit2_address = "0x0000000000000000000000000000000000000000"
+# Absent, a wallet withholds the native-ETH deposit/withdraw option and the swap
+# route entirely, rather than offering one that has no entry point on chain.
+native_adapter_address = "0x0000000000000000000000000000000000000000"
+swap_wrapper_address = "0x0000000000000000000000000000000000000000"
+tree_depth = 11
+# Archive-capable endpoint for the rate measurement. Absent disables measurement
+# for this chain rather than failing the boot.
+apy_rpc_url = "https://arb1.arbitrum.io/rpc"

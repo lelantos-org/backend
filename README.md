@@ -60,7 +60,7 @@ flowchart TD
 `DepositEscrowed` and nullifier events into `notes` and `spent_nullifiers`,
 holding escrowed deposits in a pending map until the batch that commits them
 lands. *Filter* runs FMD detection: each note's clue is tested against every
-active subscription key (`fmd-crypto`), producing `matches`. Both keep their own
+active subscription key (`common-crypto`), producing `matches`. Both keep their own
 row in `consumer_cursors`; filter also backfills new subscriptions over
 historical notes. With the `parallel` feature the clue tests fan out over rayon.
 
@@ -85,7 +85,7 @@ flowchart LR
   C -.cursor.-> CUR[(consumer_cursors)]
   F -.cursor.-> CUR
   subgraph web["fmd-webserver"]
-    R["/v1/subscriptions · /v1/matches · /v1/notes<br/>/v1/chains/:id/commitments/chunks/:n<br/>/v1/chains/:id/nullifiers/chunks/:n<br/>/v1/tree-state"]
+    R["/v1/subscriptions · /v1/matches · /v1/notes · /v1/head<br/>/v1/chains/{id}/commitments/chunks/{n}<br/>/v1/chains/{id}/nullifiers/chunks/{n}<br/>/v1/tree-state"]
   end
   N --> R
   SN --> R
@@ -130,8 +130,9 @@ flowchart LR
 
 The only service that writes on-chain. Clients POST a spend or swap payload; a
 per-chain pipeline builds the witness against a mirrored copy of the commitment
-tree, generates a Groth16 proof (ark-circom, serialized behind a mutex since it
-is CPU-bound), and submits the batch transaction. Nullifier guard rejects
+tree, generates a Groth16 proof (the `groth16` crate: native arkworks over a
+snarkjs zkey, serialised behind a single-permit semaphore since it is CPU-bound),
+and submits the batch transaction. Nullifier guard rejects
 double-spends before proving, the oracle and gas estimator price the fee, and
 successful flushes publish deposit-lifecycle events on an SSE stream. The
 `/estimate` routes only validate the payload shape and quote — proving on an
@@ -155,6 +156,24 @@ flowchart TD
   GW[gas witness<br/>learned from receipts] --> FQ
   SUB -.gas_used.-> GW
 ```
+
+### Registry — `registry-webserver`
+
+The deployment registry and asset catalog: what chains this deployment serves,
+what is deployed on them, and which assets are registered. Stateless and freely
+replicated, which is what lets it sit behind a shared cache — unlike the relayer,
+whose routes carry submissions.
+
+It exists to split two kinds of fact that `GET /chains` on the relayer used to
+mix: what the *deployment* declares about a chain (explorer URL, Permit2, browser
+RPC) versus what *one relayer* does on it. That split is what makes a
+self-hosted relayer verifiable — a wallet fetches both and refuses one whose
+answers disagree.
+
+The single exception to statelessness is the venue-APY worker, which measures
+what a yield venue has been paying and stores it on `asset_yield`. A Postgres
+advisory lock elects one measurer per chain, so replicas neither duplicate
+samples nor multiply archive RPC load.
 
 ### Metaquoter — `metaquoter`
 
@@ -203,17 +222,26 @@ flowchart LR
 No IO loop of their own; every binary sits on top of them. `shared` holds
 entities, shutdown, the tick driver, config loading and tracing init (plus the
 HTTP error type behind its `webserver` feature); `chain-types` the ABI types and
-decoding; `fmd-crypto` the Poseidon / Baby Jubjub / filter / tree primitives;
+decoding; `common-crypto` the Poseidon / Baby Jubjub / filter / tree primitives;
 `database` the Diesel schema, migrations, bb8 pool, cursor repository, advisory
 locks and reorg retraction. `integration-tests` drives the whole stack
 end-to-end via testcontainers.
 
+Three are used by some binaries rather than all: `asset-registry` (the asset
+catalog row and its circuit-unit arithmetic), `prices` (USD spot prices behind a
+cache), and `groth16`, which confines the arkworks 0.6 stack to the one crate
+that proves and verifies — see [ARCHITECTURE.md](ARCHITECTURE.md) for why that
+isolation is load-bearing.
+
 ```mermaid
 flowchart BT
-  BINS["ingester · fmd-indexer · explorer-indexer<br/>fmd-webserver · explorer-webserver · risk-webserver<br/>relayer · metaquoter"] --> SH[shared]
+  BINS["ingester · fmd-indexer · explorer-indexer<br/>fmd-webserver · explorer-webserver · risk-webserver<br/>relayer · registry-webserver · metaquoter"] --> SH[shared]
   BINS --> CT[chain-types]
-  BINS --> FC[fmd-crypto]
+  BINS --> FC[common-crypto]
   BINS --> DB[database]
+  REL[relayer] --> G16[groth16]
+  REL & REG[registry-webserver] --> AR[asset-registry]
+  REL & EW[explorer-webserver] --> PR[prices]
 ```
 
 ## Crate READMEs
@@ -228,13 +256,18 @@ Each crate documents its own config, routes, and the decisions behind them.
 | [explorer-indexer](crates/explorer-indexer/README.md) | Public projections + materialized views |
 | [explorer-webserver](crates/explorer-webserver/README.md) | Explorer API, prices, tx classification |
 | [relayer](crates/relayer/README.md) | Prover + submitter, flush worker, fee quotes |
+| [registry-webserver](crates/registry-webserver/README.md) | Deployment registry + asset catalog + spot prices, venue-APY worker |
 | [metaquoter](crates/metaquoter/README.md) | DB-less swap quote aggregator |
 | [risk-webserver](crates/risk-webserver/README.md) | Address screening |
 | [shared](crates/shared/README.md) | Tick driver, shutdown, config, `AppError` |
 | [chain-types](crates/chain-types/README.md) | Event ABI + decode |
-| [fmd-crypto](crates/fmd-crypto/README.md) | FMD + Merkle primitives |
+| [common-crypto](crates/common-crypto/README.md) | FMD + Merkle primitives |
+| [groth16](crates/groth16/README.md) | Native Groth16 prover + verifier over snarkjs artifacts |
+| [asset-registry](crates/asset-registry/README.md) | Asset catalog rows + circuit-unit arithmetic |
+| [prices](crates/prices/README.md) | USD spot prices, cache + provider fallback |
 | [database](crates/database/README.md) | Schema, migrations, pool, cursors, reorg |
 | [integration-tests](crates/integration-tests/README.md) | Cross-crate end-to-end |
+| [test-support](crates/test-support/README.md) | Shared Postgres test harness |
 | [stack](stack/README.md) | Local Docker Compose stack |
 
 ## Reorgs
@@ -280,7 +313,7 @@ just ci       # fmt + clippy + test
 ```sh
 cd stack
 just up               # everything (profile=all)
-just up-profile fmd   # single profile: db | anvil | ingester | fmd | explorer | relayer | metaquoter | risk
+just up-profile fmd   # single profile: db | anvil | ingester | fmd | explorer | relayer | registry | metaquoter | risk
 just logs <service>   # tail one service
 just down             # stop + wipe volumes
 just --list           # everything else

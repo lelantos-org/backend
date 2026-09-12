@@ -1,4 +1,4 @@
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use bigdecimal::BigDecimal;
 use database::DbPool;
 use diesel::prelude::*;
@@ -76,5 +76,5 @@ pub async fn totals(pool: &DbPool, chain_id: Option<i64>) -> AppResult<Vec<Locke
     .bind::<Nullable<BigInt>, _>(chain_id)
     .load(&mut conn)
     .await
-    .map_err(|e| AppError::Db(e.to_string()))
+    .map_err(super::db_err)
 }

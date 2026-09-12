@@ -1,4 +1,7 @@
-use crate::adapters::chain_setup::ChainSetup;
+//! Uniswap V3 quote source: one `eth_call` to `QuoterV2` per canonical fee tier.
+
+use crate::adapters::call;
+use crate::adapters::chain_setup::{ChainMap, ChainSetup};
 use crate::adapters::univ3::abi::{FEE_TIERS, IQuoterV2};
 use crate::domain::error::AppError;
 use crate::domain::models::{Quote, QuoteRequest, Venue};
@@ -10,12 +13,14 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 pub struct UniV3Quoter {
-    chains: HashMap<u64, ChainSetup>,
+    chains: ChainMap,
 }
 
 impl UniV3Quoter {
     pub fn new(chains: HashMap<u64, ChainSetup>) -> Self {
-        Self { chains }
+        Self {
+            chains: ChainMap::new(chains),
+        }
     }
 }
 
@@ -26,14 +31,11 @@ impl Quoter for UniV3Quoter {
     }
 
     fn supports_chain(&self, chain_id: u64) -> bool {
-        self.chains.contains_key(&chain_id)
+        self.chains.supports(chain_id)
     }
 
     async fn quote(&self, req: &QuoteRequest) -> Result<Quote, AppError> {
-        let setup = self
-            .chains
-            .get(&req.chain_id)
-            .ok_or(AppError::UnsupportedChain(req.chain_id))?;
+        let setup = self.chains.get(req.chain_id)?;
 
         let best = best_tier(setup, req).await?;
         // Single-hop route layout: abi.encode(uint24 fee, uint160
@@ -51,9 +53,9 @@ struct TierQuote {
     gas_estimate: u64,
 }
 
-/// Race all canonical fee tiers and pick the highest-output pool. Tiers without
-/// a deployed pool revert at the quoter and are dropped. Returns
-/// [`AppError::NoLiquidity`] if every tier fails.
+/// Race all canonical fee tiers and pick the highest-output pool. A tier with no
+/// deployed pool reverts at the quoter and is dropped; see
+/// [`call::best_tier`] for why a tier that fails any other way is not.
 async fn best_tier(setup: &ChainSetup, req: &QuoteRequest) -> Result<TierQuote, AppError> {
     let quoter = IQuoterV2::new(setup.quoter_addr, &setup.provider);
 
@@ -65,45 +67,15 @@ async fn best_tier(setup: &ChainSetup, req: &QuoteRequest) -> Result<TierQuote, 
             fee: U24::from(fee),
             sqrtPriceLimitX96: U160::ZERO,
         };
-        let call = quoter.quoteExactInputSingle(params);
+        let pending = quoter.quoteExactInputSingle(params);
         async move {
-            let r = call.call().await.ok()?;
-            Some(TierQuote {
+            pending.call().await.map(|r| TierQuote {
                 fee,
                 amount_out: r.amountOut,
-                gas_estimate: r.gasEstimate.try_into().unwrap_or(u64::MAX),
+                gas_estimate: call::gas_estimate(r.gasEstimate),
             })
         }
     });
 
-    futures::future::join_all(calls)
-        .await
-        .into_iter()
-        .flatten()
-        .max_by_key(|t| t.amount_out)
-        .ok_or(AppError::NoLiquidity)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy::primitives::Address;
-
-    fn req(slippage_bps: u16) -> QuoteRequest {
-        QuoteRequest {
-            chain_id: 1,
-            token_in: Address::ZERO,
-            token_out: Address::ZERO,
-            amount_in: U256::from(1_000_000u64),
-            slippage_bps,
-        }
-    }
-
-    #[test]
-    fn slippage_math_basis_points() {
-        let expected = U256::from(1_000_000u64);
-        assert_eq!(req(50).apply_slippage(expected), U256::from(995_000u64));
-        assert_eq!(req(0).apply_slippage(expected), expected);
-        assert_eq!(req(10_000).apply_slippage(expected), U256::ZERO);
-    }
+    call::best_tier(Venue::UniV3, calls, |t: &TierQuote| t.amount_out).await
 }

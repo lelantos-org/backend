@@ -203,6 +203,10 @@ diesel::table! {
         index_ray -> Nullable<Numeric>,
         block_number -> Nullable<Int8>,
         updated_at -> Nullable<Timestamptz>,
+        apy_bps -> Nullable<Int4>,
+        apy_window_s -> Nullable<Int8>,
+        apy_measured_at -> Nullable<Timestamptz>,
+        vault_name -> Nullable<Text>,
     }
 }
 
@@ -231,6 +235,16 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    tree_state (chain_id) {
+        chain_id -> Int8,
+        leaf_count -> Int8,
+        root -> Bytea,
+        frontier -> Bytea,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     raw_events,
     chain_state,
@@ -248,4 +262,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     asset_yield,
     asset_yield_sample,
     yield_fee_events,
+    tree_state,
 );

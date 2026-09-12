@@ -33,6 +33,10 @@ pub enum LiveExit {
 pub async fn run(svc: Arc<dyn LiveService>) -> Result<LiveExit, IngesterError> {
     let chain_id = svc.chain_id();
     let mut backoff = Backoff::idle(svc.poll_ms());
+    // The backfill writes the same cursor row and this service outlives the
+    // alternation between the two, so whatever it remembers from the last live
+    // stretch describes a state the catch-up has since moved past.
+    svc.forget_cursor();
     info!(chain_id, poll_ms = svc.poll_ms(), "live mode start");
 
     loop {

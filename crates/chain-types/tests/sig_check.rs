@@ -82,6 +82,15 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
 ];
 
+/// Only events are pinned here.
+///
+/// The `interface` declarations in `abi.rs` (`IYieldVenue`, `IERC20Metadata`,
+/// `IERC4626`, `IMulticall3`) have no assertion because there is nothing
+/// independent to assert against: `contracts/packages/abi/json/` ships no ABI
+/// for them, so an expected selector could only be re-derived from the same
+/// signature string `sol!` already compiles. That test would pass by
+/// construction and catch no drift. Pin them here as soon as the yield
+/// contracts publish an ABI.
 #[test]
 fn test_signature_hashes_match_the_deployed_contract_abi() {
     let actual = [

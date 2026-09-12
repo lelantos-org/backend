@@ -93,23 +93,6 @@ pub enum AppError {
     },
 }
 
-/// Turn a foreign error into an [`AppError`] with context in front of it, so a
-/// failure names the step it came from rather than only its cause.
-///
-/// The context is a `&'static str`: this is used inside the prover's per-signal
-/// loops, where building a `String` per call would cost more than the operation
-/// it describes. Where an error needs runtime detail, use `map_err` with a
-/// closure so the formatting stays on the failure path.
-pub trait ErrorContext<T> {
-    fn prover(self, step: &'static str) -> AppResult<T>;
-}
-
-impl<T, E: std::fmt::Display> ErrorContext<T> for Result<T, E> {
-    fn prover(self, step: &'static str) -> AppResult<T> {
-        self.map_err(|e| AppError::Prover(format!("{step}: {e}")))
-    }
-}
-
 /// The chain's revert reason, if `err` carries one.
 ///
 /// Returns only the text from `execution reverted` onward. Everything before that
@@ -207,6 +190,54 @@ impl IntoResponse for AppError {
             error!(error = %self, "request failed");
         }
         (status, self.client_message()).into_response()
+    }
+}
+
+/// The prover and verifier's failures, in this crate's terms.
+///
+/// The variant split is the reason `groth16` has an error type of its own: it
+/// parses both a verification key this deployment ships and a proof a caller
+/// sent, with the same curve-point code, and only the mapping below decides
+/// which of those becomes a 400 and which a 500. Reporting a broken key as a bad
+/// request would blame whichever caller arrived first; reporting a malformed
+/// proof as an internal error would hide the fix from the only party who can
+/// apply it.
+///
+/// `InvalidProof` is the one variant whose text reaches the caller, and it is
+/// safe to echo: every message is either their own submitted coordinate or a
+/// fixed description of the check that refused it. Key and prover failures name
+/// files this deployment ships, so they land in variants
+/// [`AppError::client_message`] scrubs.
+///
+/// Prefixes stay off the messages here. `Groth16Error` already renders its own
+/// ("verification key: …"), and a context this conversion cannot know — which
+/// key, which circuit — would be a guess in a `From` that has no caller.
+impl From<::groth16::Groth16Error> for AppError {
+    fn from(e: ::groth16::Groth16Error) -> Self {
+        use ::groth16::Groth16Error as E;
+        match e {
+            // Unwrapped rather than rendered: both types spell this one
+            // "prover: {msg}", so passing the rendered string through would
+            // print the prefix twice.
+            E::Prove(m) => AppError::Prover(m),
+            E::Busy => AppError::ProverBusy,
+            E::Key(_) | E::Verify(_) => AppError::Internal(e.to_string()),
+            E::InvalidProof(m) => AppError::BadRequest(m),
+        }
+    }
+}
+
+/// The asset catalog's failures, in this crate's terms.
+///
+/// `Numeric` maps to `Internal` rather than `BadRequest`: those columns are
+/// written by explorer-indexer, so a value that will not parse is a fault on our
+/// side of the boundary and never something a caller sent.
+impl From<::asset_registry::Error> for AppError {
+    fn from(e: ::asset_registry::Error) -> Self {
+        match e {
+            ::asset_registry::Error::Db(m) => AppError::Db(m),
+            ::asset_registry::Error::Numeric(m) => AppError::Internal(m),
+        }
     }
 }
 

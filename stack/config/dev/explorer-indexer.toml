@@ -1,30 +1,17 @@
 # Explorer indexer — DEV (local anvil stack).
-# Mounted at /etc/explorer-indexer.toml. See config/prod/ for the deployment
-# template.
+# Mounted at /etc/explorer-indexer.toml.
 #
-# The explorer indexer consumes rows the ingester has already written, so it
-# needs no RPC to index. The [[chains]] block exists for one thing only:
-# reading ERC20 `decimals()` for registered assets. `AssetRegistered` does not
-# carry decimals, and `scale` is a circuit capacity parameter rather than a
-# decimals normalizer, so without this the explorer cannot render a token
-# amount. A chain omitted here still indexes; its assets keep
-# `decimals = NULL` and the API reports no amount for them.
+# Flow analytics for explorer-ui: `asset_flows`, `yield_fee_events` and the
+# materialized views over them. Reads no chain — everything needing an RPC, and
+# every table the wallet or the relayer depends on, belongs to protocol-indexer.
 #
-# Fields below are the complete set (see ExplorerIndexerConfig).
+# There is deliberately no [[chains]] block. Fields below are the complete set
+# (see ExplorerIndexerConfig).
 
 database_url = "postgres://postgres:postgres@postgres:5432/postgres"
 
-# Poll interval for new raw events. Tight in dev so the explorer keeps up
-# with anvil's 1s blocks.
+# Poll interval for new raw events.
 tick_ms = 500
 
 # Max raw events consumed per tick.
 batch = 500
-
-# Keep [[chains]] last: in TOML every bare key after a table header belongs to
-# that table, so a scalar moved below this line would silently become part of
-# the chain entry instead of the top-level config.
-[[chains]]
-chain_id = 31337
-# Overridden by EXPLORER_INDEXER_CHAIN_31337_RPC_URL.
-rpc_url = "http://anvil:8545"

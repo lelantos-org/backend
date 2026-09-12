@@ -1,6 +1,6 @@
 use crate::app::AppState;
 use crate::domain::amount::{plain_amount, whole_tokens_str};
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::responses::YieldAssetOut;
 use crate::repositories::asset_yield::{self, YieldRow};
 use bigdecimal::num_bigint::ToBigInt;
@@ -10,14 +10,12 @@ use std::sync::Arc;
 pub async fn list(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<YieldAssetOut>>> {
     let cache = st.cache.asset_yield.clone();
     let st = st.clone();
-    cache
-        .try_get_with(chain_id, async move {
-            let rows = asset_yield::list(&st.pool, chain_id).await?;
-            let out: Vec<YieldAssetOut> = rows.into_iter().map(to_out).collect();
-            Ok::<_, AppError>(Arc::new(out))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()))
+    super::cached(&cache, chain_id, async move {
+        let rows = asset_yield::list(&st.pool, chain_id).await?;
+        let out: Vec<YieldAssetOut> = rows.into_iter().map(to_out).collect();
+        Ok(Arc::new(out))
+    })
+    .await
 }
 
 /// The treasury's earned-but-unswept fee, in underlying base units.

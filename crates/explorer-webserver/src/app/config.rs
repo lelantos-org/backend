@@ -1,10 +1,20 @@
+//! Environment-derived configuration.
+//!
+//! Read through `shared::config_env` rather than `std::env::var`, so an empty
+//! variable counts as unset and a malformed one fails the process instead of
+//! quietly taking the default.
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use shared::config_env::{parse, string};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExplorerWebserverConfig {
     pub database_url: String,
     pub bind_addr: String,
+    /// Where `/metrics` is served; see [`shared::metrics::default_addr`].
+    #[serde(default = "default_metrics_addr")]
+    pub metrics_addr: String,
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_s: u64,
     /// DefiLlama-compatible price API root.
@@ -25,6 +35,10 @@ fn default_cache_ttl() -> u64 {
     30
 }
 
+fn default_metrics_addr() -> String {
+    shared::metrics::default_addr(3014)
+}
+
 fn default_price_base_url() -> String {
     "https://coins.llama.fi".into()
 }
@@ -40,23 +54,13 @@ fn default_price_timeout_ms() -> u64 {
 impl ExplorerWebserverConfig {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            database_url: std::env::var("DATABASE_URL").context("DATABASE_URL")?,
-            bind_addr: std::env::var("EXPLORER_BIND_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:3002".into()),
-            cache_ttl_s: std::env::var("CACHE_TTL_S")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(default_cache_ttl),
-            price_base_url: std::env::var("PRICE_BASE_URL")
-                .unwrap_or_else(|_| default_price_base_url()),
-            price_ttl_s: std::env::var("PRICE_TTL_S")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(default_price_ttl),
-            price_timeout_ms: std::env::var("PRICE_TIMEOUT_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(default_price_timeout_ms),
+            database_url: string("DATABASE_URL").context("DATABASE_URL")?,
+            bind_addr: string("EXPLORER_BIND_ADDR").unwrap_or_else(|| "0.0.0.0:3002".into()),
+            metrics_addr: string("METRICS_ADDR").unwrap_or_else(default_metrics_addr),
+            cache_ttl_s: parse("CACHE_TTL_S")?.unwrap_or_else(default_cache_ttl),
+            price_base_url: string("PRICE_BASE_URL").unwrap_or_else(default_price_base_url),
+            price_ttl_s: parse("PRICE_TTL_S")?.unwrap_or_else(default_price_ttl),
+            price_timeout_ms: parse("PRICE_TIMEOUT_MS")?.unwrap_or_else(default_price_timeout_ms),
         })
     }
 }

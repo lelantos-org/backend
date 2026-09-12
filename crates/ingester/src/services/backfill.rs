@@ -79,11 +79,6 @@ impl BackfillService {
         // leaving it in the drain loop meant the dominant cost of a chunk ran
         // strictly in series behind the log fetches, and the fetch stream was not
         // polled forward while it did.
-        // Everything up to the write runs inside the concurrent stage. Resolving
-        // block metadata is one `eth_getBlockByNumber` per distinct block, so
-        // leaving it in the drain loop meant the dominant cost of a chunk ran
-        // strictly in series behind the log fetches, and the fetch stream was not
-        // polled forward while it did.
         let rpc = &self.rpc;
         let log_window = &self.log_window;
         let mut prepared = stream::iter(chunks.into_iter().map(|chunk| async move {

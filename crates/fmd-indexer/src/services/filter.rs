@@ -13,7 +13,7 @@ use crate::repositories::notes::{NoteRow, NotesRepo};
 use crate::repositories::subscriptions::{ActiveFingerprint, SubscriptionRow, SubscriptionsRepo};
 use ark_ed_on_bn254::{Fq, Fr};
 use async_trait::async_trait;
-use fmd_crypto::clue::CircomPoint;
+use common_crypto::clue::{CircomPoint, usable_as_clue};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use shared::tick::TickProgress;
@@ -262,15 +262,7 @@ impl FilterService for FilterServiceImpl {
     }
 
     async fn list_chain_ids(&self) -> Vec<i64> {
-        match self.cursors.list_chain_ids().await {
-            Ok(ids) => ids,
-            Err(e) => {
-                // An empty list is indistinguishable from no chains being
-                // configured, so the failure is logged rather than idled through.
-                warn!(error = %e, "list_chain_ids failed; skipping this round");
-                Vec::new()
-            }
-        }
+        super::chain_ids(self.cursors.as_ref()).await
     }
 }
 
@@ -322,8 +314,11 @@ impl LaggedHead {
 
 /// Notes `scan` could not use.
 ///
-/// Counted rather than dropped: an off-curve clue is a note no subscriber can
-/// match, and nothing else reports it.
+/// Counted rather than dropped: a clue point no detection key may be multiplied
+/// by is a note no subscriber can match, and nothing else reports it. The field
+/// keeps its name because dashboards read it; what it counts is every point
+/// `usable_as_clue` refuses, which is off-curve plus the identity and the points
+/// outside the prime-order subgroup.
 #[derive(Default)]
 struct ScanStats {
     off_curve_notes: usize,
@@ -359,7 +354,7 @@ type SubEntry = (i64, Arc<[Fr]>, usize);
 /// `gamma * 32` bytes and therefore matches nothing.
 fn sub_entry(row: &SubscriptionRow) -> Option<SubEntry> {
     let gamma = row.gamma as usize;
-    let dk = fmd_crypto::filter::parse_detection_key(&row.detection_key, gamma)?;
+    let dk = common_crypto::filter::parse_detection_key(&row.detection_key, gamma)?;
     Some((row.id, Arc::<[Fr]>::from(dk), gamma))
 }
 
@@ -420,7 +415,10 @@ async fn scan(notes: &[NoteRow], subs: &Arc<[SubEntry]>, chain_id: i64) -> Resul
         .filter_map(|n| {
             let rx = bigdec_to_fq(&n.clue_rx);
             let ry = bigdec_to_fq(&n.clue_ry);
-            if !CircomPoint::new(rx, ry).is_on_curve() {
+            // Screened once per note rather than left to the primitive, which
+            // checks per gamma group. `usable_as_clue` is the same bar
+            // `test_clue_batch_parsed` applies, so this only moves the work.
+            if !usable_as_clue(&CircomPoint::new(rx, ry)) {
                 stats.off_curve_notes += 1;
                 return None;
             }
@@ -460,7 +458,8 @@ async fn scan(notes: &[NoteRow], subs: &Arc<[SubEntry]>, chain_id: i64) -> Resul
         let per_note = |(nid, rx, ry, bits): &(i64, Fq, Fq, u16)| -> Vec<NewMatch> {
             let mut hits: Vec<NewMatch> = Vec::new();
             for (gamma, indices, dks) in &groups {
-                let res = fmd_crypto::filter::test_clue_batch_parsed(dks, *rx, *ry, *bits, *gamma);
+                let res =
+                    common_crypto::filter::test_clue_batch_parsed(dks, *rx, *ry, *bits, *gamma);
                 for (k, hit) in res.iter().enumerate() {
                     if *hit {
                         hits.push(NewMatch {

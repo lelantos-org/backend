@@ -1,6 +1,12 @@
-//! Per-chain in-memory tree mirror, bootstrapped from the existing `notes` and
-//! `tree_advances` rows at startup. The relayer is otherwise stateless across
-//! restarts and owns no tables.
+//! Per-chain in-memory tree mirror, resumed from fmd-indexer's `tree_state` row
+//! at startup. The relayer is otherwise stateless across restarts and owns no
+//! tables.
+//!
+//! The mirror is a [`Frontier`] rather than a materialised [`MerkleTree`]: it
+//! only ever appends, and only ever reads the root and the frontier, which is
+//! exactly an append-only tree's resume state. That is what lets a boot read one
+//! kilobyte instead of replaying every `notes` row, and it is why the contract
+//! stores `filledSubtrees` and nothing else.
 //!
 //! Each chain owns one `Arc<Mutex<TreeMirror>>`. The pipeline holds the mutex
 //! through reserve, prove, submit and receipt, so the next bundle builds
@@ -11,17 +17,16 @@ use crate::adapters::abi::IMasp;
 use crate::adapters::numeric::bigdecimal_to_u256;
 use crate::adapters::rpc::RpcEndpoint;
 use crate::domain::error::{AppError, AppResult};
+use crate::repositories::{notes, tree_advances, tree_state};
 use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
+use common_crypto::poseidon as common_poseidon;
+use common_crypto::tree::{Field, Frontier, decode_frontier};
 use database::DbPool;
-use database::models::LeafInputsRow;
-use database::schema::{notes, tree_advances};
-use diesel::prelude::*;
-use diesel_async::RunQueryDsl;
-use fmd_crypto::poseidon as fmd_poseidon;
-use fmd_crypto::tree::{Field, MerkleTree};
+use database::models::TreeStateRow;
 use rayon::prelude::*;
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -30,8 +35,8 @@ use tracing::{error, info};
 ///
 /// Re-exported rather than declared: the depth is pinned by the circuits and
 /// the verifier, so every service that mirrors the tree has to agree on one
-/// value, and `fmd_crypto::tree` is the crate they all share.
-pub use fmd_crypto::tree::DEPTH;
+/// value, and `common_crypto::tree` is the crate they all share.
+pub use common_crypto::tree::DEPTH;
 /// Quaternary tree, so `ARITY^DEPTH` leaves. Mirrors `MASP.MAX_LEAVES`.
 const MAX_LEAVES: usize = 4usize.pow(DEPTH as u32);
 /// Leaves read per round trip during [`TreeMirror::bootstrap`].
@@ -52,13 +57,18 @@ fn leaf_hash(cm: &Field, cv_dep: &[U256; 2]) -> AppResult<Field> {
     tag[31] = TAG_LEAF as u8;
     let cv_x = cv_dep[0].to_be_bytes::<32>();
     let cv_y = cv_dep[1].to_be_bytes::<32>();
-    fmd_poseidon::hash_bytes_be(&[&tag, cm, &cv_x, &cv_y])
+    common_poseidon::hash_bytes_be(&[&tag, cm, &cv_x, &cv_y])
         .map_err(|e| AppError::Internal(format!("leaf_hash: {}", e)))
 }
 
 pub struct TreeMirror {
     pub chain_id: i64,
-    tree: MerkleTree,
+    tree: Frontier,
+    /// The tree as it stood before the batch currently in flight, and the only
+    /// way back: a frontier keeps no record of what it folded, so it cannot drop
+    /// leaves the way a materialised tree can. Taken at every reserve, restored
+    /// by [`TreeMirror::rollback`], and about a kilobyte either way.
+    checkpoint: Frontier,
     /// Why this mirror was parked, if it was; see [`TreeMirror::unwind`]. Every
     /// reserve then fails fast rather than building on state that may not match
     /// the chain.
@@ -83,6 +93,29 @@ pub struct TreeMirror {
 /// window; a spend proved against anything older cannot land anyway.
 const ROOT_HISTORY: usize = 32;
 
+/// Where a mirror's starting state came from.
+///
+/// Worth naming in the boot log and in a divergence error: the two paths fail
+/// for different reasons. A stale `tree_state` row means the indexer is behind,
+/// which time fixes; a replay that diverges means `notes` disagrees with the
+/// chain, which it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootSource {
+    /// fmd-indexer's stored frontier: one row, the normal path.
+    TreeState,
+    /// Folded from `notes`, for a chain the indexer has not written yet.
+    Notes,
+}
+
+impl BootSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TreeState => "tree_state",
+            Self::Notes => "notes",
+        }
+    }
+}
+
 mod snapshot;
 
 pub use snapshot::MirrorSnapshot;
@@ -103,9 +136,10 @@ pub struct AdvancedState {
 
 impl TreeMirror {
     pub fn new(chain_id: i64) -> AppResult<Self> {
-        let tree = MerkleTree::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
+        let tree = Frontier::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
         let mut m = Self {
             chain_id,
+            checkpoint: tree.clone(),
             tree,
             desynced: None,
             snapshot: Arc::new(MirrorSnapshot::default()),
@@ -131,12 +165,10 @@ impl TreeMirror {
     /// Refresh the published readings and the accepted-root window. Called
     /// after every mutation.
     fn publish(&mut self) {
-        let root = self.tree.root().ok();
+        let root = self.tree.root();
         self.snapshot
-            .publish(self.tree.leaf_count() as u64, root, self.desynced.is_some());
-        if let Some(root) = root {
-            self.remember_root(root);
-        }
+            .publish(self.tree.leaf_count(), root, self.desynced.is_some());
+        self.remember_root(root);
     }
 
     /// Drop `root` from the accepted window, if it is still the newest entry.
@@ -209,26 +241,100 @@ impl TreeMirror {
         }
     }
 
-    /// Replay every confirmed commitment from `notes` ordered by `leaf_index`, and
-    /// check that the resulting root matches the latest `tree_advances.new_root`.
+    /// Resume this chain's tree, and check the result against the latest
+    /// `tree_advances.new_root`.
+    ///
+    /// The frontier fmd-indexer already maintains in `tree_state` is the whole of
+    /// what this mirror holds, so the normal path is one row read. Replaying
+    /// `notes` is the fallback for a chain the indexer has not written yet.
     pub async fn bootstrap(&mut self, pool: &DbPool) -> AppResult<()> {
         info!(chain_id = self.chain_id, "tree mirror bootstrap start");
-        let mut conn = crate::repositories::conn(pool).await?;
-        // Paged by `leaf_index` rather than loaded whole: a chain with millions of
-        // notes would otherwise hold every leaf in one query result and one Vec
-        // before the first hash runs.
-        // Doubles as the page cursor and, once the loop ends, the leaf count.
+        let (tree, source) = match tree_state::load(pool, self.chain_id).await? {
+            Some(row) => (self.resume_from(row)?, BootSource::TreeState),
+            None => (self.replay_notes(pool).await?, BootSource::Notes),
+        };
+        // Assigned together: the checkpoint is where a rollback lands, so it must
+        // never name a state older than the tree it is paired with.
+        self.checkpoint = tree.clone();
+        self.tree = tree;
+        self.publish();
+
+        // Seeds the accepted-root window from the chain's own advance history.
+        // Without it a restart narrows the window to the current root, and a
+        // wallet holding a proof against the previous one receives a 400 for a
+        // payload the pool would have accepted. Newest first, so the head is also
+        // the root the mirror must currently agree with.
+        let history = tree_advances::recent_roots(pool, self.chain_id, ROOT_HISTORY as i64).await?;
+
+        if let [latest, ..] = history.as_slice()
+            && self.tree.root().as_slice() != latest
+        {
+            return Err(AppError::Internal(format!(
+                "tree mirror diverges from chain on chain_id {}: {} holds {}, \
+                 but the chain last published {}",
+                self.chain_id,
+                source.as_str(),
+                field_to_hex(&self.tree.root()),
+                hex::encode(latest),
+            )));
+        }
+        for root in history.iter().rev() {
+            if let Ok(f) = vec_to_field(root) {
+                self.remember_root(f);
+            }
+        }
+
+        info!(
+            chain_id = self.chain_id,
+            leaves = self.tree.leaf_count(),
+            roots = self.recent_roots.len(),
+            source = source.as_str(),
+            "tree mirror ready"
+        );
+        Ok(())
+    }
+
+    /// Adopt fmd-indexer's stored frontier. `Frontier::resume` folds the slots
+    /// and refuses a `root` column that disagrees, so the cross-check the two
+    /// columns need lives in the constructor rather than here: a disagreement
+    /// means they were written from different states, and folding onto that
+    /// would put a root on the wire the chain never held.
+    fn resume_from(&self, row: TreeStateRow) -> AppResult<Frontier> {
+        // `leaf_count` is a signed column, so the conversion is checked rather
+        // than cast: a negative would otherwise wrap to a count past capacity and
+        // surface as the wrong complaint.
+        let leaves = u64::try_from(row.leaf_count)
+            .map_err(|_| self.tree_state_err(format!("negative leaf_count {}", row.leaf_count)))?;
+        let slots = decode_frontier(DEPTH, &row.frontier).map_err(|e| self.tree_state_err(e))?;
+        let root = vec_to_field(&row.root).map_err(|e| self.tree_state_err(e))?;
+        Frontier::resume(DEPTH, leaves, slots, root).map_err(|e| self.tree_state_err(e))
+    }
+
+    /// A complaint about this chain's `tree_state` row, tagged with the chain so
+    /// the boot failure names which one to look at.
+    fn tree_state_err(&self, detail: impl Display) -> AppError {
+        AppError::Internal(format!("tree_state chain {}: {detail}", self.chain_id))
+    }
+
+    /// Fold `notes` into a frontier, for a chain fmd-indexer has not written a
+    /// `tree_state` row for yet.
+    ///
+    /// Folds each page with [`Frontier::extend`] rather than a `push` loop: the
+    /// batch carries only completed groups up and folds the root once per page,
+    /// which is O(N) over the chain's whole history against `DEPTH` hashes per
+    /// leaf, and it holds a page rather than the 1.33 nodes per leaf a
+    /// [`MerkleTree`] would materialise for the same answer.
+    async fn replay_notes(&self, pool: &DbPool) -> AppResult<Frontier> {
+        info!(
+            chain_id = self.chain_id,
+            "no stored tree state; replaying notes"
+        );
+        let mut tree = Frontier::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
+        // `appended` doubles as the page cursor and, once the loop ends, the leaf
+        // count; the page query itself lives in `repositories::notes`.
         let mut appended: i64 = 0;
         loop {
-            let rows: Vec<LeafInputsRow> = notes::table
-                .filter(notes::chain_id.eq(self.chain_id))
-                .filter(notes::leaf_index.ge(appended))
-                .filter(notes::leaf_index.lt(appended + LEAF_PAGE))
-                .order(notes::leaf_index.asc())
-                .select(LeafInputsRow::as_select())
-                .load(&mut conn)
-                .await
-                .map_err(|e| AppError::Db(e.to_string()))?;
+            let rows = notes::leaf_page(pool, self.chain_id, appended, LEAF_PAGE).await?;
             if rows.is_empty() {
                 break;
             }
@@ -256,68 +362,20 @@ impl TreeMirror {
                 })
                 .collect::<AppResult<Vec<Field>>>()?;
             appended += rows.len() as i64;
-            self.tree
-                .extend(leaves)
+            tree.extend(leaves)
                 .map_err(|e| AppError::Internal(e.to_string()))?;
         }
-        self.publish();
-
-        // The latest `tree_advances.new_root` must match the local root.
-        let latest: Option<(Vec<u8>, i64)> = tree_advances::table
-            .filter(tree_advances::chain_id.eq(self.chain_id))
-            .order(tree_advances::start_index.desc())
-            .select((tree_advances::new_root, tree_advances::start_index))
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(|e| AppError::Db(e.to_string()))?;
-        // Seed the accepted-root window from the chain's own advance history.
-        // Without it a restart narrows the window to the current root, and a
-        // wallet holding a proof against the previous one receives a 400 for a
-        // payload the pool would have accepted.
-        let history: Vec<Vec<u8>> = tree_advances::table
-            .filter(tree_advances::chain_id.eq(self.chain_id))
-            .order(tree_advances::start_index.desc())
-            .limit(ROOT_HISTORY as i64)
-            .select(tree_advances::new_root)
-            .load(&mut conn)
-            .await
-            .map_err(|e| AppError::Db(e.to_string()))?;
-        for root in history.into_iter().rev() {
-            if let Ok(f) = vec_to_field(&root) {
-                self.remember_root(f);
-            }
-        }
-
-        info!(
-            chain_id = self.chain_id,
-            leaves = appended,
-            roots = self.recent_roots.len(),
-            "tree mirror replayed notes"
-        );
-        if let Some((expected_root, _)) = latest {
-            let local = self
-                .tree
-                .root()
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            if local.to_vec() != expected_root {
-                return Err(AppError::Internal(format!(
-                    "tree mirror diverges from chain on chain_id {}",
-                    self.chain_id
-                )));
-            }
-        }
-        Ok(())
+        Ok(tree)
     }
 
     pub fn committed_count(&self) -> u64 {
-        self.tree.leaf_count() as u64
+        self.tree.leaf_count()
     }
 
-    pub fn current_root(&self) -> AppResult<Field> {
-        self.tree
-            .root()
-            .map_err(|e| AppError::Internal(e.to_string()))
+    /// Infallible: a frontier carries its root rather than folding one on
+    /// demand, so there is no failure for a caller to handle.
+    pub fn current_root(&self) -> Field {
+        self.tree.root()
     }
 
     /// Insert `(cm, cv_dep)` pairs. The mirror hashes each pair into a leaf before
@@ -328,11 +386,12 @@ impl TreeMirror {
         cms: &[(Field, [U256; 2])],
     ) -> AppResult<(ReservedSlot, AdvancedState)> {
         self.check_usable()?;
-        let start_index = self.tree.leaf_count() as u64;
+        let start_index = self.tree.leaf_count();
 
         // Capacity first: a length check, so an oversized batch is refused without
-        // computing a single Poseidon.
-        if start_index as usize + cms.len() > MAX_LEAVES {
+        // computing a single Poseidon. Widened to `u64` rather than narrowing the
+        // leaf count to `usize`, so the comparison cannot truncate.
+        if start_index + cms.len() as u64 > MAX_LEAVES as u64 {
             return Err(AppError::BadRequest(format!(
                 "chain {}: tree is full ({} leaves, {} more requested, capacity {})",
                 self.chain_id,
@@ -353,24 +412,20 @@ impl TreeMirror {
             .map(|(cm, cv_dep)| leaf_hash(cm, cv_dep))
             .collect::<AppResult<Vec<Field>>>()?;
 
-        let old_root = self
-            .tree
-            .root()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let old_frontier = self
-            .tree
-            .frontier()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let old_root = self.tree.root();
+        let old_frontier = self.tree.slots();
+
+        // The state to return to if this batch does not land. Taken before the
+        // first push, since that is the last moment the mirror still matches the
+        // chain.
+        self.checkpoint = self.tree.clone();
 
         // Past this point the tree is mutated, so any failure must be unwound
         // rather than propagated directly; see `insert_all`.
         let inserted = self.insert_all(leaves)?;
         debug_assert_eq!(inserted, cms.len());
 
-        let new_root = self
-            .tree
-            .root()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let new_root = self.tree.root();
         self.publish();
         Ok((
             ReservedSlot {
@@ -383,13 +438,13 @@ impl TreeMirror {
     }
 
     /// Insert pre-hashed leaves, leaving the tree untouched if any insert fails.
-    /// `MerkleTree::insert` should not fail once capacity is checked, but a partial
+    /// `Frontier::push` should not fail once capacity is checked, but a partial
     /// batch is the state that desyncs a mirror permanently, so it is undone here
     /// and the mirror parked if that also fails.
     fn insert_all(&mut self, leaves: Vec<Field>) -> AppResult<usize> {
         let n = leaves.len();
         for (i, leaf) in leaves.into_iter().enumerate() {
-            if let Err(e) = self.tree.insert(leaf) {
+            if let Err(e) = self.tree.push(leaf) {
                 let cause = AppError::Internal(format!(
                     "chain {}: leaf {} of {} failed to insert: {}",
                     self.chain_id, i, n, e
@@ -422,7 +477,7 @@ impl TreeMirror {
             .await
             .map_err(|e| AppError::Rpc(format!("currentRoot: {}", e)))?
             ._0;
-        let local_root = self.current_root()?;
+        let local_root = self.current_root();
         if chain_root.0 != local_root {
             return Err(AppError::Internal(format!(
                 "tree mirror diverges from chain {}: local={} chain={} (DB likely stale; reset notes/tree_advances for this chain)",
@@ -442,25 +497,34 @@ impl TreeMirror {
     /// Undo `n` speculative leaves after a submission that provably never landed,
     /// where the node rejected the broadcast or the transaction reverted on chain.
     /// An ambiguous failure goes to `mark_desynced` instead.
+    ///
+    /// Restores the checkpoint rather than dropping leaves one by one: a frontier
+    /// keeps no record of what it folded, so the copy taken at reserve is the
+    /// only state a rollback can land on. `n` is therefore a check on the
+    /// caller's intent rather than an amount -- asking for any other number is
+    /// asking for a state neither this mirror nor the chain was ever in, which
+    /// subsumes the old "past the start" case, since nothing before the
+    /// checkpoint is reachable either.
     pub fn rollback(&mut self, n: usize) -> AppResult<()> {
         let before = self.tree.leaf_count();
-        if n > before {
+        let speculative = before - self.checkpoint.leaf_count();
+        if n as u64 != speculative {
             return Err(AppError::Internal(format!(
-                "rollback {} > leaf_count {} on chain {}",
-                n, before, self.chain_id
+                "chain {}: rollback of {} leaves, but {} are speculative ({} committed); \
+                 the mirror can only return to its last reserve",
+                self.chain_id,
+                n,
+                speculative,
+                self.checkpoint.leaf_count()
             )));
         }
-        // Captured before the truncation and retracted after it: the advance being
+        // Captured before the restore and retracted after it: the advance being
         // undone published a root the chain never held. Left in the accepted
         // window, a wallet that read it from `/chains` would pass
         // `check_known_root` and then revert `StaleOldRoot` on chain.
-        let speculative = self.tree.root().ok();
-        self.tree
-            .truncate_leaves(n)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        if let Some(root) = speculative {
-            self.forget_newest_root(&root);
-        }
+        let root = self.tree.root();
+        self.tree = self.checkpoint.clone();
+        self.forget_newest_root(&root);
         self.publish();
         info!(
             chain_id = self.chain_id,
@@ -474,7 +538,7 @@ impl TreeMirror {
 }
 
 pub fn vec_to_field(v: &[u8]) -> AppResult<Field> {
-    fmd_crypto::tree::field_from_bytes(v).map_err(|e| AppError::Internal(e.to_string()))
+    common_crypto::tree::field_from_bytes(v).map_err(|e| AppError::Internal(e.to_string()))
 }
 
 pub fn field_to_hex(f: &Field) -> String {

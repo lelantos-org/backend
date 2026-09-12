@@ -1,3 +1,5 @@
+//! Subscription registration, lookup and revocation.
+
 use crate::app::AppState;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::SubscriptionOut;
@@ -6,7 +8,7 @@ use crate::repositories::{
     notes,
     subscriptions::{self, SubscriptionRow},
 };
-use std::sync::Arc;
+use crate::services::cached;
 
 /// γ sets the false-positive rate at `2^-γ`. The circuit carries `out_clue_bits`
 /// as a PolyEval-bound public input with no in-circuit constraints, and the
@@ -48,30 +50,34 @@ pub async fn id_for_token(st: &AppState, token: &TokenHash) -> AppResult<i64> {
 ///
 /// `/v1/matches` needs both: the id to select rows and the watermark so the
 /// client knows how far its resume cursor may advance. See `MatchesPage`.
+/// Memoised for the cache TTL; see `AppCache::cursor_state` for why that is safe
+/// and what it costs. A miss that resolves to no row is *not* cached, so an
+/// unknown token cannot pin a negative entry.
 pub async fn cursor_state_for_token(st: &AppState, token: &TokenHash) -> AppResult<(i64, i64)> {
-    subscriptions::find_by_token(&st.pool, token)
-        .await?
-        .map(|row| (row.id, row.backfilled_through_note_id))
-        .ok_or_else(not_found)
+    let pool = st.pool.clone();
+    // One clone keys the entry, the other is what the miss looks up with.
+    let lookup = token.clone();
+    cached(
+        &st.cache.cursor_state,
+        "cursor_state",
+        token.clone(),
+        async move {
+            subscriptions::cursor_state_by_token(&pool, &lookup)
+                .await?
+                .ok_or_else(not_found)
+        },
+    )
+    .await
 }
 
 /// Total note count, memoised for the cache TTL. See `AppCache::note_count` for
 /// why this must not hit the database per request.
 async fn note_count(st: &AppState) -> AppResult<i64> {
     let pool = st.pool.clone();
-    let probe = shared::metrics::CacheProbe::new("note_count");
-    let miss = probe.marker();
-    let out = st
-        .cache
-        .note_count
-        .try_get_with((), async move {
-            miss.mark();
-            notes::count_all(&pool).await
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
-    probe.record();
-    out
+    cached(&st.cache.note_count, "note_count", (), async move {
+        notes::count_all(&pool).await
+    })
+    .await
 }
 
 /// Check γ against the protocol range and against the current note count,
@@ -156,7 +162,13 @@ pub async fn create(
 
 #[tracing::instrument(skip(st, token))]
 pub async fn delete(st: &AppState, token: &TokenHash) -> AppResult<()> {
-    match subscriptions::delete_by_token(&st.pool, token).await? {
+    let deleted = subscriptions::delete_by_token(&st.pool, token).await?;
+    // After the delete, and unconditionally: a concurrent request may have
+    // populated the entry while the statement was in flight, and evicting a key
+    // that was never cached is a no-op. Only this replica's copy goes; see
+    // `AppCache::cursor_state`.
+    st.cache.cursor_state.invalidate(token).await;
+    match deleted {
         0 => Err(not_found()),
         _ => Ok(()),
     }

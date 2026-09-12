@@ -12,10 +12,15 @@
 -- differencing two of these gives what a holder earned rather than what the
 -- venue paid less an estimate of the pool's cut.
 --
--- Written by the relayer, unlike every other table here, which the indexer
--- owns. It is a derived cache and nothing reads it but the rate estimate: it
--- can be truncated at any time, costing one window of history and no
--- correctness.
+-- Written by registry-webserver's venue-APY worker, unlike every other table
+-- here, which the indexer owns.
+--
+-- NOT truncatable. It was a derived cache serving only the rate estimate, where
+-- losing it cost one window of history and no correctness. It is now also the
+-- source for note cost basis, and the chain state each row was derived from is
+-- pruned — so a truncation permanently blanks the "of which earned" column for
+-- every note already held. Retention is tiered rather than windowed; see
+-- `yield_samples::thin`.
 CREATE TABLE asset_yield_sample (
     chain_id      BIGINT      NOT NULL,
     asset_id_u64  BIGINT      NOT NULL,

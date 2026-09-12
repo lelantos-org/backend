@@ -18,6 +18,7 @@ DATABASE_URL=postgres://... cargo run -p risk-webserver
 |-----|----------|---------|-------|
 | `DATABASE_URL` | yes | — | Postgres URL |
 | `RISK_BIND_ADDR` | no | `0.0.0.0:3004` | Listen address |
+| `METRICS_ADDR` | no | `127.0.0.1:3015` | Prometheus scrape listener |
 | `CACHE_TTL_S` | no | `60` | Verdict cache TTL (seconds) |
 
 ## Routes

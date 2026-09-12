@@ -36,7 +36,7 @@ use crate::domain::error::{AppError, AppResult};
 use crate::services::deposit_mempool::PendingDeposit;
 use crate::services::shielded_fee::FeeRecipient;
 use alloy::primitives::U256;
-use fmd_crypto::note::{self, NotePlaintext};
+use common_crypto::note::{self, NotePlaintext};
 use serde::Deserialize;
 
 /// What the fee leaf of one deposit turned out to be.
@@ -139,7 +139,7 @@ fn hex_bytes(s: &str) -> AppResult<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::adapters::parse::{FieldRef, parse_field};
-    use fmd_crypto::tree::Field;
+    use common_crypto::tree::Field;
     use serde::Deserialize;
     use serde_json::json;
 

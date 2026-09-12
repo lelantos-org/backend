@@ -12,9 +12,10 @@ publish = false
 shared = { path = "../shared" }
 database = { path = "../database" }
 chain-types = { path = "../chain-types" }
-fmd-crypto = { path = "../fmd-crypto" }
+common-crypto = { path = "../common-crypto" }
 fmd-indexer = { path = "../fmd-indexer" }
 explorer-indexer = { path = "../explorer-indexer" }
+protocol-indexer = { path = "../protocol-indexer" }
 fmd-webserver = { path = "../fmd-webserver" }
 explorer-webserver = { path = "../explorer-webserver" }
 

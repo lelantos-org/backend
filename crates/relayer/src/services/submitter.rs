@@ -100,10 +100,15 @@ impl Submitter {
         })
     }
 
-    /// Submit ABI-encoded calldata to the MASP pool and await one confirmation.
-    /// The pipeline picks the encoding — `flushBatch`, `transfer`, `withdraw` or
-    /// `withdrawNative` — and passes the bytes here, keeping this layer agnostic
-    /// of the call shape. None of the supported entry points are payable.
+    /// Submit ABI-encoded calldata to this submitter's target and await one
+    /// confirmation.
+    ///
+    /// The target is fixed at construction and is not always the pool: a native
+    /// unshield goes to the `NativeAdapter` and a swap to the `SwapWrapper`, each
+    /// of which is the pool's own caller. The pipeline picks the encoding —
+    /// `flushBatch`, `transfer`, `withdraw`, `withdrawNative` or `swap` — and
+    /// passes the bytes here, keeping this layer agnostic of the call shape. None
+    /// of the supported entry points are payable.
     ///
     /// The failure modes are distinct because the caller's tree-mirror rollback is
     /// sound only for some of them:

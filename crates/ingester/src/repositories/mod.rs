@@ -1,3 +1,5 @@
+//! Database I/O, one module per aggregate. Returns rows; decides nothing.
+
 pub mod atomic;
 pub mod block_hashes;
 pub mod chain_state;

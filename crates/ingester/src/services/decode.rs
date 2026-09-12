@@ -1,3 +1,5 @@
+//! Provider logs → insertable rows.
+
 use crate::adapters::rpc::BlockMeta;
 use crate::domain::error::{IngesterError, RpcError};
 use crate::domain::models::RawEvent;

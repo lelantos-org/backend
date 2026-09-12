@@ -1,15 +1,19 @@
+//! Per-(venue, chain) wiring, and the quote tail every venue shares.
+
+use crate::domain::error::AppError;
 use crate::domain::fees::{WRAPPER_OVERHEAD_GAS, max_deposit};
 use crate::domain::models::{Quote, QuoteRequest, Venue};
 use crate::domain::time::now_secs;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::RootProvider;
-use alloy::transports::http::{Client, Http};
+use chain_types::rpc::HttpTransport;
+use std::collections::HashMap;
 
 /// Per-chain venue wiring built by `app::state::build_state`. One instance per
 /// (venue, chain) pair: `quoter_addr` is the venue's on-chain quoter lens and
 /// `adapter_addr` the deployed `ISwapAdapter` the emitted route binds to.
 pub struct ChainSetup {
-    pub provider: RootProvider<Http<Client>>,
+    pub provider: RootProvider<HttpTransport>,
     pub quoter_addr: Address,
     pub adapter_addr: Address,
     /// MASP fee bps deducted from the venue's gross output before slippage.
@@ -45,5 +49,28 @@ impl ChainSetup {
             quoted_at: now_secs(),
             masp_fee_bps: self.masp_fee_bps,
         }
+    }
+}
+
+/// The chains one venue is wired for.
+///
+/// Both venue adapters answer `supports_chain` and their per-request lookup out
+/// of the same map, so the `UnsupportedChain` mapping lives here once rather
+/// than once per venue.
+pub struct ChainMap(HashMap<u64, ChainSetup>);
+
+impl ChainMap {
+    pub fn new(chains: HashMap<u64, ChainSetup>) -> Self {
+        Self(chains)
+    }
+
+    pub fn supports(&self, chain_id: u64) -> bool {
+        self.0.contains_key(&chain_id)
+    }
+
+    pub fn get(&self, chain_id: u64) -> Result<&ChainSetup, AppError> {
+        self.0
+            .get(&chain_id)
+            .ok_or(AppError::UnsupportedChain(chain_id))
     }
 }

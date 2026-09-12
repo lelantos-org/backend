@@ -33,6 +33,7 @@ use ingester::services::live::{LiveService, LiveServiceImpl};
 use ingester::services::log_range::LogWindow;
 use ingester::services::reorg::ReorgService;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use test_support::db_url;
 
@@ -196,10 +197,41 @@ fn cfg(chain_id: i64, start_block: i64) -> ChainConfig {
         block_poll_ms: 10,
         backfill_threshold: 1_000_000, // disable backfill path
         backfill_concurrency: 1,
+        log_concurrency: 4,
         chunk_blocks: 100,
         meta_concurrency: 4,
         rpc_timeout_ms: 5_000,
         rpc_connect_timeout_ms: 2_000,
+    }
+}
+
+/// Counts cursor reads on the way through to the real repository.
+///
+/// The live tail remembers where it left the cursor, so a steady tick is
+/// supposed to cost no read at all. That is invisible in the rows it writes,
+/// which is exactly why it needs pinning: a refactor can drop the memory and
+/// every other assertion in this file still passes.
+struct CountingChainState {
+    inner: Arc<dyn ChainStateRepo>,
+    fetches: AtomicUsize,
+}
+
+impl CountingChainState {
+    fn fetches(&self) -> usize {
+        // Fully qualified: `diesel_async::RunQueryDsl` is in scope and its `load`
+        // shadows the inherent one.
+        AtomicUsize::load(&self.fetches, Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ChainStateRepo for CountingChainState {
+    async fn fetch(&self, chain_id: i64) -> Result<Option<BlockCursor>, IngesterError> {
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        self.inner.fetch(chain_id).await
+    }
+    async fn advance_scanned(&self, chain_id: i64, scanned: i64) -> Result<(), IngesterError> {
+        self.inner.advance_scanned(chain_id, scanned).await
     }
 }
 
@@ -208,21 +240,34 @@ async fn live_ctx(
     rpc: &Arc<MockRpc>,
     cfg: ChainConfig,
 ) -> LiveServiceImpl {
+    live_ctx_counting(pool, rpc, cfg).await.0
+}
+
+/// `live_ctx`, plus a handle on how often the cursor was read from Postgres.
+async fn live_ctx_counting(
+    pool: &database::DbPool,
+    rpc: &Arc<MockRpc>,
+    cfg: ChainConfig,
+) -> (LiveServiceImpl, Arc<CountingChainState>) {
     let pool_addr = parse_address(&cfg.pool_address).unwrap();
     let writes = Arc::new(PostgresAtomicWriteRepo::new(pool.clone()));
     let raw_events = Arc::new(PostgresBlockHashRepo::new(pool.clone()));
-    let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
+    let chain_state = Arc::new(CountingChainState {
+        inner: Arc::new(PostgresChainStateRepo::new(pool.clone())),
+        fetches: AtomicUsize::new(0),
+    });
     let ingest = Arc::new(IngestService::new(writes.clone(), chain_state.clone()));
     let reorg = Arc::new(ReorgService::new(writes, raw_events));
-    LiveServiceImpl {
+    let live = LiveServiceImpl::new(
         cfg,
         pool_addr,
-        rpc: rpc.clone() as DynRpc,
-        chain_state,
+        rpc.clone() as DynRpc,
+        chain_state.clone(),
         ingest,
         reorg,
-        log_window: Arc::new(LogWindow::new()),
-    }
+        Arc::new(LogWindow::new(4)),
+    );
+    (live, chain_state)
 }
 
 async fn drain_ticks(ctx: &LiveServiceImpl, max: usize) -> Vec<TickOutcome> {
@@ -287,6 +332,58 @@ async fn single_chain_orders_rows() {
     let mut sorted = ids.clone();
     sorted.sort();
     assert_eq!(ids, sorted, "ids monotone");
+}
+
+/// The cursor is read once and then remembered. Without this the tail spends a
+/// round trip every poll being told what it already knows, which at a 250ms poll
+/// is most of what the tail does.
+#[tokio::test]
+async fn a_settled_tail_stops_reading_the_cursor() {
+    let (pool, _serial) = fresh_pool().await;
+    let rpc = Arc::new(MockRpc::new());
+    populate_blocks(&rpc, 100..=104, 0xa0);
+    let (ctx, chain_state) = live_ctx_counting(&pool, &rpc, cfg(1, 100)).await;
+
+    let _ = drain_ticks(&ctx, 5).await;
+    let after_catch_up = chain_state.fetches();
+    assert_eq!(
+        after_catch_up, 1,
+        "only the first tick has nothing to go on"
+    );
+
+    // Idle ticks: nothing to commit, and nothing to re-read either.
+    for _ in 0..5 {
+        assert!(matches!(ctx.tick().await.unwrap(), TickOutcome::Idle));
+    }
+    assert_eq!(
+        chain_state.fetches(),
+        after_catch_up,
+        "an idle tick must not go back to Postgres"
+    );
+}
+
+/// The memory is only sound while this service is the last thing to have moved
+/// the cursor, and the backfill moves it too. Entering live mode must therefore
+/// drop whatever is held, or the tail resumes from a watermark the catch-up has
+/// already passed and re-scans the gap.
+#[tokio::test]
+async fn entering_live_mode_forgets_a_stale_cursor() {
+    let (pool, _serial) = fresh_pool().await;
+    let rpc = Arc::new(MockRpc::new());
+    populate_blocks(&rpc, 100..=104, 0xa0);
+    let (ctx, chain_state) = live_ctx_counting(&pool, &rpc, cfg(1, 100)).await;
+
+    let _ = drain_ticks(&ctx, 5).await;
+    let settled = chain_state.fetches();
+
+    ctx.forget_cursor();
+
+    assert!(matches!(ctx.tick().await.unwrap(), TickOutcome::Idle));
+    assert_eq!(
+        chain_state.fetches(),
+        settled + 1,
+        "a reset tail must ask Postgres again"
+    );
 }
 
 #[tokio::test]
@@ -402,7 +499,7 @@ fn worker_deps(
     let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
     let ingest = Arc::new(IngestService::new(writes.clone(), chain_state.clone()));
     let reorg = Arc::new(ReorgService::new(writes, raw_events));
-    let log_window = Arc::new(LogWindow::new());
+    let log_window = Arc::new(LogWindow::new(cfg.log_concurrency));
     let backfill = Arc::new(BackfillService::new(
         rpc.clone() as DynRpc,
         ingest.clone(),
@@ -567,7 +664,7 @@ async fn advances_the_cursor_on_a_range_with_no_logs() {
 
 /// Postgres caps a statement at 65535 bind parameters and each row binds 10, so a
 /// single-statement insert tops out at 6553 rows, below what one backfill chunk
-/// over the default 50k blocks can produce.
+/// over the default 10k blocks can produce.
 #[tokio::test]
 async fn inserts_a_batch_larger_than_the_bind_parameter_limit() {
     let (pool, _serial) = fresh_pool().await;
@@ -668,11 +765,11 @@ async fn a_rewind_records_a_durable_reorg_marker() {
             .await
             .unwrap();
     }
-    let applied = database::reorg::apply_pending(&pool, "fmd", 1)
+    let applied = database::reorg::apply_pending(&pool, database::reorg::Owner::Fmd, 1)
         .await
         .unwrap();
     assert_eq!(applied, 1);
-    let again = database::reorg::apply_pending(&pool, "fmd", 1)
+    let again = database::reorg::apply_pending(&pool, database::reorg::Owner::Fmd, 1)
         .await
         .unwrap();
     assert_eq!(

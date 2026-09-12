@@ -18,13 +18,15 @@ use crate::domain::units::Scale;
 use crate::repositories::assets::AssetRow;
 use crate::services::asset_registry::AssetRegistry;
 use crate::services::fee_quote::FeeQuoter;
-use crate::services::prover::{Priority, TreeUpdateBatchProof, TreeUpdateBatchProver};
 use crate::services::shielded_fee::ShieldedFeeChecker;
+use crate::services::submitter::{SubmissionReceipt, Submitter};
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use crate::services::witness;
 use alloy::primitives::{Address, FixedBytes, U256};
+use groth16::{Priority, TreeUpdateBatchProof, TreeUpdateBatchProver};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::info;
 
 /// A spend inserts one leaf per transact output.
@@ -122,7 +124,7 @@ pub struct SpendInputs {
 
 impl SpendInputs {
     /// `(cm, cv_dep)` leaves in insertion order, as `TreeMirror` wants them.
-    pub fn leaves(&self) -> Vec<(fmd_crypto::tree::Field, [U256; 2])> {
+    pub fn leaves(&self) -> Vec<(common_crypto::tree::Field, [U256; 2])> {
         self.cms
             .iter()
             .zip(self.cv_deps.iter())
@@ -209,7 +211,7 @@ pub async fn prove_spend(
         &inputs.padded(),
     );
     let w = witness::build_spend(slot, advanced, &inputs.cms, &inputs.cv_deps, z);
-    prover.prove(w, Priority::Spend).await
+    Ok(prover.prove(w, Priority::Spend).await?)
 }
 
 /// Encode the `TreeUpdateBatch` public-inputs struct that both spend and swap
@@ -225,6 +227,72 @@ pub fn build_tu_pi_for_spend(
         &advanced.new_root,
         &inputs.padded(),
     )
+}
+
+/// What a single-transact submission needs in order to reach the chain.
+///
+/// The three dependencies the critical section below touches, plus the message it
+/// logs on taking the lock. Passed as a struct because `mirror`, `prover` and
+/// `submitter` are all borrowed from the calling pipeline and positional
+/// arguments of that shape read badly at the call site.
+#[derive(Clone, Copy)]
+pub struct SubmitStage<'a> {
+    pub mirror: &'a Mutex<TreeMirror>,
+    pub prover: &'a Arc<dyn TreeUpdateBatchProver>,
+    /// Whichever contract this entry point targets: the pool, the native adapter
+    /// or the swap wrapper.
+    pub submitter: &'a Submitter,
+    /// Logged with `leaf_count` once the mirror lock is taken. Per pipeline, so a
+    /// log reader can tell a spend from a swap.
+    pub start_msg: &'static str,
+}
+
+/// The critical section every single-transact pipeline runs, from the mirror lock
+/// to the receipt.
+///
+/// Spend and swap differ only in the calldata they encode; the state machine
+/// around it — take the lock, check the root, reserve the leaves, prove, submit,
+/// and unwind the speculative inserts on any failure — is identical, and every
+/// way of getting it wrong desyncs the chain's mirror. It is written once here so
+/// the two cannot drift apart.
+///
+/// The lock is held from reserve through the receipt. That is what serialises
+/// submissions within a chain, so two of them cannot interleave and reorder on
+/// chain and nonces stay sequential without explicit nonce management.
+///
+/// `encode` runs under the lock because the calldata embeds the slot the reserve
+/// just produced. Its failures unwind like any other: nothing has been signed at
+/// that point, so the speculative leaves must come back out.
+pub async fn reserve_prove_submit<E>(
+    stage: SubmitStage<'_>,
+    pi: &PubInputsDto,
+    inputs: &SpendInputs,
+    encode: E,
+) -> AppResult<SubmissionReceipt>
+where
+    E: FnOnce(&ReservedSlot, &AdvancedState, &TreeUpdateBatchProof) -> AppResult<Vec<u8>>,
+{
+    let mut mirror = stage.mirror.lock().await;
+    info!(leaf_count = mirror.committed_count(), "{}", stage.start_msg);
+    check_known_root(&mirror, pi)?;
+    let (slot, advanced) = mirror.reserve_and_advance_batch(&inputs.leaves())?;
+
+    // Past this point the mirror carries leaves the chain has not seen, so every
+    // exit unwinds them. A mirror left ahead fails `_validateBatchHeader`'s
+    // `startIndex == committedCount` check, and every later submission on the
+    // chain then reverts `BatchMisaligned`.
+    let tu_proof = match prove_spend(stage.prover, &slot, &advanced, inputs).await {
+        Ok(p) => p,
+        Err(e) => return Err(mirror.unwind(SPEND_LEAVES, e)),
+    };
+    let calldata = match encode(&slot, &advanced, &tu_proof) {
+        Ok(c) => c,
+        Err(e) => return Err(mirror.unwind(SPEND_LEAVES, e)),
+    };
+    match stage.submitter.submit(calldata).await {
+        Ok(receipt) => Ok(receipt),
+        Err(e) => Err(mirror.unwind(SPEND_LEAVES, e)),
+    }
 }
 
 /// One quote in, one quote per REGISTERED ASSET out.
@@ -378,6 +446,10 @@ mod tests {
             index_ray: None,
             perf_bps: None,
             buffer_bps: None,
+            apy_bps: None,
+            apy_window_s: None,
+            apy_measured_at: None,
+            vault_name: None,
         }
     }
 

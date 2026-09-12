@@ -1,10 +1,11 @@
 use crate::domain::address::NormalizedAddress;
-use crate::domain::error::AppResult;
+use crate::domain::dto::entries::ListEntriesQuery;
+use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::{EntryOut, MatchOut, ScreenOut};
 use crate::domain::risk::RiskLevel;
 use crate::repositories::screened_addresses::{EntryFilter, ScreenedAddressRepo, ScreenedRow};
-use moka::future::Cache;
-use std::collections::HashMap;
+use shared::cache::Cache;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,21 +38,30 @@ impl ScreeningService {
     /// clean, so the service never claims an address is unlisted when it could
     /// not read the list.
     pub async fn screen(&self, addrs: Vec<NormalizedAddress>) -> AppResult<Vec<Arc<ScreenOut>>> {
-        let mut out: Vec<Option<Arc<ScreenOut>>> = vec![None; addrs.len()];
-        let mut misses: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut verdicts: HashMap<NormalizedAddress, Arc<ScreenOut>> = HashMap::new();
+        // Miss set per chain, sorted and deduplicated by `BTreeSet`, so one
+        // request costs one query per chain however many addresses it repeats.
+        let mut misses: HashMap<&str, BTreeSet<&str>> = HashMap::new();
 
-        for (i, addr) in addrs.iter().enumerate() {
+        for addr in &addrs {
+            if verdicts.contains_key(addr) {
+                continue;
+            }
             match self.cache.get(addr).await {
-                Some(hit) => out[i] = Some(hit),
-                None => misses.entry(addr.chain.as_str()).or_default().push(i),
+                Some(hit) => {
+                    verdicts.insert(addr.clone(), hit);
+                }
+                None => {
+                    misses
+                        .entry(addr.chain.as_str())
+                        .or_default()
+                        .insert(addr.address.as_str());
+                }
             }
         }
 
-        for (chain, idxs) in misses {
-            let mut wanted: Vec<String> = idxs.iter().map(|&i| addrs[i].address.clone()).collect();
-            wanted.sort();
-            wanted.dedup();
-
+        for (chain, wanted) in misses {
+            let wanted: Vec<String> = wanted.into_iter().map(str::to_owned).collect();
             let rows = self.repo.find(chain, &wanted).await?;
             let mut by_address: HashMap<&str, Vec<&ScreenedRow>> = HashMap::new();
             for row in &rows {
@@ -61,36 +71,46 @@ impl ScreeningService {
                     .push(row);
             }
 
-            let mut built: HashMap<&str, Arc<ScreenOut>> = HashMap::new();
-            for address in &wanted {
+            for address in wanted {
                 let matched = by_address
                     .get(address.as_str())
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let verdict = Arc::new(build_verdict(chain, address, matched)?);
-                self.cache
-                    .insert(
-                        NormalizedAddress {
-                            chain: chain.to_string(),
-                            address: address.clone(),
-                        },
-                        verdict.clone(),
-                    )
-                    .await;
-                built.insert(address.as_str(), verdict);
-            }
-
-            for i in idxs {
-                out[i] = built.get(addrs[i].address.as_str()).cloned();
+                let verdict = Arc::new(build_verdict(chain, &address, matched)?);
+                let key = NormalizedAddress {
+                    chain: chain.to_string(),
+                    address,
+                };
+                self.cache.insert(key.clone(), verdict.clone()).await;
+                verdicts.insert(key, verdict);
             }
         }
 
-        // Every slot was either a cache hit or built above.
-        Ok(out.into_iter().flatten().collect())
+        // Every address was either a cache hit or built above, so the answer has
+        // one verdict per input in input order. The miss is still an error rather
+        // than a shorter list: dropping a slot would shift every later verdict
+        // onto the wrong address.
+        addrs
+            .iter()
+            .map(|addr| {
+                verdicts.get(addr).cloned().ok_or_else(|| {
+                    AppError::Internal("screening produced no verdict for an address".to_string())
+                })
+            })
+            .collect()
     }
 
-    pub async fn list_entries(&self, filter: EntryFilter) -> AppResult<Vec<EntryOut>> {
-        let rows = self.repo.list(filter).await?;
+    /// The audit listing, with the caller's paging clamped to the repo's bounds.
+    pub async fn list_entries(&self, query: ListEntriesQuery) -> AppResult<Vec<EntryOut>> {
+        let rows = self
+            .repo
+            .list(EntryFilter {
+                limit: query.clamped_limit(),
+                offset: query.clamped_offset(),
+                chain: query.chain,
+                source: query.source,
+            })
+            .await?;
         rows.into_iter()
             .map(|r| {
                 Ok(EntryOut {
@@ -133,7 +153,6 @@ fn build_verdict(chain: &str, address: &str, rows: &[&ScreenedRow]) -> AppResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::error::AppError;
     use crate::repositories::screened_addresses::MockScreenedAddressRepo;
     use chrono::{TimeZone, Utc};
 

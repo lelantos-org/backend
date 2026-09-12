@@ -106,6 +106,13 @@ preflight() {
 # Verifiers + MASP + mock tokens + NativeAdapter.
 deploy_core() {
     step "deploy core (MASP + verifiers + mock tokens)"
+    # Height before anything is deployed, so it is a floor no contract predates.
+    # rpc-proxy refuses historical state reads below this: nothing it serves
+    # existed then, and asking a paid archive node is the expensive way to learn
+    # that. A `cast` that is missing or fails leaves it empty, and the proxy
+    # simply runs without the floor.
+    DEPLOY_BLOCK=$(cast block-number --rpc-url "$RPC_URL" 2>/dev/null || echo "")
+    log "deploy_block=${DEPLOY_BLOCK:-<unknown>}"
     forge_script "DeployTest.s.sol:DeployTest"
     reload_addresses
 
@@ -192,9 +199,6 @@ fund_recipient() {
     done
 }
 
-# Write the env file that every backend's entrypoint sources. Each service
-# overlays these onto its TOML per-chain block (see `apply_env_overlay`) —
-# which only works because config/dev/*.toml declare a matching chain id.
 # The relayer's `accepted_fee_tokens`, as the JSON its env overlay parses.
 #
 # Every registered asset is listed: a payer can only pay the fee in the asset
@@ -215,6 +219,9 @@ fee_tokens_json() {
         "$(_token mWBTC "$TOKEN_3" 8)"
 }
 
+# Write the env file that every backend's entrypoint sources. Each service
+# overlays these onto its TOML per-chain block (see `apply_env_overlay`) —
+# which only works because config/*/*.toml declare a matching chain id.
 write_env_file() {
     step "write ${OUT_FILE}"
     # Values are single-quoted because this file is *sourced*
@@ -238,11 +245,8 @@ write_env_file() {
         # Enables `withdrawNative`; without it the relayer leaves
         # native_adapter_address unset and rejects native withdrawals.
         _emit RELAYER NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
-        # Served verbatim by `/chains`; wallets read it to build the Permit2
-        # AllowanceTransfer setup. DeployTest deploys a fresh Permit2 whenever
-        # the canonical address has no code, so its address moves with the
-        # deploy order — injected for the same reason as pool_address below.
-        _emit RELAYER PERMIT2_ADDRESS "$PERMIT2"
+        # No RELAYER PERMIT2_ADDRESS: the relayer never read it, and publishing
+        # it was the deployment's business. It is a REGISTRY var now, below.
         # `accepted_fee_tokens` is the one piece of per-chain relayer config
         # carrying ERC-20 addresses, which only exist once this script has run.
         _emit RELAYER ACCEPTED_FEE_TOKENS "$(fee_tokens_json)"
@@ -256,7 +260,62 @@ write_env_file() {
         # looping the relayer). Inject it instead so it cannot drift.
         _emit_for 31338 RELAYER POOL_ADDRESS "$MASP"
         _emit_for 31338 RELAYER RPC_URL "$RPC_URL"
-        _emit_for 31338 RELAYER PERMIT2_ADDRESS "$PERMIT2"
+
+        # The deployment half of the wallet's cross-check: registry-webserver
+        # publishes what the *deployment* says is on this chain, the relayer
+        # publishes what it actually writes to, and a wallet refuses a relayer
+        # whose answers disagree. Left uninjected, the registry serves the zero
+        # address from its TOML and that check can never pass.
+        _emit REGISTRY MASP_ADDRESS "$MASP"
+        # Wallets read this to build the Permit2 AllowanceTransfer setup.
+        # DeployTest deploys a fresh Permit2 whenever the canonical address has
+        # no code, so its address moves with the deploy order — injected for the
+        # same reason as pool_address above.
+        _emit REGISTRY PERMIT2_ADDRESS "$PERMIT2"
+        # The two contracts a wallet needs to offer native ETH and swaps at all.
+        # Deployment-wide, so the registry publishes them even though the relayer
+        # is separately configured with the same addresses to operate them.
+        _emit REGISTRY NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
+        _emit REGISTRY SWAP_WRAPPER_ADDRESS "$SWAP_WRAPPER"
+        # `apy_rpc_url` only — deliberately NOT `RPC_URL`. The registry's
+        # `rpc_url` is browser-facing and stays `http://localhost:8545` from the
+        # TOML; `http://anvil:8545` resolves only inside compose, so injecting it
+        # there would hand every wallet an endpoint it cannot reach. This one is
+        # the venue-APY worker's own endpoint, which runs inside the network.
+        _emit REGISTRY APY_RPC_URL "$RPC_URL"
+
+        # 31338 mirrors the relayer's second chain: same anvil, same pool, so
+        # the registry lists two chains and the frontend's switcher is reachable.
+        _emit_for 31338 REGISTRY MASP_ADDRESS "$MASP"
+        _emit_for 31338 REGISTRY PERMIT2_ADDRESS "$PERMIT2"
+        _emit_for 31338 REGISTRY NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
+        _emit_for 31338 REGISTRY SWAP_WRAPPER_ADDRESS "$SWAP_WRAPPER"
+        _emit_for 31338 REGISTRY APY_RPC_URL "$RPC_URL"
+
+        # The read proxy's contract allowlist. Unlike every other service, this
+        # one refuses a call to an address it was not told about — so a token or
+        # venue missing here is a balance that silently stops loading, not a
+        # warning. Emitted from the same variables the deploy logs produced, so
+        # the list cannot drift from what was actually deployed.
+        _emit RPC_PROXY MASP_ADDRESS "$MASP"
+        # Empty is read as unset by `config_env`, so a missing `cast` disables
+        # the floor rather than pinning it at block zero.
+        _emit RPC_PROXY DEPLOY_BLOCK "$DEPLOY_BLOCK"
+        _emit RPC_PROXY PERMIT2_ADDRESS "$PERMIT2"
+        _emit RPC_PROXY ERC20_SEED "${TOKEN_1},${TOKEN_2},${TOKEN_3}"
+        # ERC4626Venue addresses are CREATE-derived at deploy and appear in no
+        # config file at all; this is their only source.
+        _emit RPC_PROXY VENUE_SEED "${YIELD_VENUE_4},${YIELD_VENUE_5},${YIELD_VENUE_6}"
+
+        _emit_for 31338 RPC_PROXY MASP_ADDRESS "$MASP"
+        _emit_for 31338 RPC_PROXY DEPLOY_BLOCK "$DEPLOY_BLOCK"
+        _emit_for 31338 RPC_PROXY PERMIT2_ADDRESS "$PERMIT2"
+        _emit_for 31338 RPC_PROXY ERC20_SEED "${TOKEN_1},${TOKEN_2},${TOKEN_3}"
+        _emit_for 31338 RPC_PROXY VENUE_SEED "${YIELD_VENUE_4},${YIELD_VENUE_5},${YIELD_VENUE_6}"
+
+        # protocol-indexer reads ERC20 `decimals()` and polls `yieldState`.
+        # Its TOML declares the chain; this supplies the endpoint.
+        _emit PROTOCOL_INDEXER RPC_URL "$RPC_URL"
 
         _emit METAQUOTER RPC_URL "$RPC_URL"
         _emit METAQUOTER UNIV3_QUOTER "$UNIV3_QUOTER"

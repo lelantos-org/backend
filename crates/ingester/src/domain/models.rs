@@ -1,3 +1,8 @@
+//! The types one tick reads, writes and reports.
+//!
+//! Pure data plus the parsing that produces it; no IO and no database, so the
+//! layers above can share a shape without sharing a dependency.
+
 use crate::domain::error::IngesterError;
 use alloy::primitives::Address;
 use std::str::FromStr;
@@ -28,6 +33,30 @@ pub struct BlockCursor {
     pub last_block: i64,
     pub last_block_hash: Vec<u8>,
     pub last_scanned_block: i64,
+}
+
+/// A block height paired with the hash recorded for it.
+///
+/// The unit the reorg check compares: a height on its own says nothing about
+/// which branch it belongs to, and the two are never useful apart. Lives here
+/// rather than beside the reorg service because
+/// [`crate::repositories::BlockHashRepo`] reads these back out of `raw_events`,
+/// and a repository may not depend on a service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub block: i64,
+    pub hash: Vec<u8>,
+}
+
+/// Where a chain's scan stands: the cursor's watermark, or one block below
+/// `start_block` when nothing has been committed yet.
+///
+/// Both entry points size themselves from this — the live tail on its first
+/// tick, and the catch-up when it measures the lag — so the rule lives in one
+/// place. The `- 1` is load-bearing: the next block to scan is `watermark + 1`,
+/// so a chain configured to begin at `start_block` must sit one below it.
+pub fn scanned_watermark(cursor: Option<&BlockCursor>, start_block: i64) -> i64 {
+    cursor.map_or(start_block - 1, |c| c.last_scanned_block)
 }
 
 /// What one live tick accomplished.

@@ -1,245 +1,118 @@
-//! Tree-mirror service for `/v1/tree-state`.
+//! Tree state for `/v1/tree-state`.
 //!
-//! The canonical merkle tree mirrors the `notes` table ordered by `leaf_index`
-//! and is held per chain in `AppState.cache.tree`. Notes are append-only, so the
-//! mirror advances in place and each request hashes only the leaves added since
-//! the last one. Only a reorg can invalidate what is already there, and it is
-//! detected by the tip moving backwards.
+//! Read straight out of `tree_state`, which fmd-indexer advances as it commits
+//! leaves. This process holds no tree.
+//!
+//! It used to. Every replica mirrored the whole quaternary tree in memory and
+//! hashed every row of `notes` into it, which is ~180 MB per chain at the tree's
+//! capacity, paid the O(N) Poseidon cold build on the first request after a boot
+//! or a cache eviction, and could not be repaired at all once `notes` had a
+//! `leaf_index` hole -- which the indexer legitimately produces for a leaf whose
+//! ciphertext is too short to decode. The indexer sees the leaf the contract
+//! actually inserted, so it can fold a hole that no reader of `notes` can.
 
 use crate::app::AppState;
-use crate::app::cache::TreeMirror;
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::field::field_to_hex;
 use crate::domain::responses::TreeStateOut;
-use crate::repositories::notes;
-use crate::services::field::{bigdec_to_field, field_to_hex};
-use crate::services::poseidon::leaf_hash;
-use database::DbPool;
-use fmd_crypto::tree::{DEPTH, Field, MerkleTree};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-/// Leaves fetched per round trip while the mirror catches up.
-const LEAF_PAGE: i64 = 100_000;
-
-fn vec_to_field(v: &[u8]) -> AppResult<Field> {
-    fmd_crypto::tree::field_from_bytes(v).map_err(|e| AppError::Internal(e.to_string()))
-}
-
-/// Hash `rows` into leaves and append them to `tree`.
-///
-/// `rows` must start exactly at the current leaf count and be contiguous. The
-/// tree is positional, so a gap would shift every later leaf and produce a root
-/// no wallet could verify.
-fn append_leaves(tree: &mut MerkleTree, rows: &[notes::LeafInputsRow]) -> AppResult<()> {
-    let base = tree.leaf_count() as i64;
-    let mut leaves = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
-        let expected = base + i as i64;
-        if row.leaf_index != expected {
-            return Err(AppError::Internal(format!(
-                "tree desynced: note has leaf_index {} (expected {})",
-                row.leaf_index, expected
-            )));
-        }
-        let cm_f = vec_to_field(&row.cm)?;
-        let cv_x = bigdec_to_field(&row.cv_dep_x)?;
-        let cv_y = bigdec_to_field(&row.cv_dep_y)?;
-        leaves.push(leaf_hash(&cm_f, &cv_x, &cv_y)?);
-    }
-    tree.extend(leaves)
-        .map_err(|e| AppError::Internal(e.to_string()))
-}
-
-/// Count a rebuild from leaf 0 under the cause that forced it.
-///
-/// The `reason` dimension carries the signal: `tip_backwards` is a reorg the
-/// mirror survived, while `cold` is a full re-hash a warm mirror should not pay
-/// again. A bare total cannot distinguish them.
-fn record_rebuild(chain_id: i64, reason: &'static str) {
-    metrics::counter!(
-        shared::metrics::name::TREE_MIRROR_REBUILDS,
-        "chain_id" => chain_id.to_string(),
-        "reason" => reason,
-    )
-    .increment(1);
-}
-
-/// Bring this chain's mirror up to the current tip, hashing only new leaves.
-async fn sync_mirror(pool: &DbPool, chain_id: i64, mirror: &mut TreeMirror) -> AppResult<()> {
-    let started = std::time::Instant::now();
-    let tip = notes::max_leaf_index(pool, chain_id).await?;
-    let db_leaves = tip.map_or(0, |t| t + 1);
-    let have = mirror.tree.leaf_count() as i64;
-
-    // Only a reorg can remove leaves, and appending cannot repair the mirror in
-    // that case, so it is dropped and rebuilt from leaf 0.
-    if db_leaves < have {
-        tracing::warn!(
-            chain_id,
-            have,
-            db_leaves,
-            "notes tip moved backwards; rebuilding tree mirror"
-        );
-        record_rebuild(chain_id, "tip_backwards");
-        mirror.tree = MerkleTree::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
-    } else if have == 0 && db_leaves > 0 {
-        // An empty mirror with leaves to fold is the cold build: every leaf is
-        // hashed while holding the chain's mutex. The boot warm-up exists to move
-        // this off the request path.
-        record_rebuild(chain_id, "cold");
-    }
-
-    let from = mirror.tree.leaf_count() as i64;
-    // Published before the early return. This is a state gauge and the steady
-    // state is having nothing to append, so setting it only on the work path
-    // would make the series vanish for a caught-up chain.
-    metrics::gauge!(
-        shared::metrics::name::TREE_MIRROR_LEAVES,
-        "chain_id" => chain_id.to_string(),
-    )
-    .set(from as f64);
-    if from >= db_leaves {
-        return Ok(());
-    }
-
-    // Paged rather than one statement: a cold build for a chain with millions of
-    // notes would otherwise materialise every leaf at once, in the query and in
-    // the Vec it loads into. `append_leaves` re-reads the tree's leaf count on
-    // each call, so consecutive pages line up and the contiguity check still
-    // covers every leaf.
-    let mut appended = 0usize;
-    let mut next = from;
-    while next < db_leaves {
-        let rows = notes::list_leaf_inputs(pool, chain_id, next, Some(next + LEAF_PAGE)).await?;
-        // A short page means the tip moved under us or a leaf is missing; the
-        // latter fails the contiguity check on the next append.
-        if rows.is_empty() {
-            break;
-        }
-        next += rows.len() as i64;
-        appended += rows.len();
-        append_leaves(&mut mirror.tree, &rows)?;
-    }
-    tracing::debug!(
-        chain_id,
-        appended,
-        leaf_count = mirror.tree.leaf_count(),
-        "tree mirror advanced"
-    );
-
-    // Timed only on a path that did work: recording the no-op return above would
-    // bury the multi-second cold builds under a flood of zeros. Unlike the
-    // histogram, the gauge is re-set here to the post-append count.
-    let chain = chain_id.to_string();
-    metrics::histogram!(
-        shared::metrics::name::TREE_MIRROR_SYNC_DURATION,
-        "chain_id" => chain.clone(),
-    )
-    .record(started.elapsed().as_secs_f64());
-    metrics::gauge!(
-        shared::metrics::name::TREE_MIRROR_LEAVES,
-        "chain_id" => chain,
-    )
-    .set(mirror.tree.leaf_count() as f64);
-    Ok(())
-}
-
-/// The chain's mirror, created empty on first use. Callers lock it and call
-/// [`sync_mirror`] before reading.
-async fn mirror(st: &AppState, chain_id: i64) -> AppResult<Arc<Mutex<TreeMirror>>> {
-    let probe = shared::metrics::CacheProbe::new("tree");
-    let miss = probe.marker();
-    let out = st
-        .cache
-        .tree
-        .try_get_with(chain_id, async move {
-            miss.mark();
-            let tree = MerkleTree::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
-            Ok::<_, AppError>(Arc::new(Mutex::new(TreeMirror { tree })))
-        })
-        .await
-        .map_err(|e: Arc<AppError>| AppError::Internal(e.to_string()));
-    probe.record();
-    out
-}
+use crate::repositories::tree_state;
+use common_crypto::tree::{DEPTH, Frontier, decode_frontier, field_from_bytes};
 
 #[tracing::instrument(skip(st))]
 pub async fn tree_state(st: &AppState, chain_id: i64) -> AppResult<TreeStateOut> {
-    let cell = mirror(st, chain_id).await?;
-    let mut guard = cell.lock().await;
-    sync_mirror(&st.pool, chain_id, &mut guard).await?;
+    match tree_state::load(&st.pool, chain_id).await? {
+        Some(row) => out_of(chain_id, row.leaf_count, &row.root, &row.frontier),
+        None => empty(chain_id),
+    }
+}
 
-    let tree = &guard.tree;
-    let root = tree.root().map_err(|e| AppError::Internal(e.to_string()))?;
-    let frontier = tree
-        .frontier()
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+/// Map a stored row onto the wire form, rejecting a root or frontier that is not
+/// the width `DEPTH` implies.
+///
+/// Checked rather than assumed: the writer is a different process, and a
+/// truncated frontier would otherwise be served as a well-formed tree state for a
+/// tree that never existed, which no client can detect.
+fn out_of(chain_id: i64, leaf_count: i64, root: &[u8], frontier: &[u8]) -> AppResult<TreeStateOut> {
+    let root =
+        field_from_bytes(root).map_err(|e| AppError::Internal(format!("stored root: {e}")))?;
+    let frontier = decode_frontier(DEPTH, frontier)
+        .map_err(|e| AppError::Internal(format!("stored frontier: {e}")))?;
     Ok(TreeStateOut {
         chain_id,
-        leaf_count: tree.leaf_count() as i64,
+        leaf_count,
         root_hex: field_to_hex(&root),
-        frontier_hex: frontier
-            .iter()
-            .map(|row| row.iter().map(field_to_hex).collect())
-            .collect(),
+        frontier_hex: hex_rows(&frontier),
     })
+}
+
+/// A chain the indexer has not written yet: an empty tree, not an error.
+///
+/// The root is `zeros[DEPTH]` rather than 32 zero bytes -- an empty quaternary
+/// tree still hashes its way up -- so this is derived from a `Frontier` instead
+/// of written out, which keeps it correct if `DEPTH` ever moves.
+fn empty(chain_id: i64) -> AppResult<TreeStateOut> {
+    let empty = Frontier::new(DEPTH).map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(TreeStateOut {
+        chain_id,
+        leaf_count: 0,
+        root_hex: field_to_hex(&empty.root()),
+        frontier_hex: hex_rows(&empty.slots()),
+    })
+}
+
+fn hex_rows(frontier: &[[common_crypto::tree::Field; 3]]) -> Vec<Vec<String>> {
+    frontier
+        .iter()
+        .map(|row| row.iter().map(field_to_hex).collect())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bigdecimal::BigDecimal;
+    use common_crypto::tree::encode_frontier;
 
-    fn row(leaf_index: i64) -> notes::LeafInputsRow {
-        let mut cm = [0u8; 32];
-        cm[24..].copy_from_slice(&(leaf_index as u64).to_be_bytes());
-        notes::LeafInputsRow {
-            leaf_index,
-            cm: cm.to_vec(),
-            cv_dep_x: BigDecimal::from(leaf_index + 1),
-            cv_dep_y: BigDecimal::from(leaf_index + 2),
+    /// A tree with no leaves still has a root: `zeros[DEPTH]`, the fold of the
+    /// empty subtree up every level. Serving 32 zero bytes instead would be a
+    /// root no wallet can reproduce.
+    #[test]
+    fn an_absent_row_is_an_empty_tree_not_a_zero_root() {
+        let out = empty(7).unwrap();
+        assert_eq!(out.chain_id, 7);
+        assert_eq!(out.leaf_count, 0);
+        assert_ne!(out.root_hex, format!("0x{}", "00".repeat(32)));
+        assert_eq!(out.frontier_hex.len(), DEPTH);
+        assert!(out.frontier_hex.iter().all(|row| row.len() == 3));
+    }
+
+    /// What the indexer writes must come back out unchanged, in the layout the
+    /// SDK reads. This is the whole contract between the two processes.
+    #[test]
+    fn a_stored_row_round_trips_to_the_wire_form() {
+        let mut f = Frontier::new(DEPTH).unwrap();
+        for i in 0..37u64 {
+            let mut leaf = [0u8; 32];
+            leaf[24..].copy_from_slice(&i.to_be_bytes());
+            f.push(leaf).unwrap();
         }
-    }
+        let out = out_of(1, 37, &f.root(), &encode_frontier(&f.slots())).unwrap();
 
-    fn tree_of(rows: &[notes::LeafInputsRow]) -> MerkleTree {
-        let mut t = MerkleTree::new(DEPTH).unwrap();
-        append_leaves(&mut t, rows).unwrap();
-        t
-    }
-
-    /// Appending in slices must land on the same root as hashing every leaf in
-    /// one pass.
-    #[test]
-    fn incremental_append_matches_a_full_build() {
-        let all: Vec<_> = (0..40).map(row).collect();
-        let full = tree_of(&all);
-
-        let mut incremental = MerkleTree::new(DEPTH).unwrap();
-        for chunk in all.chunks(7) {
-            append_leaves(&mut incremental, chunk).unwrap();
-        }
-
-        assert_eq!(incremental.leaf_count(), full.leaf_count());
-        assert_eq!(incremental.root().unwrap(), full.root().unwrap());
-        assert_eq!(incremental.frontier().unwrap(), full.frontier().unwrap());
+        assert_eq!(out.leaf_count, 37);
+        assert_eq!(out.root_hex, field_to_hex(&f.root()));
+        assert_eq!(out.frontier_hex, hex_rows(&f.slots()));
+        assert_eq!(out.frontier_hex.len(), DEPTH);
     }
 
     #[test]
-    fn append_rejects_a_gap() {
-        let mut t = MerkleTree::new(DEPTH).unwrap();
-        append_leaves(&mut t, &[row(0), row(1)]).unwrap();
-
-        // leaf_index 3 while the tree holds 2 leaves: a missing note would shift
-        // every later leaf, so this must fail.
-        let err = append_leaves(&mut t, &[row(3)]).unwrap_err();
-        assert!(matches!(err, AppError::Internal(_)), "got {err:?}");
-        assert_eq!(t.leaf_count(), 2);
+    fn a_frontier_of_the_wrong_width_is_rejected() {
+        let root = [0u8; 32];
+        assert!(out_of(1, 0, &root, &vec![0u8; DEPTH * 3 * 32 - 1]).is_err());
+        assert!(out_of(1, 0, &root, &[]).is_err());
     }
 
     #[test]
-    fn append_rejects_a_replayed_leaf() {
-        let mut t = MerkleTree::new(DEPTH).unwrap();
-        append_leaves(&mut t, &[row(0), row(1)]).unwrap();
-        assert!(append_leaves(&mut t, &[row(1)]).is_err());
+    fn a_root_of_the_wrong_width_is_rejected() {
+        let frontier = vec![0u8; DEPTH * 3 * 32];
+        assert!(out_of(1, 0, &[0u8; 31], &frontier).is_err());
     }
 }
