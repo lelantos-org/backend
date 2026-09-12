@@ -71,6 +71,11 @@ impl PendingDeposit {
     /// the order is decided once. `_drainDeposit` reads the pair back at `2i` and
     /// `2i + 1` and rejects the batch if either is not a deposit leaf, so a
     /// transposition costs the whole batch its proof.
+    ///
+    /// A worthless fee note (`fee_in == 0`, e.g. a swap's output escrow) names
+    /// asset 0: the batch circuit pins `leaf_asset == 0 iff leaf_public_in == 0`
+    /// and `_drainDeposit` checks the same, so the deposit's asset there leaves
+    /// the witness unsatisfiable.
     pub fn leaves(&self) -> [EscrowLeaf; LEAVES_PER_DEPOSIT] {
         [
             EscrowLeaf {
@@ -83,7 +88,7 @@ impl PendingDeposit {
             EscrowLeaf {
                 cm: self.fee_cm,
                 cv_dep: self.fee_cv_dep,
-                asset_id: self.public_asset_id,
+                asset_id: if self.fee_in == 0 { 0 } else { self.public_asset_id },
                 public_in: self.fee_in,
                 rcv: self.fee_rcv,
             },
@@ -131,11 +136,22 @@ mod tests {
         assert_eq!(fee.rcv, d.fee_rcv);
     }
 
-    /// `_drainDeposit` requires both leaves to name the deposit's asset, and the
-    /// fee note has no asset field of its own.
+    /// A valued fee note is in the deposit's own asset, as `_drainDeposit`
+    /// requires; the fee note has no asset field of its own.
     #[test]
     fn test_both_leaves_carry_the_deposits_asset() {
         let d = deposit();
         assert!(d.leaves().iter().all(|l| l.asset_id == d.public_asset_id));
+    }
+
+    /// A zero-value fee note must name asset 0, or the batch circuit's
+    /// `asset == 0 iff value == 0` constraint rejects the witness.
+    #[test]
+    fn test_worthless_fee_note_names_asset_zero() {
+        let d = PendingDeposit { fee_in: 0, ..deposit() };
+        let [principal, fee] = d.leaves();
+
+        assert_eq!(principal.asset_id, d.public_asset_id);
+        assert_eq!(fee.asset_id, 0);
     }
 }
