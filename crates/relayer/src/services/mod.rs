@@ -1,21 +1,20 @@
 //! Layer 5: orchestration. Everything that combines repositories and adapters
-//! into one of the relayer's jobs — mirroring the tree, quoting and collecting
-//! fees, admitting submissions, and the three pipelines in `pipeline/` that
-//! prove and submit.
+//! into one of the relayer's jobs:
+//!
+//! - `tree/`: the per-chain commitment-tree mirror.
+//! - `admission/`: nullifier reservation and idempotent replay, before a
+//!   submission reaches a pipeline.
+//! - `transact_verifier/`: local verification of a wallet's transact proof.
+//! - `fees/`: quoting gas in fee tokens, and collecting shielded fees.
+//! - `pipeline/`: the spend, swap and flush pipelines and the per-chain batcher
+//!   that proves and submits their operations.
+//! - `submitter`, `witness` and `events`: sending transactions, building the
+//!   tree-update witness and publishing deposit lifecycle events.
 
-pub mod asset_registry;
-pub mod deposit_fee;
-pub mod deposit_mempool;
-pub mod escrow;
+pub mod admission;
 pub mod events;
-pub mod fee_quote;
-pub mod gas_estimator;
-pub mod gas_witness;
-pub mod idempotency;
-pub mod nullifier_guard;
-pub mod oracle;
+pub mod fees;
 pub mod pipeline;
-pub mod shielded_fee;
 pub mod submitter;
 pub mod transact_verifier;
 pub mod tree;

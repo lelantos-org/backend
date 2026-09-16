@@ -48,14 +48,14 @@ jobs:
               - 'crates/ingester/**'
             fmd-indexer:
               - 'crates/fmd-indexer/**'
-              - 'crates/common-crypto/**'
+              - 'crates/crypto/**'
             explorer-indexer:
               - 'crates/explorer-indexer/**'
             protocol-indexer:
               - 'crates/protocol-indexer/**'
             fmd-webserver:
               - 'crates/fmd-webserver/**'
-              - 'crates/common-crypto/**'
+              - 'crates/crypto/**'
             explorer-webserver:
               - 'crates/explorer-webserver/**'
             relayer:

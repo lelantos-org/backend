@@ -7,9 +7,7 @@ use crate::app::AppState;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::{NullifierChunkOut, RenderedChunk};
 use crate::repositories::nullifiers;
-use crate::services::chunks;
-
-pub use crate::services::chunks::CHUNK_SIZE;
+use crate::services::chunks::{self, CHUNK_SIZE};
 
 /// Width of a stored nullifier. A row of any other width is an upstream bug
 /// rather than input to be handled.

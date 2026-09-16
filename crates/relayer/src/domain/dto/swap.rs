@@ -40,6 +40,14 @@ pub struct SwapBlob {
     /// payloads. The swap pays the relayer on its withdraw leg, so this carries a
     /// zero-value note, which is still a leaf and still digest preimage.
     pub fee_aux_d: OutputAuxDto,
+    /// Deposit request for the refund note: the A note, in `token_in`, that the
+    /// wrapper escrows the unshield back into when the venue leg fails. `payer`
+    /// must equal the `swap_wrapper_address`, as for `deposit_d`.
+    pub refund_d: DepositRequestDto,
+    /// The refund deposit's own leaf.
+    pub refund_aux_d: OutputAuxDto,
+    /// The refund deposit's fee leaf.
+    pub refund_fee_aux_d: OutputAuxDto,
     pub token_in: String,
     pub token_out: String,
     /// Decimal U256 string. Must equal `pi_w.publicOut * scale`; the wrapper
@@ -47,10 +55,14 @@ pub struct SwapBlob {
     pub amount_in: String,
     /// Decimal U256 string. Wrapper enforces `actualOut >= minOut`.
     pub min_out: String,
-    /// Hard expiry in unix seconds. The wrapper reverts `SwapExpired` once
-    /// `block.timestamp > deadline`. `None` applies the relayer's default.
-    #[serde(default)]
-    pub deadline: Option<String>,
+    /// Hard expiry in unix seconds. Once `block.timestamp > deadline` the wrapper
+    /// refunds into `refund_d` instead of swapping. Bound into
+    /// `pubInputs.intentHash`, so the wallet must choose it.
+    pub deadline: String,
+    /// Where `SwapWrapper` refunds the output escrow if leg 2 is cancelled, 0x-hex.
+    /// Bound into `pubInputs.intentHash`. Must be an account able to move tokens:
+    /// never zero, the wrapper or this relayer's Bundler.
+    pub refund_to: String,
 }
 
 /// Mirror of `PubInputs.DepositRequest`.
@@ -74,6 +86,10 @@ pub struct DepositRequestDto {
     /// On the swap path this is a zero-value pad, since the swap already pays the
     /// relayer on its withdraw leg, but the leaf is still minted and still escrow
     /// digest preimage, so the fields must be carried.
+    ///
+    /// `fee_asset_id` is 0 when `fee_in` is 0. A valued fee note must be in
+    /// `public_asset_id`, since `SwapWrapper` escrows only that token.
+    pub fee_asset_id: u64,
     pub fee_in: u64,
     pub fee_cm: String,
     pub fee_cv_dep: [String; 2],

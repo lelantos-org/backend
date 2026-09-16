@@ -1,5 +1,6 @@
 use crate::app::AppState;
 use crate::handlers::http as handlers;
+use crate::services::pipeline::SUBMISSION_TIMEOUT;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
@@ -14,23 +15,23 @@ use tower_http::timeout::TimeoutLayer;
 /// otherwise buffer per request.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
-/// Deadline for a request/response route.
-///
-/// A submission takes the chain's tree-mirror mutex, held from reserve through
-/// confirmation, so a caller can wait behind another submission's proof and
-/// receipt. Without a deadline a stalled node parks it indefinitely. Sized above
-/// one submission's worst case, two `receipt_timeout_s` windows of 60 s each by
-/// default plus a proof, so it trips on a stuck server rather than a busy one.
+/// Deadline for a request/response route: [`SUBMISSION_TIMEOUT`], since a
+/// submission is the slowest thing one waits on. Without a deadline a stalled
+/// node parks it indefinitely.
 ///
 /// Answered 503 rather than the layer's default 408: the request was valid and
 /// the relayer was not, and 503 is what this service already returns for
 /// unavailable-retry-later (see `AppError::MirrorDesynced`).
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+///
+/// A timeout ends only the wait, not the submission: `submit::submit` runs it
+/// in a task of its own, so a retry under the same `Idempotency-Key` joins it and
+/// is answered with its transaction hash.
+const REQUEST_TIMEOUT: Duration = SUBMISSION_TIMEOUT;
 
 pub fn build(state: AppState) -> Router {
     // `.layer()` wraps the routes declared above it, so a new route belongs inside
     // this block; one added after the merge below escapes the deadline.
-    let timed = Router::new()
+    let mut timed = Router::new()
         // Never cacheable: `useSystemHealth` in the webapp polls this to decide
         // whether the relayer is reachable, and a cached answer would report a
         // dead relayer as up.
@@ -53,11 +54,28 @@ pub fn build(state: AppState) -> Router {
         .route("/v1/spend", post(handlers::submit_spend))
         .route("/v1/spend/estimate", post(handlers::estimate_spend))
         .route("/v1/swap", post(handlers::submit_swap))
-        .route("/v1/swap/estimate", post(handlers::estimate_swap))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::SERVICE_UNAVAILABLE,
-            REQUEST_TIMEOUT,
-        ));
+        .route("/v1/swap/estimate", post(handlers::estimate_swap));
+    // Absent unless configured, so a production relayer has no route that stalls
+    // its submissions.
+    if state.test_hooks {
+        timed = timed
+            .route(
+                "/test/bundler/{chain_id}/hold",
+                post(handlers::test_hooks::hold),
+            )
+            .route(
+                "/test/bundler/{chain_id}/queue",
+                get(handlers::test_hooks::queue),
+            )
+            .route(
+                "/test/bundler/{chain_id}/release",
+                post(handlers::test_hooks::release),
+            );
+    }
+    let timed = timed.layer(TimeoutLayer::with_status_code(
+        StatusCode::SERVICE_UNAVAILABLE,
+        REQUEST_TIMEOUT,
+    ));
 
     // Held outside the deadline: an SSE response is long-lived, and a timeout
     // would cut every subscriber off on a fixed interval.

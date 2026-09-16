@@ -1,6 +1,6 @@
 use crate::domain::error::AppResult;
 use database::DbPool;
-pub use database::models::TreeAdvanceRow;
+use database::models::TreeAdvanceRow;
 use database::schema::tree_advances;
 use diesel::prelude::*;
 use diesel::sql_query;

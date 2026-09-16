@@ -143,9 +143,12 @@ impl IngesterConfig {
     }
 
     /// Overlay env vars on top of TOML defaults, per chain. Convention:
-    ///   INGESTER_CHAIN_<id>_POOL_ADDRESS=0x…
-    ///   INGESTER_CHAIN_<id>_RPC_URL=http://…
-    ///   INGESTER_CHAIN_<id>_START_BLOCK=12345
+    ///
+    /// ```text
+    /// INGESTER_CHAIN_<id>_POOL_ADDRESS=0x…
+    /// INGESTER_CHAIN_<id>_RPC_URL=http://…
+    /// INGESTER_CHAIN_<id>_START_BLOCK=12345
+    /// ```
     ///
     /// A malformed `START_BLOCK` is an error rather than a fallback to the TOML
     /// value, so the process refuses to start instead of ingesting from the wrong

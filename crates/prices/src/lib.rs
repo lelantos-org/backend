@@ -6,8 +6,8 @@
 //!
 //! ```text
 //! token      TokenKey / TokenPrice   what every provider speaks
-//! provider   PriceProvider           the price-source interface
-//! providers  DefiLlama, …            one module per upstream
+//! providers  PriceProvider           the price-source interface, and
+//!            DefiLlama, …            one module per upstream
 //! service    PriceService            cache + ordered provider fallback
 //! convert    to_usd                  base units -> dollars
 //! ```
@@ -17,13 +17,11 @@
 //! plus one entry in the vector handed to [`PriceService::new`].
 
 pub mod convert;
-pub mod provider;
 pub mod providers;
 pub mod service;
 pub mod token;
 
 pub use convert::to_usd;
-pub use provider::PriceProvider;
-pub use providers::DefiLlama;
+pub use providers::{DefiLlama, PriceProvider};
 pub use service::PriceService;
 pub use token::{TokenKey, TokenPrice};

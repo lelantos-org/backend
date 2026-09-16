@@ -1,7 +1,7 @@
 //! The chain transport, from `chain_types::rpc`.
 //!
 //! The retry/backoff boilerplate this file used to hold was duplicated verbatim
-//! between the relayer and registry-webserver; it now lives in `chain-types`
+//! between the relayer and protocol-webserver; it now lives in `chain-types`
 //! behind its `rpc` feature. What stays here is the one thing that differs per
 //! service: the deadline.
 

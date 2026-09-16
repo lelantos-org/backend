@@ -3,10 +3,13 @@
 //! Each function takes the pool and returns rows; the orchestration that
 //! decides what to write lives in `services`.
 
+//!
+//! The `consumer_cursors` row is read and advanced through `database`'s shared
+//! `CursorRepo`, per `ARCHITECTURE.md`.
+
 pub mod asset_yield;
 pub mod assets;
-pub mod cursor;
-pub mod deposit_events;
+pub mod deposit_escrowed_events;
 pub mod tree_advances;
 
 use crate::domain::error::ProtocolIndexerError;

@@ -5,7 +5,7 @@
 //! unread slot cannot prove at all. The mirror is built to zero those slots
 //! (`Frontier::slots` masks them), and this is the test that the whole path
 //! agrees: `TreeMirror::reserve_and_advance_batch` reserves a slot,
-//! `witness::build_spend` turns it into circuit inputs, and `Groth16Prover`
+//! `witness::build` turns it into circuit inputs, and `Groth16Prover`
 //! computes the witness through the native `.wcd` graph, proves and verifies —
 //! the exact sequence a spend runs, with no hand-built frontier anywhere.
 //!
@@ -27,8 +27,9 @@ use std::path::Path;
 
 use alloy::primitives::{FixedBytes, U256};
 use groth16::{Groth16Prover, Priority, TreeUpdateBatchProver};
+use relayer::domain::batch::PaddedBatch;
 use relayer::services::tree::TreeMirror;
-use relayer::services::witness::build_spend;
+use relayer::services::witness;
 
 const CHAIN_ID: i64 = 31337;
 const MAX_L: usize = 8;
@@ -97,7 +98,8 @@ async fn relayer_witnesses_prove_at_every_frontier_shape() {
 
         let cms: Vec<FixedBytes<32>> = batch.iter().map(|(c, _)| FixedBytes::from(*c)).collect();
         let cv_deps: Vec<[U256; 2]> = batch.iter().map(|(_, cv)| *cv).collect();
-        let witness = build_spend(&slot, &advanced, &cms, &cv_deps, "1".to_string());
+        let batch = PaddedBatch::from_spend(&cms, &cv_deps);
+        let witness = witness::build(&slot, &advanced, &batch, "1".to_string());
 
         // `prove` verifies the proof it produced, so an unsatisfiable witness —
         // a stale unread frontier slot among them — fails here.
@@ -122,13 +124,8 @@ async fn relayer_witnesses_prove_at_every_frontier_shape() {
         "the mirror zeroes unread slots"
     );
     slot.old_frontier[0][1] = cm(999);
-    let witness = build_spend(
-        &slot,
-        &advanced,
-        &[FixedBytes::from(batch[0].0)],
-        &[batch[0].1],
-        "1".to_string(),
-    );
+    let padded = PaddedBatch::from_spend(&[FixedBytes::from(batch[0].0)], &[batch[0].1]);
+    let witness = witness::build(&slot, &advanced, &padded, "1".to_string());
     assert!(
         prover.prove(witness, Priority::Spend).await.is_err(),
         "a stale unread frontier slot must not prove"

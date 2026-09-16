@@ -24,7 +24,7 @@ rayon = { workspace = true }
 # ark 0.4 for the FMD crates, which `light-poseidon` holds back (see the root
 # Cargo.toml). These 0.6 crates and those 0.4 ones never exchange types, and
 # this crate is why the two versions can coexist without either side bending:
-# nothing here is reachable from `common-crypto` or from any crate that links it.
+# nothing here is reachable from `crypto` or from any crate that links it.
 #
 # `parallel` is stated on every ark crate that has it, rather than left to
 # arrive through `ark-groth16`'s defaults. It is load-bearing — without it every

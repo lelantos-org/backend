@@ -1,14 +1,24 @@
 use alloy::primitives::{Address, B256, U256};
 use alloy::sol_types::SolEvent;
 use chain_types::abi::{
-    AssetFeeSet, AssetMoved, AssetRegistered, DepositEscrowed, DepositFlushed, NotePayload,
-    RootAdvanced,
+    AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
+    NotePayload, RootAdvanced,
 };
 use chain_types::decode::{DecodedEvent, decode, event_kind_from_topic0, known_signatures};
 use shared::entities::EventKind;
 
 fn topic_bytes(t: &B256) -> Vec<u8> {
     t.0.to_vec()
+}
+
+/// Encode `ev` as its log, decode it back as `kind`, and return the one event
+/// that must come out: every kind decodes to exactly one.
+fn roundtrip<E: SolEvent>(kind: EventKind, ev: &E) -> DecodedEvent {
+    let log = ev.encode_log_data();
+    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
+    let mut decoded = decode(kind, &topics, &log.data).expect("decode");
+    assert_eq!(decoded.len(), 1, "one event per log");
+    decoded.remove(0)
 }
 
 #[test]
@@ -58,13 +68,7 @@ fn asset_moved_roundtrip() {
         publicIn: 1,
         publicOut: 0,
     };
-    let log = ev.encode_log_data();
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
-    let data = log.data.to_vec();
-
-    let decoded = decode(EventKind::AssetMoved, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 1);
-    match &decoded[0] {
+    match &roundtrip(EventKind::AssetMoved, &ev) {
         DecodedEvent::AssetMoved {
             asset_id,
             token: t,
@@ -99,14 +103,7 @@ fn note_payload_roundtrip() {
         cvDepX: U256::from(1001u64),
         cvDepY: U256::from(1002u64),
     };
-    let log = ev.encode_log_data();
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
-    let data = log.data.to_vec();
-
-    let decoded = decode(EventKind::NoteCreated, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 1, "one log per output leaf");
-
-    match &decoded[0] {
+    match &roundtrip(EventKind::NoteCreated, &ev) {
         DecodedEvent::NoteCreated {
             cm: c,
             clue_rx,
@@ -155,6 +152,7 @@ fn deposit_escrowed_roundtrip() {
         ephPubX: U256::from(13u64),
         ephPubY: U256::from(14u64),
         ciphertext: ct.clone().into(),
+        feeAssetId: 7,
         feeIn: 500,
         feeCm: fee_cm_v,
         feeCvDepX: U256::from(3001u64),
@@ -166,13 +164,7 @@ fn deposit_escrowed_roundtrip() {
         feeEphPubY: U256::from(24u64),
         feeCiphertext: fee_ct.clone().into(),
     };
-    let log = ev.encode_log_data();
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
-    let data = log.data.to_vec();
-
-    let decoded = decode(EventKind::DepositEscrowed, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 1);
-    match &decoded[0] {
+    match &roundtrip(EventKind::DepositEscrowed, &ev) {
         DecodedEvent::DepositEscrowed {
             id,
             payer: p,
@@ -209,6 +201,8 @@ fn deposit_escrowed_roundtrip() {
             // The fee note must survive the round trip intact: it is digest
             // preimage, so one dropped field makes the deposit unflushable rather
             // than merely mispriced.
+            // Distinct from `public_asset_id` (3): a cross-asset fee note.
+            assert_eq!(fee.fee_asset_id, 7);
             assert_eq!(fee.fee_in, 500);
             assert_eq!(fee.cm, fee_cm_v);
             assert_eq!(fee.cv_dep_x, U256::from(3001u64));
@@ -224,6 +218,36 @@ fn deposit_escrowed_roundtrip() {
     }
 }
 
+/// A two-token cancel: the deposit token and the fee token are refunded
+/// separately, and both amounts plus the fee asset must survive decoding.
+#[test]
+fn deposit_canceled_roundtrip() {
+    let payer = Address::repeat_byte(0x0c);
+    let ev = DepositCanceled {
+        id: U256::from(11u64),
+        payer,
+        refunded: U256::from(1_002_500u64),
+        feeAssetId: 5,
+        feeRefunded: U256::from(700u64),
+    };
+    match &roundtrip(EventKind::DepositCanceled, &ev) {
+        DecodedEvent::DepositCanceled {
+            id,
+            payer: p,
+            refunded,
+            fee_asset_id,
+            fee_refunded,
+        } => {
+            assert_eq!(*id, U256::from(11u64));
+            assert_eq!(*p, payer);
+            assert_eq!(*refunded, U256::from(1_002_500u64));
+            assert_eq!(*fee_asset_id, 5);
+            assert_eq!(*fee_refunded, U256::from(700u64));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
 #[test]
 fn deposit_flushed_roundtrip() {
     let cm = B256::repeat_byte(0x5a);
@@ -231,13 +255,7 @@ fn deposit_flushed_roundtrip() {
         id: U256::from(4u64),
         cm,
     };
-    let log = ev.encode_log_data();
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
-    let data = log.data.to_vec();
-
-    let decoded = decode(EventKind::DepositFlushed, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 1);
-    match &decoded[0] {
+    match &roundtrip(EventKind::DepositFlushed, &ev) {
         DecodedEvent::DepositFlushed { id, cm: c } => {
             assert_eq!(*id, U256::from(4u64));
             assert_eq!(*c, cm);
@@ -256,13 +274,7 @@ fn asset_fee_set_roundtrip() {
         depositBps: 0,
         withdrawBps: 20,
     };
-    let log = ev.encode_log_data();
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
-    let data = log.data.to_vec();
-
-    let decoded = decode(EventKind::AssetFeeSet, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 1);
-    match &decoded[0] {
+    match &roundtrip(EventKind::AssetFeeSet, &ev) {
         DecodedEvent::AssetFeeSet {
             asset_id,
             deposit_bps,
@@ -284,13 +296,7 @@ fn asset_registered_roundtrip() {
         token,
         scale: U256::from(1_000_000u64),
     };
-    let log = ev.encode_log_data();
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
-    let data = log.data.to_vec();
-
-    let decoded = decode(EventKind::AssetRegistered, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 1);
-    match &decoded[0] {
+    match &roundtrip(EventKind::AssetRegistered, &ev) {
         DecodedEvent::AssetRegistered {
             asset_id,
             token: t,
@@ -315,13 +321,7 @@ fn root_advanced_roundtrip() {
         oldRoot: old_root,
         newRoot: new_root,
     };
-    let log = ev.encode_log_data();
-    let topics: Vec<Vec<u8>> = log.topics().iter().map(topic_bytes).collect();
-    let data = log.data.to_vec();
-
-    let decoded = decode(EventKind::RootAdvanced, &topics, &data).expect("decode");
-    assert_eq!(decoded.len(), 1);
-    match &decoded[0] {
+    match &roundtrip(EventKind::RootAdvanced, &ev) {
         DecodedEvent::RootAdvanced {
             start_index,
             inserted,

@@ -1,6 +1,6 @@
 # Relayer — PROD template. Selected with STACK_ENV=prod; config/dev/ is the
-# default. Override secrets via env: RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,
-# SIGNER_KEY} — those only apply to chains declared below.
+# default. Override secrets via env: RELAYER_CHAIN_<id>_{POOL_ADDRESS,
+# BUNDLER_ADDRESS,RPC_URL,SIGNER_KEY} — those only apply to chains declared below.
 #
 # REQUIRED: the placeholder signer_key_hex below is all zeroes, which fails
 # secp256k1 validation in Submitter::new and aborts startup. This config does
@@ -14,7 +14,20 @@ listen_addr = "0.0.0.0:3003"
 chain_id = 42161
 rpc_url = "https://arb1.arbitrum.io/rpc"
 pool_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
+# REQUIRED: this relayer's Bundler (`BundlerFactory.create`, operator = the
+# signer below). Set RELAYER_CHAIN_42161_BUNDLER_ADDRESS once it is deployed.
+bundler_address = "0x0000000000000000000000000000000000000000"
+# Raise per the sizing in the relayer README once v0.15.0 proof times are
+# measured on this host.
+bundle_max_items = 1
+max_tx_bytes = 95000
 signer_key_hex = "0000000000000000000000000000000000000000000000000000000000000000"
+# Published by `/chains` as `refundAddress`: where a wallet with no EVM account
+# points a swap's `refundTo`, so a cancelled output escrow is refunded to an
+# account that can move it. Unset means the signer's address; set it (or
+# RELAYER_CHAIN_42161_REFUND_ADDRESS) to keep refunds off the hot key. Must not
+# be the Bundler or the swap wrapper.
+# refund_address = "0x..."
 receipt_timeout_s = 60
 flush_interval_s = 3
 # A deposit mints two leaves — the depositor's note and the note paying

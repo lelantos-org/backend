@@ -7,8 +7,8 @@
 //!
 //! Read-only. Writing `raw_events` is the ingester's alone.
 
-use crate::DbPool;
 use crate::schema::raw_events;
+use crate::{DbConn, DbPool};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use thiserror::Error;
@@ -41,7 +41,7 @@ pub struct RawEventRow {
     pub data: Vec<u8>,
 }
 
-async fn conn(pool: &DbPool) -> RawEventsResult<crate::DbConn<'_>> {
+async fn conn(pool: &DbPool) -> RawEventsResult<DbConn<'_>> {
     pool.get()
         .await
         .map_err(|e| RawEventsError::Pool(e.to_string()))
@@ -67,25 +67,6 @@ pub async fn batch_after(
         .filter(raw_events::event_kind.eq_any(kinds))
         .order(raw_events::id.asc())
         .limit(limit)
-        .select(RawEventRow::as_select())
-        .load(&mut conn)
-        .await?)
-}
-
-/// Every event sharing one transaction, ascending by log index.
-///
-/// No caller today; carried over with the rest of this module rather than
-/// dropped, since removing it is a separate decision from moving it.
-pub async fn siblings_by_tx(
-    pool: &DbPool,
-    chain_id: i64,
-    tx_hash: &[u8],
-) -> RawEventsResult<Vec<RawEventRow>> {
-    let mut conn = conn(pool).await?;
-    Ok(raw_events::table
-        .filter(raw_events::chain_id.eq(chain_id))
-        .filter(raw_events::tx_hash.eq(tx_hash))
-        .order(raw_events::log_index.asc())
         .select(RawEventRow::as_select())
         .load(&mut conn)
         .await?)

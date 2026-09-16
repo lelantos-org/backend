@@ -33,6 +33,7 @@ pub async fn recent(
                     tx_hash_hex: hex::encode(&r.tx_hash),
                     block_number: r.block_number,
                     block_ts: r.block_ts,
+                    log_index: r.log_index,
                     kind,
                     asset_id_u64: r.asset_id_u64,
                     // `whole_tokens_str`, so a dust amount renders plainly

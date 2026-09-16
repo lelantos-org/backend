@@ -49,7 +49,7 @@ pub struct ConsumeCtx {
 
 /// Consume one window of `raw_events` for `chain_id`.
 ///
-/// Retracts any pending reorg, decodes the whole window into a [`CommitPlan`],
+/// Retracts any pending reorg, decodes the whole window into a `CommitPlan`,
 /// applies it in one batched call per projection, gates the materialized-view
 /// rebuild, and only then advances the cursor — so a crash anywhere between the
 /// fetch and the commit replays the same window over idempotent writes.
@@ -147,11 +147,11 @@ fn cursor_row(chain_id: i64, last_event_id: i64, last_block_number: i64) -> Upse
 /// Move the cursor past the window just committed.
 ///
 /// `upsert_monotonic`, per the repo convention: a plain `upsert` would let a
-/// stale watermark overwrite a further one and replay an unbounded range. This
-/// crate takes no advisory lock, so two replicas can hold the same window at
-/// once and the guard is what keeps the slower one from dragging the watermark
-/// backwards. The returned flag is dropped: a refused advance means a further
-/// cursor already stands, which is the outcome this call wanted.
+/// stale watermark overwrite a further one and replay an unbounded range. The
+/// per-chain lock already makes this tick the only writer, so the guard is the
+/// backstop for a split brain rather than the thing preventing one. The
+/// returned flag is dropped: a refused advance means a further cursor already
+/// stands, which is the outcome this call wanted.
 async fn advance_cursor(
     cursors: &PostgresCursorRepo,
     chain_id: i64,

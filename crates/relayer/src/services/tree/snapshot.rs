@@ -3,7 +3,7 @@
 //! Its own module because it is the only part of the mirror read without the
 //! mutex, and the only part `/chains` touches.
 
-use common_crypto::tree::Field;
+use crypto::tree::Field;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Mirror readings published for `/chains` to read without the mutex.

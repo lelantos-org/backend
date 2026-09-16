@@ -59,7 +59,7 @@ costs no extra connection.
   for one live tick and `Policy::BACKFILL` for a backfill pass, both 8 attempts.
   Exhausting them surrenders the chain, which releases its advisory lock so a
   standby can take over.
-- The supervisor in `main` restarts a worker that lost its lock or failed, under
+- The supervisor (`handlers::worker::supervisor`) restarts a worker that lost its lock or failed, under
   `Policy::WORKER_RESTART` (10 attempts). If every restart is exhausted the
   process exits non-zero — a fully stalled ingester must not look healthy to its
   orchestrator.
@@ -143,3 +143,16 @@ Any key can be overridden per chain from the environment:
 `INGESTER_CHAIN_<id>_POOL_ADDRESS`, `INGESTER_CHAIN_<id>_RPC_URL`,
 `INGESTER_CHAIN_<id>_START_BLOCK`. A malformed `START_BLOCK` fails startup
 rather than silently falling back to the TOML value.
+
+## Layering
+
+Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Layer | What |
+|-------|------|
+| `app/` | Config, `WorkerDeps` wiring, build stamp |
+| `adapters/rpc/` | `ChainRpc` and its HTTP implementation, plus provider-error classification |
+| `domain/` | Rows, cursors and tick outcomes; `decode` turns provider logs into rows |
+| `repositories/` | `chain_state` cursor, `raw_events` hash reads, and the atomic commit/rewind writes |
+| `services/` | `live` tick, `backfill`, the shared `ingest` commit path, `reorg` detection and rewind, `log_range` adaptive windowing, `retry` policy |
+| `handlers/worker/` | `runner` (chain lock, catch-up/live alternation), `live` pacing, `supervisor` restarts |

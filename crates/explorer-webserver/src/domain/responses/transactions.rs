@@ -1,8 +1,9 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// What a transaction did. Mutually exclusive; see `repositories::transactions`
-/// for the contract-level derivation.
+/// What an operation did. Mutually exclusive per operation, not per transaction:
+/// one `Bundler` transaction can land several operations of any kinds. See
+/// `repositories::transactions` for the contract-level derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TxKind {
@@ -42,14 +43,21 @@ impl TxKind {
     }
 }
 
-/// One classified transaction.
+/// One classified operation.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TxOut {
     pub chain_id: i64,
+    /// Not unique across rows: a `Bundler` transaction holds several operations,
+    /// possibly of one kind. `(chainId, txHashHex, kind, logIndex)` is.
     pub tx_hash_hex: String,
     pub block_number: i64,
     pub block_ts: i64,
+    /// The log that identifies this operation within its transaction: the
+    /// `AssetMoved` of a withdrawal, the `DepositFlushed` of a deposit, the
+    /// `DepositEscrowed` of a pending deposit, the `RootAdvanced` of a transfer.
+    /// `null` only for a deposit flushed before the indexer recorded where.
+    pub log_index: Option<i32>,
     pub kind: TxKind,
     /// `null` for transfers, which move no public value.
     pub asset_id_u64: Option<i64>,

@@ -9,7 +9,6 @@ pub mod asset_yield;
 pub mod assets;
 pub mod locked;
 pub mod pool_notes;
-pub mod prices;
 pub mod transactions;
 pub mod tree_advances;
 

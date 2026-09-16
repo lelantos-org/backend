@@ -1,6 +1,6 @@
 # prices
 
-USD spot prices for ERC20 tokens, shared by registry-webserver (`/v1/prices`)
+USD spot prices for ERC20 tokens, shared by protocol-webserver (`/v1/prices`)
 and explorer-webserver (assets, flows, locked). A leaf library over `shared`: it
 imports no other internal crate, since a price is keyed by chain id and token
 address rather than by a stored row.

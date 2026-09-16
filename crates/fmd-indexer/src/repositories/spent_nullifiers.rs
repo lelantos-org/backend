@@ -1,4 +1,5 @@
-use crate::domain::error::{Result, log_unique_violation};
+use super::log_unique_violation;
+use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
 use database::schema::spent_nullifiers;
@@ -6,9 +7,7 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use std::collections::HashSet;
 
-/// The unnumbered row this repository takes. Defined in the planning domain and
-/// re-exported here, which is the path callers use.
-pub use crate::domain::pending::NewSpentNullifier;
+use crate::domain::pending::NewSpentNullifier;
 
 /// `NewSpentNullifier` plus the dense per-chain ordinal the repo assigns.
 /// `/v1/chains/{id}/nullifiers/chunks/*` slices on `seq`, mirroring

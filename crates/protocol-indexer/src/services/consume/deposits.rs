@@ -6,7 +6,9 @@
 //! database.
 
 use crate::domain::error::ProtocolIndexerError;
-use crate::repositories::deposit_events::{self, MarkCanceled, MarkFlushed, NewDepositEscrowed};
+use crate::repositories::deposit_escrowed_events::{
+    self, MarkCanceled, MarkFlushed, NewDepositEscrowed,
+};
 use alloy::primitives::{Address, B256, U256};
 use chain_types::decode::DepositFeeNote;
 use chain_types::numeric::u256_to_bigdecimal;
@@ -55,6 +57,7 @@ impl DepositPlan {
             cv_dep_y: u256_to_bigdecimal(cv_dep_y),
             rcv: u256_to_bigdecimal(rcv),
             aux,
+            fee_asset_id: fee.fee_asset_id as i64,
             fee_in: u256_to_bigdecimal(U256::from(fee.fee_in)),
             fee_cm: fee.cm.0.to_vec(),
             fee_cv_dep_x: u256_to_bigdecimal(fee.cv_dep_x),
@@ -88,6 +91,7 @@ impl DepositPlan {
             block_number: row.block_number,
             block_ts: row.block_ts,
             tx_hash: row.tx_hash.clone(),
+            log_index: row.log_index,
         });
     }
 
@@ -102,9 +106,9 @@ impl DepositPlan {
     pub async fn apply(&self, pool: &DbPool) -> Result<(), ProtocolIndexerError> {
         // Escrow before flush and cancel, which are `UPDATE`s keyed on the
         // deposit id this insert creates.
-        deposit_events::insert_batch(pool, &self.escrowed).await?;
-        deposit_events::mark_flushed_batch(pool, &self.flushed).await?;
-        deposit_events::mark_canceled_batch(pool, &self.canceled).await?;
+        deposit_escrowed_events::insert_batch(pool, &self.escrowed).await?;
+        deposit_escrowed_events::mark_flushed_batch(pool, &self.flushed).await?;
+        deposit_escrowed_events::mark_canceled_batch(pool, &self.canceled).await?;
         Ok(())
     }
 }

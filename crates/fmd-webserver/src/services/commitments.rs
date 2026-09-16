@@ -11,18 +11,13 @@ use crate::domain::field::{bigdec_to_field, bytes_to_field, field_to_hex};
 use crate::domain::poseidon::leaf_hash;
 use crate::domain::responses::{CommitmentChunkOut, CommitmentEntry, RenderedChunk};
 use crate::repositories::notes;
-use crate::services::chunks;
-
-pub use crate::services::chunks::CHUNK_SIZE;
+use crate::services::chunks::{self, CHUNK_SIZE};
 
 /// Reject a chunk whose `leaf_index` values are not `from, from+1, ...`.
 ///
 /// The tree is positional: a hole shifts every later leaf by one, so the client
 /// builds a root no wallet can verify and the failure surfaces later as a
 /// rejected proof.
-///
-/// `services::tree` makes the same check for the mirror behind `/v1/tree-state`;
-/// this check covers the feed clients build their tree from.
 fn ensure_dense(rows: &[notes::LeafInputsRow], from: i64) -> AppResult<()> {
     for (i, row) in rows.iter().enumerate() {
         let expected = from + i as i64;

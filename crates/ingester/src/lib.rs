@@ -6,7 +6,6 @@
 
 pub mod adapters;
 pub mod app;
-pub mod build_info;
 pub mod domain;
 pub mod handlers;
 pub mod repositories;

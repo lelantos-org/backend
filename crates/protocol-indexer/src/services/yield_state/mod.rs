@@ -12,14 +12,13 @@
 
 mod tick;
 
-pub use tick::{YieldStateCtx, tick_chain};
-
 use crate::adapters::masp::DynMaspYieldReader;
 use async_trait::async_trait;
 use database::DbPool;
 use shared::tick::TickProgress;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tick::YieldStateCtx;
 
 /// Owns its context rather than rebuilding one per tick.
 ///

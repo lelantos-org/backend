@@ -7,15 +7,10 @@
 //!
 //! Layered binary; see `backend/ARCHITECTURE.md`. Owns one ticking service
 //! (`ConsumeServiceImpl`) implementing `shared::tick::TickService`. Must not
-//! depend on `common-crypto`, which is the privacy gate.
+//! depend on `crypto`, which is the privacy gate.
 
 pub mod adapters;
 pub mod app;
 pub mod domain;
 pub mod repositories;
 pub mod services;
-
-// The three modules above used to sit at the crate root. Re-exported so the old
-// paths keep resolving.
-pub use app::{build_info, config};
-pub use domain::error;

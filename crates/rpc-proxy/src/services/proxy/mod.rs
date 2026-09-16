@@ -2,8 +2,8 @@
 //!
 //! Split in three. This module holds the service and the shape of one request:
 //! the rate-limit charge, the head warm-up, the allowlist it validates against,
-//! and what each outcome is counted as. [`plan`] decides how each call is
-//! served and puts the answers back together. [`fetch`] gets the values,
+//! and what each outcome is counted as. `plan` decides how each call is
+//! served and puts the answers back together. `fetch` gets the values,
 //! through the cache, the in-flight map and the upstream round trip.
 //!
 //! # Coalescing and batching

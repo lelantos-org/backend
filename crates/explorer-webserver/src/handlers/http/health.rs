@@ -1,4 +1,4 @@
-use crate::build_info;
+use crate::app::build_info;
 use axum::Json;
 use serde::Serialize;
 use utoipa::ToSchema;

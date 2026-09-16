@@ -1,4 +1,4 @@
-//! Layer 6: entry points. HTTP only; the flush worker's tick loop is driven
-//! from `app::state` rather than from here.
+//! Layer 6: entry points — the HTTP routes, and the flush worker's tick loop.
 
 pub mod http;
+pub mod worker;

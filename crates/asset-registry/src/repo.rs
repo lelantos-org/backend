@@ -15,39 +15,8 @@ async fn conn(pool: &DbPool) -> Result<DbConn<'_>> {
 
 /// Every registered asset on `chain_id`, lowest id first.
 pub async fn list_for_chain(pool: &DbPool, chain_id: i64) -> Result<Vec<AssetRow>> {
-    let mut conn = conn(pool).await?;
-    assets::table
-        .left_join(
-            asset_yield::table.on(asset_yield::chain_id
-                .eq(assets::chain_id)
-                .and(asset_yield::asset_id_u64.eq(assets::asset_id_u64))),
-        )
-        .filter(assets::chain_id.eq(chain_id))
-        .order(assets::asset_id_u64.asc())
-        .select((
-            assets::asset_id_u64,
-            assets::token,
-            assets::scale,
-            assets::decimals,
-            assets::symbol,
-            assets::deposit_bps,
-            assets::withdraw_bps,
-            asset_yield::venue.nullable(),
-            asset_yield::gross.nullable(),
-            asset_yield::total_normalized.nullable(),
-            asset_yield::accrued_fee_normalized.nullable(),
-            asset_yield::halted.nullable(),
-            asset_yield::index_ray.nullable(),
-            asset_yield::perf_bps.nullable(),
-            asset_yield::buffer_bps.nullable(),
-            asset_yield::apy_bps.nullable(),
-            asset_yield::apy_window_s.nullable(),
-            asset_yield::apy_measured_at.nullable(),
-            asset_yield::vault_name.nullable(),
-        ))
-        .load::<AssetRow>(&mut conn)
-        .await
-        .map_err(|e| Error::Db(e.to_string()))
+    let rows = list_keyed(pool, Some(&[chain_id])).await?;
+    Ok(rows.into_iter().map(|(_, row)| row).collect())
 }
 
 /// Every registered asset on each of `chain_ids`, ordered by `(chain_id,

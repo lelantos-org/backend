@@ -5,11 +5,10 @@
 //! balances, tree advances, classified transactions, withdrawal anonymity sets,
 //! pool occupancy and yield state. Errors come from `shared::http`.
 //!
-//! Must not depend on `common-crypto`, which is the privacy gate. It is a
+//! Must not depend on `crypto`, which is the privacy gate. It is a
 //! convention, not a CI check, so a new dependency edge has to be caught in
 //! review.
 
-pub mod adapters;
 pub mod app;
 pub mod domain;
 pub mod handlers;

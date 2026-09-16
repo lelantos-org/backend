@@ -85,14 +85,6 @@ impl PoolCfg {
     /// preset's absolute value, so a pool sized up for more workers would keep
     /// warming the same two connections. Resizing belongs here, next to the
     /// ratio it has to preserve.
-    /// Override the statement deadline, or remove it with `None`.
-    pub const fn with_statement_timeout(self, statement_timeout: Option<Duration>) -> Self {
-        Self {
-            statement_timeout,
-            ..self
-        }
-    }
-
     pub const fn with_max_size(self, max_size: u32) -> Self {
         let max_size = if max_size == 0 { 1 } else { max_size };
         Self {
@@ -202,18 +194,6 @@ mod tests {
     #[test]
     fn the_request_path_is_bounded_tighter_than_the_tick_loop() {
         assert!(PoolCfg::webserver().statement_timeout < PoolCfg::indexer().statement_timeout);
-    }
-
-    #[test]
-    fn the_deadline_can_be_overridden_and_removed() {
-        let cfg = PoolCfg::webserver().with_statement_timeout(Some(Duration::from_secs(1)));
-        assert_eq!(cfg.statement_timeout, Some(Duration::from_secs(1)));
-        assert_eq!(
-            PoolCfg::webserver()
-                .with_statement_timeout(None)
-                .statement_timeout,
-            None
-        );
     }
 
     /// bb8 rejects a zero pool, and a pool that warms nothing pays a connect on

@@ -2,11 +2,18 @@
 //!
 //! Wraps the per-chain tick logic in a trait so `main` can run it through
 //! `shared::tick`, mirroring fmd-indexer.
+//!
+//! One module per projection — `flows`, `yield_fees` — building its rows from a
+//! decoded event. `events` is the routing table between the two, `plan` the
+//! container and its writes, `tick` the loop and [`RefreshGate`] the
+//! materialized-view gate.
 
 mod events;
+mod flows;
 mod plan;
 mod refresh;
 mod tick;
+mod yield_fees;
 
 pub use refresh::RefreshGate;
 pub use tick::{ConsumeCtx, tick_chain};
@@ -25,7 +32,7 @@ pub trait ConsumeService: Send + Sync {
 }
 
 pub struct ConsumeServiceImpl {
-    pub pool: DbPool,
+    pool: DbPool,
     /// Shared by every chain: the views are global, so one refresh serves all of
     /// them. See [`RefreshGate`].
     refresh: Arc<RefreshGate>,
@@ -41,11 +48,6 @@ impl ConsumeServiceImpl {
             refresh: Arc::new(RefreshGate::new()),
             locks,
         }
-    }
-
-    /// Unlocked, for single-process tests. See [`ChainLocks::disabled`].
-    pub fn unlocked(pool: DbPool) -> Self {
-        Self::new(pool, Arc::new(ChainLocks::disabled()))
     }
 
     fn ctx(&self) -> ConsumeCtx {

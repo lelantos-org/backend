@@ -1,8 +1,8 @@
 //! One chain's worker: [`runner`] holds the chain lock and alternates catch-up
-//! with the live tail, which [`live`] paces.
+//! with the live tail, which [`live`] paces; [`supervisor`] restarts it.
 
 pub mod live;
 pub mod runner;
+pub mod supervisor;
 
-pub use live::LiveExit;
-pub use runner::{WorkerExit, run, run_inner};
+pub use runner::{WorkerExit, run};

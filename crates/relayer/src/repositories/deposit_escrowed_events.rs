@@ -1,0 +1,272 @@
+//! Database-backed query layer for pending escrowed deposits. Stateless: each
+//! call re-reads the canonical event ledger written by `explorer-indexer`.
+//!
+//! A deposit is pending when it is neither flushed nor canceled. Ordering by
+//! `submitted_at_block` drains older deposits first.
+//!
+//! The flush worker cannot batch every pending deposit — some are quarantined,
+//! some deferred (see `DepositFailures`) — so [`DepositMempool::pop_pending`]
+//! scans forward past those rather than taking the oldest `limit` rows and
+//! filtering afterwards. Filtering afterwards is what starves a chain: the
+//! unbatchable deposits are the oldest by construction, so they would fill the
+//! window every tick and the payable deposits behind them would never be
+//! reached.
+
+use crate::domain::deposit::PendingDeposit;
+use crate::domain::error::{AppError, AppResult};
+use crate::repositories::conn;
+use crate::repositories::numeric::bigdecimal_to_u64;
+use ::asset_registry::bigdecimal_to_u256;
+use bigdecimal::BigDecimal;
+use bigdecimal::FromPrimitive;
+use database::DbPool;
+use database::schema::deposit_escrowed_events;
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
+use serde_json::Value as JsonValue;
+use std::collections::HashSet;
+use tracing::warn;
+
+/// Rows one `pop_pending` page reads. Large enough that the usual tick — nothing
+/// excluded — takes a single query, small enough that a backlog of excluded
+/// deposits is walked in bounded steps.
+const SCAN_PAGE_ROWS: usize = 64;
+
+/// The `pop_pending` projection, narrower than the table: the flush path needs
+/// the escrow digest preimage and the leaf and nothing else.
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = deposit_escrowed_events)]
+struct DepositRow {
+    deposit_id: BigDecimal,
+    cm: Vec<u8>,
+    public_asset_id: i64,
+    public_in: BigDecimal,
+    fee_bps_at_submit: i32,
+    payer: Vec<u8>,
+    submitted_at_block: i64,
+    cv_dep_x: BigDecimal,
+    cv_dep_y: BigDecimal,
+    rcv: BigDecimal,
+    fee_asset_id: i64,
+    fee_in: BigDecimal,
+    fee_cm: Vec<u8>,
+    fee_cv_dep_x: BigDecimal,
+    fee_cv_dep_y: BigDecimal,
+    fee_rcv: BigDecimal,
+    fee_aux: JsonValue,
+}
+
+impl TryFrom<DepositRow> for PendingDeposit {
+    type Error = AppError;
+
+    fn try_from(r: DepositRow) -> AppResult<Self> {
+        let id = bigdecimal_to_u64(&r.deposit_id)?;
+        Ok(PendingDeposit {
+            id,
+            cm: fixed_bytes(&r.cm, "cm")?,
+            public_asset_id: r.public_asset_id as u64,
+            public_in: bigdecimal_to_u64(&r.public_in)?,
+            fee_bps_at_submit: u16::try_from(r.fee_bps_at_submit).map_err(|_| {
+                AppError::Internal(format!(
+                    "deposit {id}: fee_bps_at_submit {} out of u16 range",
+                    r.fee_bps_at_submit
+                ))
+            })?,
+            payer: fixed_bytes(&r.payer, "payer")?,
+            // The contract hashed `uint32(block.number)`, so anything wider cannot
+            // match the stored digest.
+            submitted_at: u32::try_from(r.submitted_at_block).map_err(|_| {
+                AppError::Internal(format!(
+                    "deposit {id}: submitted_at_block {} out of u32 range",
+                    r.submitted_at_block
+                ))
+            })?,
+            cv_dep: [
+                bigdecimal_to_u256(&r.cv_dep_x)?,
+                bigdecimal_to_u256(&r.cv_dep_y)?,
+            ],
+            rcv: bigdecimal_to_u256(&r.rcv)?,
+            // Like `public_asset_id`, a `uint64` the indexer stores bit-for-bit in
+            // a `BIGINT`, so an id at or above 2^63 reads back negative.
+            fee_asset_id: r.fee_asset_id as u64,
+            // The contract narrows `feeIn` to `uint48` before hashing it, so a
+            // wider value could not have been escrowed.
+            fee_in: bigdecimal_to_u64(&r.fee_in)?,
+            fee_cm: fixed_bytes(&r.fee_cm, "fee_cm")?,
+            fee_cv_dep: [
+                bigdecimal_to_u256(&r.fee_cv_dep_x)?,
+                bigdecimal_to_u256(&r.fee_cv_dep_y)?,
+            ],
+            fee_rcv: bigdecimal_to_u256(&r.fee_rcv)?,
+            fee_aux: r.fee_aux,
+        })
+    }
+}
+
+pub struct DepositMempool {
+    pool: DbPool,
+    chain_id: i64,
+}
+
+impl DepositMempool {
+    pub fn new(pool: DbPool, chain_id: i64) -> Self {
+        Self { pool, chain_id }
+    }
+
+    /// Return up to `limit` batchable pending deposits on this chain, oldest
+    /// first, looking past every id in `exclude`.
+    ///
+    /// `max_scan` bounds the work: at most that many pending rows are read, so a
+    /// chain whose head is a long run of excluded deposits costs a fixed number
+    /// of paged queries per tick rather than a full table scan. Returning fewer
+    /// than `limit` after `max_scan` rows is normal — the next tick resumes from
+    /// the head and the excluded ones are gone by then, since a deferral that has
+    /// not come due is excluded and a quarantine is permanent.
+    ///
+    /// The scan pages by `(submitted_at_block, deposit_id)`, the same key it
+    /// orders on, so no row is read twice and none is stepped over. Excluded ids
+    /// are filtered here rather than in SQL: the set is unbounded — one entry per
+    /// deposit this relayer will not currently flush — and a `NOT IN` of that
+    /// width would be re-planned every tick.
+    pub async fn pop_pending(
+        &self,
+        limit: usize,
+        exclude: &HashSet<u64>,
+        max_scan: usize,
+    ) -> AppResult<Vec<PendingDeposit>> {
+        let mut conn = conn(&self.pool).await?;
+
+        let mut out: Vec<PendingDeposit> = Vec::with_capacity(limit);
+        let mut scanned = 0usize;
+        // Exclusive lower bound on the order key, advanced to the last row of each
+        // page.
+        let mut after: Option<(i64, BigDecimal)> = None;
+
+        while out.len() < limit && scanned < max_scan {
+            let page = SCAN_PAGE_ROWS.max(limit).min(max_scan - scanned);
+            let mut query = deposit_escrowed_events::table
+                .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
+                .filter(deposit_escrowed_events::flushed_at_block.is_null())
+                .filter(deposit_escrowed_events::canceled_at_block.is_null())
+                .into_boxed();
+            if let Some((block, id)) = after.as_ref() {
+                query = query.filter(
+                    deposit_escrowed_events::submitted_at_block.gt(block).or(
+                        deposit_escrowed_events::submitted_at_block
+                            .eq(block)
+                            .and(deposit_escrowed_events::deposit_id.gt(id)),
+                    ),
+                );
+            }
+            let rows: Vec<DepositRow> = query
+                // `deposit_id` breaks ties inside a block. Without it, the subset a
+                // limited flush picks, and the leaf order it commits, would be whatever
+                // the planner returned — and the scan key below would not be unique.
+                .order((
+                    deposit_escrowed_events::submitted_at_block.asc(),
+                    deposit_escrowed_events::deposit_id.asc(),
+                ))
+                .limit(page as i64)
+                .select(DepositRow::as_select())
+                .load(&mut conn)
+                .await
+                .map_err(|e| AppError::Db(e.to_string()))?;
+
+            let exhausted = rows.len() < page;
+            for row in rows {
+                scanned += 1;
+                after = Some((row.submitted_at_block, row.deposit_id.clone()));
+                let id_bd = row.deposit_id.clone();
+                match PendingDeposit::try_from(row) {
+                    Ok(d) => {
+                        if exclude.contains(&d.id) {
+                            continue;
+                        }
+                        out.push(d);
+                        if out.len() == limit {
+                            break;
+                        }
+                    }
+                    // One unreadable row must not fail the query: the flush worker
+                    // re-runs the same query every tick, so a single malformed row
+                    // would stop the chain flushing at all.
+                    Err(e) => warn!(
+                        chain_id = self.chain_id,
+                        deposit_id = %id_bd,
+                        error = %e,
+                        "skipping unreadable pending deposit row"
+                    ),
+                }
+            }
+            if exhausted {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Mark `ids` as flushed at `block_number`. Idempotent: the indexer later
+    /// overwrites this with the canonical `DepositFlushed` block number, but the
+    /// optimistic write keeps them out of `pop_pending` meanwhile.
+    ///
+    /// Returns the number of rows claimed. A short count means some ids stopped
+    /// being unflushed between `pop_pending` and here, usually because the indexer
+    /// wrote the canonical `DepositFlushed` row first: it writes unconditionally,
+    /// and `submit` returns only after one confirmation. The other cause is a
+    /// second relayer on this chain, which `pop_pending`'s plain SELECT does not
+    /// guard against; `count_unflushed` distinguishes the two.
+    pub async fn mark_submitted(&self, ids: &[u64], block_number: i64) -> AppResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = conn(&self.pool).await?;
+        let id_bds = to_id_bds(ids)?;
+        let n = diesel::update(
+            deposit_escrowed_events::table
+                .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
+                .filter(deposit_escrowed_events::deposit_id.eq_any(id_bds))
+                .filter(deposit_escrowed_events::flushed_at_block.is_null()),
+        )
+        .set(deposit_escrowed_events::flushed_at_block.eq(Some(block_number)))
+        .execute(&mut conn)
+        .await
+        .map_err(|e| AppError::Db(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// How many of `ids` still carry no `flushed_at_block`. Zero after a short
+    /// `mark_submitted` means the indexer wrote the canonical flush first; a
+    /// non-zero count means those rows were never claimed.
+    pub async fn count_unflushed(&self, ids: &[u64]) -> AppResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = conn(&self.pool).await?;
+        let id_bds = to_id_bds(ids)?;
+        let n: i64 = deposit_escrowed_events::table
+            .filter(deposit_escrowed_events::chain_id.eq(self.chain_id))
+            .filter(deposit_escrowed_events::deposit_id.eq_any(id_bds))
+            .filter(deposit_escrowed_events::flushed_at_block.is_null())
+            .count()
+            .get_result(&mut conn)
+            .await
+            .map_err(|e| AppError::Db(e.to_string()))?;
+        Ok(n as usize)
+    }
+}
+
+fn to_id_bds(ids: &[u64]) -> AppResult<Vec<BigDecimal>> {
+    ids.iter()
+        .map(|id| {
+            BigDecimal::from_u64(*id)
+                .ok_or_else(|| AppError::Internal(format!("deposit_id {} unrepresentable", id)))
+        })
+        .collect()
+}
+
+/// A `bytea` column whose width the schema does not constrain. `field` names the
+/// column so a bad row is diagnosable from the log alone.
+fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> AppResult<[u8; N]> {
+    v.try_into()
+        .map_err(|_| AppError::Internal(format!("expected {N}-byte {field}, got {}", v.len())))
+}

@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "domain": "lelantos.fmd.v4",
+  "version": 1,
+  "domain": "lelantos.fmd.v1",
   "curve": "babyjubjub",
   "hash": "poseidon",
   "scheme": "poseidon-legendre",

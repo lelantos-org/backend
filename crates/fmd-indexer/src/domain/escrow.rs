@@ -173,6 +173,7 @@ mod tests {
             ephPubX: U256::ZERO,
             ephPubY: U256::ZERO,
             ciphertext: Bytes::from(vec![0x00, 0x07]),
+            feeAssetId: 0,
             feeIn: 0,
             feeCm: B256::repeat_byte(0xdd),
             feeCvDepX: U256::ZERO,

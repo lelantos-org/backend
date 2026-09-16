@@ -54,7 +54,7 @@ impl YieldStateCtx {
     /// True when anything in the row moved, or when the last write is old enough
     /// that `updated_at` would start to read as stale.
     ///
-    /// Read-only: the cache is updated by {@link Self::record_written} *after*
+    /// Read-only: the cache is updated by [`Self::record_written`] *after*
     /// the write lands. Recording it here would let a failed `UPDATE` mark the
     /// state durable, and the next pass — finding nothing changed — would skip
     /// the repair for a full heartbeat while `updated_at` claimed the row was

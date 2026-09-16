@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     // Locked per chain, so N replicas are failover rather than scale-out: a
     // standby skips its tick instead of re-running the window and the view
     // rebuild the leader is already doing.
-    let locks = Arc::new(ChainLocks::enabled(&cfg.database_url));
+    let locks = Arc::new(ChainLocks::new(&cfg.database_url));
     let consume = Arc::new(ConsumeServiceImpl::new(pool, locks));
 
     let (trigger, shutdown) = shared::shutdown::channel();

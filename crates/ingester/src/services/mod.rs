@@ -8,7 +8,6 @@
 //! means, and that is all each module holds.
 
 pub mod backfill;
-pub mod decode;
 pub mod ingest;
 pub mod live;
 pub mod log_range;

@@ -9,7 +9,7 @@
 //! endpoints convert base units into USD without a separate ERC20 metadata
 //! index.
 
-use crate::provider::PriceProvider;
+use crate::providers::PriceProvider;
 use crate::token::{TokenKey, TokenPrice};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -85,10 +85,7 @@ impl PriceProvider for DefiLlama {
         // Maps the coin string back to the key that requested it. The response
         // echoes the request verbatim, avoiding a reverse chain-slug map and any
         // assumption about the casing returned.
-        let by_coin: HashMap<String, TokenKey> = tokens
-            .iter()
-            .filter_map(|k| Some((coin_id(llama_chain(k.chain)?, &k.address), k.clone())))
-            .collect();
+        let by_coin = by_coin(tokens);
         if by_coin.is_empty() {
             return Ok(HashMap::new());
         }
@@ -113,6 +110,15 @@ impl PriceProvider for DefiLlama {
 
         Ok(collect(body, &by_coin))
     }
+}
+
+/// Each token this API can price, keyed by its coin string. Tokens on a chain
+/// without a slug are left out.
+fn by_coin(tokens: &[TokenKey]) -> HashMap<String, TokenKey> {
+    tokens
+        .iter()
+        .filter_map(|k| Some((coin_id(llama_chain(k.chain)?, &k.address), k.clone())))
+        .collect()
 }
 
 /// The coin string this API keys a token by. `TokenKey` guarantees the address
@@ -150,12 +156,6 @@ mod tests {
 
     fn key(chain_id: i64, hex: &str) -> TokenKey {
         TokenKey::new(chain_id, hex)
-    }
-
-    fn by_coin(keys: &[TokenKey]) -> HashMap<String, TokenKey> {
-        keys.iter()
-            .filter_map(|k| Some((coin_id(llama_chain(k.chain)?, &k.address), k.clone())))
-            .collect()
     }
 
     fn parse(json: &str) -> PricesResponse {

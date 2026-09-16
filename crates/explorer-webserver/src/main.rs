@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use explorer_webserver::adapters::{DefiLlama, PriceService};
 use explorer_webserver::app::cache::AppCache;
 use explorer_webserver::{AppState, ExplorerWebserverConfig, build_info, build_router};
+use prices::{DefiLlama, PriceService};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;

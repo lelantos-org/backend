@@ -14,7 +14,7 @@ shared = { path = "../shared", features = ["webserver", "metrics-exporter"] }
 asset-registry = { path = "../asset-registry", features = ["http"] }
 database = { path = "../database" }
 prices = { path = "../prices" }
-# NOTE: must NOT depend on common-crypto. Privacy gate; a convention, not a CI
+# NOTE: must NOT depend on crypto. Privacy gate; a convention, not a CI
 # check, so a new dependency edge here has to be caught in review.
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -29,6 +29,9 @@ chrono = { workspace = true }
 hex = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }
 
 [build-dependencies]
 vergen-gix = { workspace = true }

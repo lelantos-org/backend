@@ -7,7 +7,7 @@
 //! Behind the `rpc` feature, because this crate is otherwise pure data and the
 //! indexers that only decode logs must not link a provider to get the ABI.
 //!
-//! This was duplicated in the relayer and registry-webserver, and absent
+//! This was duplicated in the relayer and protocol-webserver, and absent
 //! entirely from three other call sites that built a provider with alloy's
 //! default client — which carries **no request timeout at all**. Timeouts are
 //! the point of this type, not an incidental: an untimed call against a hung

@@ -3,7 +3,7 @@
 Read-only HTTP API for explorer queries over public chain data. Axum +
 Postgres, over the tables `explorer-indexer` writes.
 
-**Must not depend on `common-crypto`** — the privacy gate is recorded in
+**Must not depend on `crypto`** — the privacy gate is recorded in
 `Cargo.toml` and `lib.rs`, but nothing in CI checks it, so a new dependency
 edge has to be caught in review.
 
@@ -97,5 +97,24 @@ until then it is `pending` at its escrow time. So a bucket's composition can
 still change after the fact. `DepositFlushed` is emitted per deposit inside
 `flushBatch`, so a batch of eight counts as eight deposits, not one.
 
+Rows are operations, not transactions. A `Bundler` transaction lands several
+operations of any kinds under one hash, so each `RootAdvanced` is classified
+against its own log range: a flush's `DepositFlushed` logs precede its
+`RootAdvanced` (back to the previous one in the transaction), and a withdrawal's
+`AssetMoved` follows it (up to the next one). Every row carries a `logIndex`, so
+`(chainId, txHashHex, kind, logIndex)` identifies it.
+
 A row whose kind the SQL and the Rust enum disagree about is dropped with a
 warning rather than mislabelled.
+
+## Layering
+
+Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Layer | What |
+|-------|------|
+| `app/` | Env config, shared state, the per-endpoint response caches, build stamp |
+| `domain/` | `dto/` query parameters and the validation they share, `responses/` bodies (one module per endpoint), `amount` whole-token conversion, error type |
+| `repositories/` | One module per read: `asset_flows`, `asset_locked`, `asset_yield`, `anonymity_set`, `chains`, `pool_notes`, `tree_advances`, and `transactions/` (the classification `union` and the queries over it). The asset catalog is read through `asset-registry` |
+| `services/` | One module per endpoint: read, decorate with USD from the `prices` crate, shape, and serve from the cache |
+| `handlers/http/` | Routes, router and OpenAPI |

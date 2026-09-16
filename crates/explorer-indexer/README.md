@@ -13,9 +13,21 @@ That split is by consumer rather than by table name: `tree_advances` and
 `deposit_escrowed_events` used to live here and look like analytics, but the
 relayer's Merkle bootstrap and flush pipeline read them, so they moved.
 
-Public data only. **Must not depend on `common-crypto`** — the privacy gate is
+Public data only. **Must not depend on `crypto`** — the privacy gate is
 recorded in `Cargo.toml` and `lib.rs`, but nothing in CI checks it, so a new
 dependency edge has to be caught in review.
+
+## Layering
+
+Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Layer | What |
+|-------|------|
+| `app/` | Config and build stamp |
+| `adapters/` | `locks`: the per-chain advisory lock that elects one replica per chain |
+| `domain/` | Error type |
+| `repositories/` | One module per table written: `asset_flows` (plus its view refreshes), `yield_fee_events`. The cursor and `raw_events` reads go through `database` |
+| `services/consume/` | The consume tick: `events` routes each decoded event to the row builder for its projection (`flows`, `yield_fees`), `plan` batches the writes, `tick` runs the loop and `refresh` gates the materialized views |
 
 ## Run
 

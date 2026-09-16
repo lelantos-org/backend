@@ -169,6 +169,8 @@ diesel::table! {
         canceled_at_block -> Nullable<Int8>,
         tx_hash -> Bytea,
         block_ts -> Int8,
+        flushed_log_index -> Nullable<Int4>,
+        fee_asset_id -> Int8,
     }
 }
 

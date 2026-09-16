@@ -39,13 +39,6 @@ fn not_found() -> AppError {
     AppError::NotFound("subscription".to_string())
 }
 
-/// Resolve a caller-supplied capability token to the internal subscription id.
-pub async fn id_for_token(st: &AppState, token: &TokenHash) -> AppResult<i64> {
-    subscriptions::id_by_token(&st.pool, token)
-        .await?
-        .ok_or_else(not_found)
-}
-
 /// Internal id plus the backfill watermark behind a capability token.
 ///
 /// `/v1/matches` needs both: the id to select rows and the watermark so the

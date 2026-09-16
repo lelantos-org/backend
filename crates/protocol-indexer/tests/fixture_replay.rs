@@ -5,10 +5,11 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::eth::Log;
 use alloy::sol_types::SolEvent;
 use bigdecimal::BigDecimal;
-use chain_types::abi::{AssetFeeSet, AssetRegistered, RootAdvanced};
+use chain_types::abi::{
+    AssetFeeSet, AssetRegistered, DepositEscrowed, DepositFlushed, RootAdvanced,
+};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-use protocol_indexer::config::ProtocolIndexerConfig;
 use protocol_indexer::services::consume::{ConsumeCtx, RefreshGate, tick_chain};
 use shared::entities::EventKind;
 use std::str::FromStr;
@@ -17,6 +18,8 @@ use test_support::fixtures::{build_log, insert_chain_state, insert_log};
 
 const CHAIN_A: i64 = 1;
 const ASSET_ID: u64 = 7;
+/// The deposit fixture pays its fee note in another asset than `ASSET_ID`.
+const FEE_ASSET_ID: u64 = 9;
 
 /// Cleared between tests. Every table this binary writes, directly or through a
 /// foreign key.
@@ -88,17 +91,51 @@ fn root_advanced_log(
     build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
 }
 
+fn deposit_escrowed_log(id: u64, block_n: u64, block_ts: u64, tx_byte: u8, log_idx: u64) -> Log {
+    let ev = DepositEscrowed {
+        id: U256::from(id),
+        payer: Address::repeat_byte(0x01),
+        recipient: Address::repeat_byte(0x02),
+        publicAssetId: ASSET_ID,
+        publicIn: 100,
+        feeBpsAtSubmit: 0,
+        cm: B256::repeat_byte(0x03),
+        cvDepX: U256::ZERO,
+        cvDepY: U256::ZERO,
+        rcv: U256::ZERO,
+        clueRx: U256::ZERO,
+        clueRy: U256::ZERO,
+        ephPubX: U256::ZERO,
+        ephPubY: U256::ZERO,
+        ciphertext: vec![0u8; 2].into(),
+        feeAssetId: FEE_ASSET_ID,
+        feeIn: 3,
+        feeCm: B256::repeat_byte(0x04),
+        feeCvDepX: U256::ZERO,
+        feeCvDepY: U256::ZERO,
+        feeRcv: U256::ZERO,
+        feeClueRx: U256::ZERO,
+        feeClueRy: U256::ZERO,
+        feeEphPubX: U256::ZERO,
+        feeEphPubY: U256::ZERO,
+        feeCiphertext: vec![0u8; 2].into(),
+    };
+    build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
+}
+
+fn deposit_flushed_log(id: u64, block_n: u64, block_ts: u64, tx_byte: u8, log_idx: u64) -> Log {
+    let ev = DepositFlushed {
+        id: U256::from(id),
+        cm: B256::repeat_byte(0x03),
+    };
+    build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
+}
+
 /// No chains and no metadata RPC, so the decimals sweep is a no-op and these
 /// tests exercise event consumption alone.
 fn empty_ctx(pool: database::DbPool) -> ConsumeCtx {
     ConsumeCtx {
         pool,
-        cfg: Arc::new(ProtocolIndexerConfig {
-            database_url: String::new(),
-            chains: Vec::new(),
-            tick_ms: 1000,
-            batch: 500,
-        }),
         token_meta: Arc::new(std::collections::HashMap::new()),
         refresh: Arc::new(RefreshGate::new()),
     }
@@ -321,5 +358,78 @@ async fn idempotent_replay_keeps_single_row_per_advance() {
     assert_eq!(
         tree_count, 1,
         "tree_advances PK (chain, block, log_index) prevents duplicates"
+    );
+}
+
+/// A flush records where in its transaction it sat, not only the transaction:
+/// a `Bundler` transaction can hold a flush and a transfer under one hash, and
+/// the explorer tells them apart by `flushed_log_index`.
+#[tokio::test]
+async fn deposit_flushed_records_its_log_index() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_escrowed_log(1, 100, 1_700_000_000, 0x20, 0),
+        EventKind::DepositEscrowed,
+    )
+    .await;
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_flushed_log(1, 101, 1_700_000_060, 0x21, 3),
+        EventKind::DepositFlushed,
+    )
+    .await;
+
+    let ctx = empty_ctx(pool.clone());
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+
+    use database::schema::deposit_escrowed_events as d;
+    let mut conn = pool.get().await.unwrap();
+    let row: (Option<i64>, Option<Vec<u8>>, Option<i32>) = d::table
+        .filter(d::chain_id.eq(CHAIN_A))
+        .select((
+            d::flushed_at_block,
+            d::flushed_tx_hash,
+            d::flushed_log_index,
+        ))
+        .first(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(row, (Some(101), Some(vec![0x21; 32]), Some(3)));
+}
+
+/// The fee note's asset is digest preimage and independent of the deposit's, so
+/// it lands in its own column exactly as logged.
+#[tokio::test]
+async fn deposit_escrowed_persists_the_fee_asset() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_escrowed_log(1, 100, 1_700_000_000, 0x20, 0),
+        EventKind::DepositEscrowed,
+    )
+    .await;
+
+    let ctx = empty_ctx(pool.clone());
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+
+    use database::schema::deposit_escrowed_events as d;
+    let mut conn = pool.get().await.unwrap();
+    let row: (i64, i64, BigDecimal) = d::table
+        .filter(d::chain_id.eq(CHAIN_A))
+        .select((d::public_asset_id, d::fee_asset_id, d::fee_in))
+        .first(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        row,
+        (ASSET_ID as i64, FEE_ASSET_ID as i64, BigDecimal::from(3))
     );
 }

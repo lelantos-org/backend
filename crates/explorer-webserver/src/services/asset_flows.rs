@@ -1,10 +1,10 @@
-use crate::adapters::{TokenKey, TokenPrice};
 use crate::app::AppState;
 use crate::domain::amount::{plain_amount, whole_tokens};
 use crate::domain::error::AppResult;
 use crate::domain::responses::FlowPoint;
 use crate::repositories::asset_flows::{self, FlowBucketRow};
 use bigdecimal::{BigDecimal, ToPrimitive};
+use prices::{TokenKey, TokenPrice, to_usd};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ pub async fn flows(
             .iter()
             .map(|r| TokenKey::new(r.chain_id, r.token_hex.clone()))
             .collect();
-        let prices = super::prices::for_tokens(&st, &keys).await;
+        let prices = st.prices.for_tokens(&keys).await;
         Ok(Arc::new(fold(rows, &prices)))
     })
     .await
@@ -82,8 +82,8 @@ fn fold(rows: Vec<FlowBucketRow>, prices: &HashMap<TokenKey, TokenPrice>) -> Vec
         let usd = prices
             .get(&TokenKey::new(r.chain_id, r.token_hex.clone()))
             .and_then(|p| {
-                let into = super::prices::to_usd(r.in_base.to_f64()?, r.decimals, p)?;
-                let out = super::prices::to_usd(r.out_base.to_f64()?, r.decimals, p)?;
+                let into = to_usd(r.in_base.to_f64()?, r.decimals, p)?;
+                let out = to_usd(r.out_base.to_f64()?, r.decimals, p)?;
                 Some((into, out))
             });
         match usd {

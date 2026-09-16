@@ -2,7 +2,7 @@ use ark_ed_on_bn254::Fq;
 use ark_ff::{BigInteger, PrimeField};
 use bigdecimal::BigDecimal;
 use bigdecimal::num_bigint::Sign;
-use common_crypto::tree::Field;
+use crypto::tree::Field;
 
 /// Reinterpret a `NUMERIC(78, 0)` column as a field element.
 ///
@@ -30,7 +30,7 @@ pub fn bigdec_to_field(v: &BigDecimal) -> Field {
 
 /// Read the packed FMD clue bits from a ciphertext's 2-byte prefix.
 ///
-/// Big-endian, matching what the contract writes. `common_crypto::filter` documents
+/// Big-endian, matching what the contract writes. `crypto::filter` documents
 /// its `clue_bits` argument as little-endian, which refers to the bit order
 /// inside the u16 rather than the byte order on the wire; the two are consistent
 /// and `tests/fixture_replay.rs` pins the round trip.

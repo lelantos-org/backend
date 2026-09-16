@@ -11,7 +11,7 @@ Several binaries need the same row shape, and `backend/ARCHITECTURE.md` forbids 
 | Consumer | Uses it for | Migrated? |
 |---|---|---|
 | `relayer` | fee decoration (`circuitAmount` on a quote) and shielded-fee admission | yes |
-| `registry-webserver` | serving the catalog | yes |
+| `protocol-webserver` | serving the catalog | yes |
 | `explorer-webserver` | asset-backed analytics | yes |
 
 Before this crate there were two independent `AssetRow` structs — one in the relayer, one in explorer-webserver — over the same columns with different field names and different subsets, so any new column had to be added twice. Both are gone: there is now one row shape, and a new column is added once.

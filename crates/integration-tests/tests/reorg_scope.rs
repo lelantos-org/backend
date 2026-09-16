@@ -120,6 +120,78 @@ async fn the_protocol_half_leaves_the_explorers_tables_alone() {
     assert_eq!(count(&pool, "yield_fee_events").await, 1);
 }
 
+/// An escrow older than the fork survives, but its flush and cancel inside the
+/// fork are undone, so the deposit reads as pending again until the replay
+/// re-marks what the new chain still has.
+#[tokio::test]
+async fn the_protocol_half_unmarks_flushes_and_cancels_inside_the_fork() {
+    let (pool, _guard) = fresh_pool().await;
+    let mut conn = pool.get().await.unwrap();
+    for (deposit_id, flushed_at, canceled_at) in [
+        (1i64, Some(FORK_AT), None),
+        (2, None, Some(FORK_AT + 1)),
+        (3, Some(FORK_AT - 1), None),
+    ] {
+        diesel::sql_query(
+            "INSERT INTO deposit_escrowed_events (chain_id, block_number, log_index, deposit_id, \
+               payer, recipient, public_asset_id, public_in, fee_bps_at_submit, cm, cv_dep_x, \
+               cv_dep_y, rcv, aux, fee_asset_id, fee_in, fee_cm, fee_cv_dep_x, fee_cv_dep_y, \
+               fee_rcv, fee_aux, submitted_at_block, flushed_at_block, flushed_at_ts, \
+               flushed_tx_hash, \
+               flushed_log_index, canceled_at_block, tx_hash, block_ts) \
+             VALUES ($1, $2, $3, $3, '\\x00', '\\x00', 1, 0, 0, '\\x00', 0, 0, 0, '{}', 0, 0, '\\x00', \
+               0, 0, 0, '{}', $2, $4, $4, CASE WHEN $4 IS NULL THEN NULL ELSE '\\x02'::bytea END, \
+               CASE WHEN $4 IS NULL THEN NULL ELSE 0 END, $5, '\\x02', 0)",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(CHAIN)
+        .bind::<diesel::sql_types::BigInt, _>(FORK_AT - 10)
+        .bind::<diesel::sql_types::Integer, _>(deposit_id as i32)
+        .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(flushed_at)
+        .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(canceled_at)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    record_reorg(&pool).await;
+
+    database::reorg::apply_pending(&pool, Owner::Protocol, CHAIN)
+        .await
+        .unwrap();
+
+    #[derive(QueryableByName)]
+    struct Marks {
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        flushed_at_block: Option<i64>,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
+        flushed_log_index: Option<i32>,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        canceled_at_block: Option<i64>,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let marks: Vec<Marks> = diesel::sql_query(
+        "SELECT flushed_at_block, flushed_log_index, canceled_at_block \
+         FROM deposit_escrowed_events ORDER BY log_index",
+    )
+    .load(&mut conn)
+    .await
+    .unwrap();
+    let marks: Vec<_> = marks
+        .iter()
+        .map(|m| (m.flushed_at_block, m.flushed_log_index, m.canceled_at_block))
+        .collect();
+
+    assert_eq!(
+        marks,
+        [
+            (None, None, None),
+            (None, None, None),
+            (Some(FORK_AT - 1), Some(0), None),
+        ],
+        "marks inside the fork are cleared; one before it stays"
+    );
+}
+
 /// Each owner has its own cursor row and its own `last_reorg_id`, so one
 /// consumer applying a reorg must not mark it applied for the others.
 #[tokio::test]

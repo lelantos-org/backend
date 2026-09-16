@@ -1,14 +1,17 @@
 #!/usr/bin/env sh
 # One-shot contract deploy + fund, run by the `deploy` compose service.
 #
-#   1. forge script DeployTest.s.sol      → verifiers, MASP, mock tokens
-#   2. forge script DeployTestSwap.s.sol  → UniV3Adapter, SwapWrapper, mocks
+#   1. forge script DeployTest.s.sol      → verifiers, MASP, mock tokens,
+#                                           NativeAdapter
+#   2. forge script DeployTestSwap.s.sol  → UniV3Adapter, SwapWrapper, mocks,
+#                                           BundlerFactory + the relayer's Bundler
 #   3. forge script DeployTestYield.s.sol → MockERC4626 vaults, ERC4626Venues
 #   4. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
 #   5. write addresses.env, sourced by every backend's entrypoint wrapper
 #
 # Required env (set in docker-compose.yml):
 #   RPC_URL DEPLOYER_KEY FUND_RECIPIENT FUND_NATIVE FUND_WETH FUND_ERC20
+#   BUNDLER_OPERATOR  the relayer's signer address, made operator of its Bundler
 #
 # Optional env (defaults suit the container; override to run on the host):
 #   CONTRACTS_DIR  forge project root         (default /contracts)
@@ -92,7 +95,7 @@ addr_req() {
 preflight() {
     step "preflight"
     require_cmd forge cast awk grep
-    require_env RPC_URL DEPLOYER_KEY FUND_RECIPIENT FUND_NATIVE FUND_WETH FUND_ERC20
+    require_env RPC_URL DEPLOYER_KEY FUND_RECIPIENT FUND_NATIVE FUND_WETH FUND_ERC20 BUNDLER_OPERATOR
     [ -d "$CONTRACTS_DIR" ] || die "CONTRACTS_DIR ${CONTRACTS_DIR} does not exist"
 
     mkdir -p "$WORK_DIR" "$(dirname "$OUT_FILE")"
@@ -127,16 +130,21 @@ deploy_core() {
     log "MASP=${MASP}"
 }
 
-# UniV3Adapter + SwapWrapper + swap mocks. DeployTestSwap reads the core
-# addresses from the environment.
+# UniV3Adapter + SwapWrapper + swap mocks, then the BundlerFactory over MASP,
+# the native adapter and the wrapper, and the relayer's Bundler. DeployTestSwap
+# reads the core addresses from the environment.
 deploy_swap() {
-    step "deploy swap stack (UniV3Adapter + UniV4Adapter + SwapWrapper)"
+    step "deploy swap stack (UniV3Adapter + UniV4Adapter + SwapWrapper + Bundler)"
     # Exported rather than prefixed onto the call: a `VAR=x func` prefix on a
     # shell *function* has implementation-defined persistence in POSIX sh.
-    export MASP PERMIT2 TOKEN_1 TOKEN_2 TOKEN_3
+    # NATIVE_ADAPTER: a Bundler's targets are fixed at creation, so without it
+    # the relayer's Bundler could never call `withdrawNative`.
+    # BUNDLER_OPERATOR: made operator of the Bundler the script creates.
+    export MASP PERMIT2 TOKEN_1 TOKEN_2 TOKEN_3 NATIVE_ADAPTER BUNDLER_OPERATOR
     forge_script "DeployTestSwap.s.sol:DeployTestSwap"
     reload_addresses
 
+    BUNDLER=$(addr_req BUNDLER)
     SWAP_WRAPPER=$(addr_req SWAP_WRAPPER)
     UNIV3_ADAPTER=$(addr_req UNIV3_ADAPTER)
     UNIV3_QUOTER=$(addr_req UNIV3_QUOTER)
@@ -146,6 +154,7 @@ deploy_swap() {
     MOCK_UNIVERSAL_ROUTER=$(addr_req MOCK_UNIVERSAL_ROUTER)
 
     log "SWAP_WRAPPER=${SWAP_WRAPPER}"
+    log "BUNDLER=${BUNDLER} (operator ${BUNDLER_OPERATOR})"
     # Swap rates are seeded inside DeployTest._deploySwap (its `setRate`
     # calls). MockSwapRouter02 mints `tokenOut` on demand, so there is no
     # inventory to seed and no `setNextOut` needed for the dev flow; e2e
@@ -201,8 +210,8 @@ fund_recipient() {
 
 # The relayer's `accepted_fee_tokens`, as the JSON its env overlay parses.
 #
-# Every registered asset is listed: a payer can only pay the fee in the asset
-# they are already moving, so one left out is one nothing can transact in.
+# Every registered asset is listed, so a payer can pay the fee in any of them,
+# including the asset they are moving.
 # `decimals` is the ERC-20's, not the MASP scale — the relayer converts a gas
 # quote into token base units and divides by the scale itself.
 #
@@ -241,6 +250,9 @@ write_env_file() {
 
         _emit RELAYER POOL_ADDRESS "$MASP"
         _emit RELAYER RPC_URL "$RPC_URL"
+        # Every relayer transaction goes through it, and `/chains` publishes it
+        # as the address wallets bind.
+        _emit RELAYER BUNDLER_ADDRESS "$BUNDLER"
         _emit RELAYER SWAP_WRAPPER_ADDRESS "$SWAP_WRAPPER"
         # Enables `withdrawNative`; without it the relayer leaves
         # native_adapter_address unset and rejects native withdrawals.
@@ -261,7 +273,7 @@ write_env_file() {
         _emit_for 31338 RELAYER POOL_ADDRESS "$MASP"
         _emit_for 31338 RELAYER RPC_URL "$RPC_URL"
 
-        # The deployment half of the wallet's cross-check: registry-webserver
+        # The deployment half of the wallet's cross-check: protocol-webserver
         # publishes what the *deployment* says is on this chain, the relayer
         # publishes what it actually writes to, and a wallet refuses a relayer
         # whose answers disagree. Left uninjected, the registry serves the zero
@@ -337,6 +349,7 @@ print_summary() {
     step "summary"
     printf '  %-18s %s\n' \
         MASP           "$MASP" \
+        BUNDLER        "$BUNDLER" \
         SWAP_WRAPPER   "$SWAP_WRAPPER" \
         UNIV3_ADAPTER  "$UNIV3_ADAPTER" \
         UNIV3_QUOTER   "$UNIV3_QUOTER" \

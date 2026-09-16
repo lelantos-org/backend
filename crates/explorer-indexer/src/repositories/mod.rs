@@ -1,5 +1,4 @@
 pub mod asset_flows;
-pub mod cursor;
 pub mod yield_fee_events;
 
 use crate::domain::error::ExplorerIndexerError;

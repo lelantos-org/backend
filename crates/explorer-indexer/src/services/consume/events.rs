@@ -4,15 +4,11 @@
 //! collected into a [`CommitPlan`] and written in batches once the whole window
 //! is decoded, rather than one statement — and one pool checkout — per event.
 
+use super::flows::asset_moved;
 use super::plan::CommitPlan;
-use crate::repositories::{
-    asset_flows::NewAssetFlow,
-    yield_fee_events::{KIND_ACCRUED, KIND_SWEPT, NewYieldFeeEvent},
-};
-use alloy::primitives::{Address, U256};
-use bigdecimal::BigDecimal;
+use super::yield_fees::yield_fee;
+use crate::repositories::yield_fee_events::{KIND_ACCRUED, KIND_SWEPT};
 use chain_types::decode::DecodedEvent;
-use chain_types::numeric::u256_to_bigdecimal;
 use database::RawEventRow;
 
 /// Route one decoded event into the plan.
@@ -81,59 +77,5 @@ pub fn plan_event(plan: &mut CommitPlan, chain_id: i64, row: &RawEventRow, event
         // Write no derived state anywhere.
         DecodedEvent::Rebalanced { .. } => {}
         DecodedEvent::EmergencyUnwound { .. } => {}
-    }
-}
-
-// One argument per `DecodedEvent::AssetMoved` field; grouping them would only
-// restate the variant.
-#[allow(clippy::too_many_arguments)]
-fn asset_moved(
-    chain_id: i64,
-    row: &RawEventRow,
-    asset_id: u64,
-    token: Address,
-    in_amount: U256,
-    out_amount: U256,
-    public_in: u64,
-    public_out: u64,
-) -> NewAssetFlow {
-    NewAssetFlow {
-        chain_id,
-        block_number: row.block_number,
-        log_index: row.log_index,
-        asset_id_u64: asset_id as i64,
-        token: token.as_slice().to_vec(),
-        in_amount: u256_to_bigdecimal(in_amount),
-        out_amount: u256_to_bigdecimal(out_amount),
-        tx_hash: row.tx_hash.clone(),
-        block_ts: row.block_ts,
-        public_in: Some(BigDecimal::from(public_in)),
-        public_out: Some(BigDecimal::from(public_out)),
-    }
-}
-
-/// A treasury fee event, accrued or swept.
-///
-/// One function for both because they differ only in `kind` and whether tokens
-/// moved: an accrual mints units to the treasury and moves nothing, which is
-/// why `amount` is `None` there and why this log is the only trace of it.
-fn yield_fee(
-    chain_id: i64,
-    row: &RawEventRow,
-    asset_id: u64,
-    kind: i16,
-    units: U256,
-    amount: Option<U256>,
-) -> NewYieldFeeEvent {
-    NewYieldFeeEvent {
-        chain_id,
-        asset_id_u64: asset_id as i64,
-        block_number: row.block_number,
-        block_ts: row.block_ts,
-        tx_hash: row.tx_hash.clone(),
-        log_index: row.log_index,
-        kind,
-        units: u256_to_bigdecimal(units),
-        amount: amount.map(u256_to_bigdecimal),
     }
 }

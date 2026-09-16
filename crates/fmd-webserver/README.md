@@ -2,7 +2,7 @@
 
 Read-only HTTP API for FMD clients: register a detection key, pull matches and
 note payloads, and sync the commitment and nullifier sets locally. Axum +
-Postgres, over the tables `fmd-indexer` writes. Depends on `common-crypto`.
+Postgres, over the tables `fmd-indexer` writes. Depends on `crypto`.
 
 It writes exactly one table — `subscriptions` — and reads everything else.
 
@@ -124,3 +124,15 @@ into a different tree. Nothing surfaces until a spend fails, which is why
 
 `utoipa` + Swagger UI mounted by `build_router`. Spec at
 `/api-docs/openapi.json`, browsable at `/swagger-ui`.
+
+## Layering
+
+Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Layer | What |
+|-------|------|
+| `app/` | Env config, shared state, the in-process caches and their keys, build stamp |
+| `domain/` | `dto/` requests, `responses/` wire bodies (including the pre-rendered chunk), capability `token`, `field` element conversions, Baby-Jubjub `point` packing, the `poseidon` leaf hash, error type |
+| `repositories/` | One module per table read: `notes`, `matches`, `nullifiers`, `subscriptions` (the one table written), `tree_state` |
+| `services/` | One module per endpoint, plus `chunks`: the page size, range and cache path both chunk feeds share |
+| `handlers/http/` | Routes, router, OpenAPI, and the `auth` bearer-token extractor |

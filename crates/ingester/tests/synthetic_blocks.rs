@@ -17,17 +17,15 @@ use chain_types::abi::NotePayload;
 use database::advisory::{ChainLock, NS_INGESTER, chain_key};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-use ingester::adapters::rpc::{BlockMeta, ChainRpc, DynRpc};
+use ingester::adapters::rpc::{ChainRpc, DynRpc};
 use ingester::app::config::ChainConfig;
 use ingester::app::state::WorkerDeps;
 use ingester::domain::error::IngesterError;
-use ingester::domain::models::RawEvent;
-use ingester::domain::models::{BlockCursor, TickOutcome, parse_address};
+use ingester::domain::models::{BlockCursor, BlockMeta, RawEvent, TickOutcome, parse_address};
 use ingester::repositories::{
     AtomicWriteRepo, ChainStateRepo, PostgresAtomicWriteRepo, PostgresBlockHashRepo,
     PostgresChainStateRepo,
 };
-use ingester::services::backfill::BackfillService;
 use ingester::services::ingest::IngestService;
 use ingester::services::live::{LiveService, LiveServiceImpl};
 use ingester::services::log_range::LogWindow;
@@ -488,35 +486,6 @@ async fn multichain_independent_cursors() {
 
 // ---------- replica failover ----------
 
-fn worker_deps(
-    pool: &database::DbPool,
-    rpc: &Arc<MockRpc>,
-    cfg: ChainConfig,
-    url: &str,
-) -> WorkerDeps {
-    let writes = Arc::new(PostgresAtomicWriteRepo::new(pool.clone()));
-    let raw_events = Arc::new(PostgresBlockHashRepo::new(pool.clone()));
-    let chain_state = Arc::new(PostgresChainStateRepo::new(pool.clone()));
-    let ingest = Arc::new(IngestService::new(writes.clone(), chain_state.clone()));
-    let reorg = Arc::new(ReorgService::new(writes, raw_events));
-    let log_window = Arc::new(LogWindow::new(cfg.log_concurrency));
-    let backfill = Arc::new(BackfillService::new(
-        rpc.clone() as DynRpc,
-        ingest.clone(),
-        log_window.clone(),
-    ));
-    WorkerDeps {
-        cfg,
-        rpc: rpc.clone() as DynRpc,
-        chain_state,
-        ingest,
-        reorg,
-        backfill,
-        log_window,
-        database_url: url.to_string(),
-    }
-}
-
 async fn count_raw_events(pool: &database::DbPool) -> i64 {
     use database::schema::raw_events;
     let mut conn = pool.get().await.unwrap();
@@ -542,7 +511,7 @@ async fn standby_ingester_waits_for_the_lock_then_takes_over() {
         .unwrap()
         .expect("leader lock");
 
-    let deps = worker_deps(&pool, &rpc, cfg(1, 100), url);
+    let deps = WorkerDeps::new(&pool, cfg(1, 100), rpc.clone() as DynRpc, url);
     // Hold the trigger: dropping it closes the watch channel, which every worker
     // reads as an immediate shutdown.
     let (_trigger, shutdown) = shared::shutdown::channel();

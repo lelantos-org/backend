@@ -1,10 +1,11 @@
 //! The `tree_update_batch` circuit's leaf-indexed batch shape.
 //!
 //! Pure protocol constants and the padded leaf arrays every consumer builds from
-//! them. No ABI and no I/O: `adapters::calldata` encodes this into the on-chain
-//! struct, `domain::fiat_shamir` hashes it into the challenge, and
-//! `services::witness` turns it into the prover's signals.
+//! them. No ABI and no I/O: `adapters::calldata` encodes the public arrays into
+//! the on-chain struct, `domain::fiat_shamir` hashes them into the challenge, and
+//! `services::witness` turns all of them into the prover's signals.
 
+use crate::domain::deposit::EscrowLeaf;
 use alloy::primitives::{FixedBytes, U256};
 
 /// Maximum leaves per `tree_update_batch` proof, mirroring
@@ -27,10 +28,10 @@ pub const MAX_DEPOSITS_PER_BATCH: usize = MAX_L_BATCH / LEAVES_PER_DEPOSIT;
 ///
 /// One entry per leaf slot: the first `actual_count` are real and the rest are
 /// zero padding that the circuit and the contract both enforce. Grouped into a
-/// struct rather than five same-shaped arrays, since every consumer needs all of
-/// them and positional arguments of identical type transpose without a compiler
-/// error. Holding `actual_count` here keeps the count from drifting from the
-/// arrays it describes.
+/// struct rather than six same-shaped arrays, since every consumer needs them
+/// together and positional arguments of identical type transpose without a
+/// compiler error. Holding `actual_count` here keeps the count from drifting from
+/// the arrays it describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaddedBatch {
     pub cms: [FixedBytes<32>; MAX_L_BATCH],
@@ -40,6 +41,10 @@ pub struct PaddedBatch {
     /// `1` marks a deposit leaf, whose value commitment the circuit pins to
     /// its `(leaf_asset, leaf_public_in)`.
     pub is_deposit: [u8; MAX_L_BATCH],
+    /// Each deposit leaf's `rcv_dep`, the blinder its value commitment is bound
+    /// under. Private witness only: never in calldata or the challenge, and zero
+    /// for spend leaves.
+    pub rcv: [U256; MAX_L_BATCH],
     /// How many leading slots are real. A leaf count rather than a pair count, so
     /// an odd value is valid.
     pub actual_count: u64,
@@ -53,6 +58,7 @@ impl PaddedBatch {
             leaf_asset: [0; MAX_L_BATCH],
             leaf_public_in: [0; MAX_L_BATCH],
             is_deposit: [0; MAX_L_BATCH],
+            rcv: [U256::ZERO; MAX_L_BATCH],
             actual_count: 0,
         }
     }
@@ -73,7 +79,8 @@ impl PaddedBatch {
     }
 
     /// Deposit leaves, two per escrowed deposit, each carrying the binding the
-    /// circuit checks against its value commitment.
+    /// circuit checks against its value commitment and the blinder it is bound
+    /// under.
     ///
     /// The caller supplies them flattened and in tree order — the depositor's
     /// note at `2i`, the relayer's fee note at `2i + 1` — which is the order
@@ -84,7 +91,7 @@ impl PaddedBatch {
     /// truncated here while `actual_count` still counted every leaf, so the
     /// bound is asserted rather than discovered in the prover. Callers are
     /// clamped to `MAX_DEPOSITS_PER_BATCH` at boot.
-    pub fn from_deposits(leaves: &[DepositLeaf]) -> Self {
+    pub fn from_deposits(leaves: &[EscrowLeaf]) -> Self {
         debug_assert!(
             leaves.len() <= MAX_L_BATCH,
             "{} leaves exceeds the circuit's {MAX_L_BATCH} slots",
@@ -92,11 +99,12 @@ impl PaddedBatch {
         );
         let mut batch = Self::zeroed();
         for (slot, d) in batch.slots_mut().zip(leaves) {
-            *slot.cm = d.cm;
+            *slot.cm = d.cm.into();
             *slot.cv_dep = d.cv_dep;
-            *slot.leaf_asset = d.leaf_asset;
-            *slot.leaf_public_in = d.leaf_public_in;
+            *slot.leaf_asset = d.asset_id;
+            *slot.leaf_public_in = d.public_in;
             *slot.is_deposit = 1;
+            *slot.rcv = d.rcv;
         }
         batch.actual_count = leaves.len() as u64;
         batch
@@ -109,35 +117,29 @@ impl PaddedBatch {
             .zip(self.leaf_asset.iter_mut())
             .zip(self.leaf_public_in.iter_mut())
             .zip(self.is_deposit.iter_mut())
+            .zip(self.rcv.iter_mut())
             .map(
-                |((((cm, cv_dep), leaf_asset), leaf_public_in), is_deposit)| BatchSlot {
+                |(((((cm, cv_dep), leaf_asset), leaf_public_in), is_deposit), rcv)| BatchSlot {
                     cm,
                     cv_dep,
                     leaf_asset,
                     leaf_public_in,
                     is_deposit,
+                    rcv,
                 },
             )
     }
 }
 
-/// One leaf slot borrowed across all five arrays at once, so a write cannot land
-/// in the wrong one.
+/// One leaf slot borrowed across every array at once, so a write cannot land in
+/// the wrong one.
 struct BatchSlot<'a> {
     cm: &'a mut FixedBytes<32>,
     cv_dep: &'a mut [U256; 2],
     leaf_asset: &'a mut u64,
     leaf_public_in: &'a mut u64,
     is_deposit: &'a mut u8,
-}
-
-/// One escrowed deposit's contribution to a batch.
-#[derive(Debug, Clone, Copy)]
-pub struct DepositLeaf {
-    pub cm: FixedBytes<32>,
-    pub cv_dep: [U256; 2],
-    pub leaf_asset: u64,
-    pub leaf_public_in: u64,
+    rcv: &'a mut U256,
 }
 
 #[cfg(test)]
@@ -158,11 +160,12 @@ mod tests {
     /// zero would leave its `cv_dep` unconstrained.
     #[test]
     fn test_from_deposits_marks_every_supplied_leaf_as_a_deposit() {
-        let leaf = |cm: u8, public_in: u64| DepositLeaf {
-            cm: FixedBytes::<32>::repeat_byte(cm),
+        let leaf = |cm: u8, public_in: u64| EscrowLeaf {
+            cm: [cm; 32],
             cv_dep: [U256::from(1), U256::from(2)],
-            leaf_asset: 7,
-            leaf_public_in: public_in,
+            asset_id: 7,
+            public_in,
+            rcv: U256::from(u64::from(cm)),
         };
         let batch = PaddedBatch::from_deposits(&[leaf(0xaa, 1_000), leaf(0xbb, 250)]);
 
@@ -180,5 +183,7 @@ mod tests {
         // Padding stays zero; the contract and the circuit both enforce it.
         assert_eq!(batch.cms[2], FixedBytes::<32>::ZERO);
         assert_eq!(batch.leaf_public_in, want_public_in);
+        assert_eq!(batch.rcv[1], U256::from(0xbbu64));
+        assert_eq!(batch.rcv[2], U256::ZERO);
     }
 }

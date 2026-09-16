@@ -8,6 +8,7 @@
 pub mod dto;
 pub mod error;
 pub mod field;
+pub mod point;
 pub mod poseidon;
 pub mod responses;
 pub mod token;

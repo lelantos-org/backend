@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 shared = { path = "../shared", features = ["webserver", "metrics-exporter"] }
 database = { path = "../database" }
-common-crypto = { path = "../common-crypto" }
+crypto = { path = "../crypto" }
 tokio = { workspace = true }
 axum = { workspace = true }
 diesel = { workspace = true }

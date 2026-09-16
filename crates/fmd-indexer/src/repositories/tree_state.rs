@@ -1,4 +1,4 @@
-use crate::domain::error::{FmdIndexerError, Result};
+use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
 pub use database::models::TreeStateRow;
@@ -58,7 +58,7 @@ impl TreeStateRepo for PostgresTreeStateRepo {
             .first(&mut conn)
             .await
             .optional()
-            .map_err(|e| FmdIndexerError::Db(e.to_string()))
+            .map_err(Into::into)
     }
 
     async fn published_root(&self, chain_id: i64, leaf_count: i64) -> Result<Option<Vec<u8>>> {
@@ -76,8 +76,7 @@ impl TreeStateRepo for PostgresTreeStateRepo {
         .bind::<diesel::sql_types::BigInt, _>(chain_id)
         .bind::<diesel::sql_types::BigInt, _>(leaf_count)
         .load::<PublishedRoot>(&mut conn)
-        .await
-        .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        .await?;
         Ok(found.into_iter().next().map(|r| r.new_root))
     }
 
@@ -103,8 +102,7 @@ impl TreeStateRepo for PostgresTreeStateRepo {
         .bind::<diesel::sql_types::Bytea, _>(&next.frontier)
         .bind::<diesel::sql_types::BigInt, _>(expected_from)
         .execute(&mut conn)
-        .await
-        .map_err(|e| FmdIndexerError::Db(e.to_string()))?;
+        .await?;
         Ok(n > 0)
     }
 }

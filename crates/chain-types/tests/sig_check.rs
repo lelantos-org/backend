@@ -18,7 +18,7 @@ use chain_types::abi::{
 const EXPECTED: &[(&str, &str)] = &[
     (
         "DepositEscrowed",
-        "ccc71a318d782f72ed7aaea4e3bd8cad9f99a45c9f27927ab48b82c3deb06c1c",
+        "e1912ec8afc449d7c588303113cd99feb5d4ccf5ac2206a931e4b78a2a008984",
     ),
     (
         "DepositFlushed",
@@ -26,7 +26,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     (
         "DepositCanceled",
-        "42163e0f65cf33474a2278520f1d0ad5d266e9ed49d005b2335ef8f35f781816",
+        "757e4d8cb4472cf095edc560e05dc762fa8bf5babd8c7b6205557593c65659fa",
     ),
     (
         "NotePayload",
@@ -84,7 +84,7 @@ const EXPECTED: &[(&str, &str)] = &[
 
 /// Only events are pinned here.
 ///
-/// The `interface` declarations in `abi.rs` (`IYieldVenue`, `IERC20Metadata`,
+/// The `interface` declarations in `abi/interfaces.rs` (`IYieldVenue`, `IERC20Metadata`,
 /// `IERC4626`, `IMulticall3`) have no assertion because there is nothing
 /// independent to assert against: `contracts/packages/abi/json/` ships no ABI
 /// for them, so an expected selector could only be re-derived from the same

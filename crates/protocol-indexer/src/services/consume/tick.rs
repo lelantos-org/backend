@@ -4,14 +4,13 @@ use super::events::plan_event;
 use super::metadata;
 use super::plan::CommitPlan;
 use super::refresh::{RefreshGate, View};
-use crate::adapters::DynTokenMetadata;
-use crate::app::config::ProtocolIndexerConfig;
+use crate::adapters::erc20::DynTokenMetadata;
 use crate::domain::error::Result;
-use crate::repositories::cursor::{CursorRepo, PostgresCursorRepo, UpsertCursor};
 use chain_types::decode;
 use database::DbPool;
 use database::raw_events;
 use database::reorg::Owner;
+use database::{CursorRepo, PostgresCursorRepo, UpsertCursor};
 use shared::entities::{Consumer, EventKind};
 use shared::tick::TickProgress;
 use std::collections::HashMap;
@@ -44,7 +43,6 @@ fn kinds() -> &'static [i16] {
 
 pub struct ConsumeCtx {
     pub pool: DbPool,
-    pub cfg: Arc<ProtocolIndexerConfig>,
     /// Per-chain ERC20 metadata reader. Chains without one keep
     /// `assets.decimals = NULL`.
     pub token_meta: Arc<HashMap<i64, DynTokenMetadata>>,

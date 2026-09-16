@@ -22,11 +22,6 @@ pub mod raw_events;
 pub mod reorg;
 pub mod schema;
 
-pub use advisory::{AdvisoryError, AdvisoryResult, ChainLock, chain_key};
 pub use cursor::{CursorError, CursorRepo, CursorResult, PostgresCursorRepo, UpsertCursor};
-pub use direct::ENV_DIRECT_URL;
-pub use listen::{
-    CHANNEL_NOTES_APPENDED, CHANNEL_RAW_EVENTS_APPENDED, CHANNEL_RAW_EVENTS_REORG, Wake,
-};
 pub use pool::{DbConn, DbPool, PoolCfg, PoolError, build_pool};
 pub use raw_events::{RawEventRow, RawEventsError, RawEventsResult};

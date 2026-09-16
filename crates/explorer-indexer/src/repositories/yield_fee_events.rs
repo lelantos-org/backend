@@ -24,10 +24,11 @@ pub struct NewYieldFeeEvent {
     pub amount: Option<BigDecimal>,
 }
 
-/// `do_nothing` on the `(chain_id, tx_hash, log_index)` unique index: a cursor
-/// rewind re-reads the same logs, and a fee event is a fact about one log.
 /// Insert a whole tick's fee events in one statement; see
 /// [`super::asset_flows::insert_batch`].
+///
+/// `do_nothing` on the `(chain_id, tx_hash, log_index)` unique index: a cursor
+/// rewind re-reads the same logs, and a fee event is a fact about one log.
 pub async fn insert_batch(
     pool: &DbPool,
     rows: &[NewYieldFeeEvent],

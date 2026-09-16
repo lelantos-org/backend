@@ -2,7 +2,7 @@
 //! conversions those values are stored through.
 //!
 //! Pure data by default. May import: `shared`, alloy. Must NOT import:
-//! `database`, `common-crypto`, any binary or service crate.
+//! `database`, `crypto`, any binary or service crate.
 //!
 //! The `rpc` feature is the one exception to "no IO": it adds the shared
 //! JSON-RPC transport ([`rpc::RpcEndpoint`]), which lives here because it is

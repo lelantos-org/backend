@@ -1843,27 +1843,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-crypto"
-version = "0.1.0"
-dependencies = [
- "ark-ec 0.4.2",
- "ark-ed-on-bn254",
- "ark-ff 0.4.2",
- "blake2",
- "chacha20poly1305",
- "criterion",
- "hex",
- "light-poseidon",
- "num-bigint",
- "rand 0.8.6",
- "rayon",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2063,6 +2042,27 @@ name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
+name = "crypto"
+version = "0.1.0"
+dependencies = [
+ "ark-ec 0.4.2",
+ "ark-ed-on-bn254",
+ "ark-ff 0.4.2",
+ "blake2",
+ "chacha20poly1305",
+ "criterion",
+ "hex",
+ "light-poseidon",
+ "num-bigint",
+ "rand 0.8.6",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "zeroize",
+]
 
 [[package]]
 name = "crypto-bigint"
@@ -2667,6 +2667,7 @@ dependencies = [
  "prices",
  "serde",
  "shared",
+ "test-support",
  "tokio",
  "tracing",
  "utoipa",
@@ -2796,7 +2797,7 @@ dependencies = [
  "bigdecimal",
  "chain-types",
  "chrono",
- "common-crypto",
+ "crypto",
  "database",
  "diesel",
  "diesel-async",
@@ -2822,7 +2823,7 @@ dependencies = [
  "axum",
  "bigdecimal",
  "chrono",
- "common-crypto",
+ "crypto",
  "database",
  "diesel",
  "diesel-async",
@@ -4410,7 +4411,7 @@ dependencies = [
  "bigdecimal",
  "chain-types",
  "chrono",
- "common-crypto",
+ "crypto",
  "database",
  "diesel",
  "diesel-async",
@@ -5650,6 +5651,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol-webserver"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "asset-registry",
+ "axum",
+ "bigdecimal",
+ "chain-types",
+ "chrono",
+ "database",
+ "diesel",
+ "diesel-async",
+ "dotenvy",
+ "hex",
+ "prices",
+ "serde",
+ "serde_json",
+ "shared",
+ "test-support",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "vergen-gix",
+]
+
+[[package]]
 name = "quanta"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5962,34 +5991,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
-name = "registry-webserver"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "anyhow",
- "asset-registry",
- "axum",
- "bigdecimal",
- "chain-types",
- "chrono",
- "database",
- "diesel",
- "diesel-async",
- "dotenvy",
- "hex",
- "prices",
- "serde",
- "serde_json",
- "shared",
- "test-support",
- "tokio",
- "tracing",
- "utoipa",
- "utoipa-swagger-ui",
- "vergen-gix",
-]
-
-[[package]]
 name = "relayer"
 version = "0.1.0"
 dependencies = [
@@ -6001,7 +6002,7 @@ dependencies = [
  "bech32",
  "bigdecimal",
  "chain-types",
- "common-crypto",
+ "crypto",
  "database",
  "diesel",
  "diesel-async",
@@ -7010,6 +7011,7 @@ dependencies = [
  "database",
  "diesel",
  "diesel-async",
+ "libc",
  "shared",
  "testcontainers",
  "testcontainers-modules",
@@ -7042,6 +7044,7 @@ dependencies = [
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
+ "ulid",
  "url",
 ]
 
@@ -7554,6 +7557,16 @@ dependencies = [
  "crunchy",
  "hex",
  "static_assertions",
+]
+
+[[package]]
+name = "ulid"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+dependencies = [
+ "rand 0.9.4",
+ "web-time",
 ]
 
 [[package]]

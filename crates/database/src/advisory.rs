@@ -49,7 +49,7 @@ pub const NS_FMD_CONSUME: i64 = 0x1A95_0001_0000_0000_u64 as i64;
 
 /// Namespace for the venue-APY worker's per-chain measurement lock.
 ///
-/// `registry-webserver` is stateless and scales freely, but its rate measurement
+/// `protocol-webserver` is stateless and scales freely, but its rate measurement
 /// is neither: it writes `asset_yield_sample` and issues archive `eth_call`s, so
 /// N replicas would lay down duplicate samples and multiply the archive load.
 /// One replica per chain measures and the rest serve from the row it writes.
@@ -91,7 +91,6 @@ struct Alive {
 /// releases the lock, so graceful shutdown hands over to a standby promptly.
 pub struct ChainLock {
     conn: AsyncPgConnection,
-    key: i64,
 }
 
 impl ChainLock {
@@ -109,11 +108,7 @@ impl ChainLock {
                 .bind::<BigInt, _>(key)
                 .get_result(&mut conn)
                 .await?;
-        Ok(got.pg_try_advisory_lock.then_some(Self { conn, key }))
-    }
-
-    pub fn key(&self) -> i64 {
-        self.key
+        Ok(got.pg_try_advisory_lock.then_some(Self { conn }))
     }
 
     /// Round-trip the lock connection to confirm the session, and therefore

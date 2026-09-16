@@ -1,6 +1,6 @@
 use crate::domain::error::AppResult;
 use database::DbPool;
-pub use database::models::TreeStateRow;
+use database::models::TreeStateRow;
 use database::schema::tree_state;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;

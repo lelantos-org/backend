@@ -60,7 +60,7 @@ flowchart TD
 `DepositEscrowed` and nullifier events into `notes` and `spent_nullifiers`,
 holding escrowed deposits in a pending map until the batch that commits them
 lands. *Filter* runs FMD detection: each note's clue is tested against every
-active subscription key (`common-crypto`), producing `matches`. Both keep their own
+active subscription key (`crypto`), producing `matches`. Both keep their own
 row in `consumer_cursors`; filter also backfills new subscriptions over
 historical notes. With the `parallel` feature the clue tests fan out over rayon.
 
@@ -157,7 +157,7 @@ flowchart TD
   SUB -.gas_used.-> GW
 ```
 
-### Registry — `registry-webserver`
+### Registry — `protocol-webserver`
 
 The deployment registry and asset catalog: what chains this deployment serves,
 what is deployed on them, and which assets are registered. Stateless and freely
@@ -222,7 +222,7 @@ flowchart LR
 No IO loop of their own; every binary sits on top of them. `shared` holds
 entities, shutdown, the tick driver, config loading and tracing init (plus the
 HTTP error type behind its `webserver` feature); `chain-types` the ABI types and
-decoding; `common-crypto` the Poseidon / Baby Jubjub / filter / tree primitives;
+decoding; `crypto` the Poseidon / Baby Jubjub / filter / tree primitives;
 `database` the Diesel schema, migrations, bb8 pool, cursor repository, advisory
 locks and reorg retraction. `integration-tests` drives the whole stack
 end-to-end via testcontainers.
@@ -235,12 +235,12 @@ isolation is load-bearing.
 
 ```mermaid
 flowchart BT
-  BINS["ingester · fmd-indexer · explorer-indexer<br/>fmd-webserver · explorer-webserver · risk-webserver<br/>relayer · registry-webserver · metaquoter"] --> SH[shared]
+  BINS["ingester · fmd-indexer · explorer-indexer<br/>fmd-webserver · explorer-webserver · risk-webserver<br/>relayer · protocol-webserver · metaquoter"] --> SH[shared]
   BINS --> CT[chain-types]
-  BINS --> FC[common-crypto]
+  BINS --> FC[crypto]
   BINS --> DB[database]
   REL[relayer] --> G16[groth16]
-  REL & REG[registry-webserver] --> AR[asset-registry]
+  REL & REG[protocol-webserver] --> AR[asset-registry]
   REL & EW[explorer-webserver] --> PR[prices]
 ```
 
@@ -256,12 +256,12 @@ Each crate documents its own config, routes, and the decisions behind them.
 | [explorer-indexer](crates/explorer-indexer/README.md) | Public projections + materialized views |
 | [explorer-webserver](crates/explorer-webserver/README.md) | Explorer API, prices, tx classification |
 | [relayer](crates/relayer/README.md) | Prover + submitter, flush worker, fee quotes |
-| [registry-webserver](crates/registry-webserver/README.md) | Deployment registry + asset catalog + spot prices, venue-APY worker |
+| [protocol-webserver](crates/protocol-webserver/README.md) | Deployment registry + asset catalog + spot prices, venue-APY worker |
 | [metaquoter](crates/metaquoter/README.md) | DB-less swap quote aggregator |
 | [risk-webserver](crates/risk-webserver/README.md) | Address screening |
 | [shared](crates/shared/README.md) | Tick driver, shutdown, config, `AppError` |
 | [chain-types](crates/chain-types/README.md) | Event ABI + decode |
-| [common-crypto](crates/common-crypto/README.md) | FMD + Merkle primitives |
+| [crypto](crates/crypto/README.md) | FMD + Merkle primitives |
 | [groth16](crates/groth16/README.md) | Native Groth16 prover + verifier over snarkjs artifacts |
 | [asset-registry](crates/asset-registry/README.md) | Asset catalog rows + circuit-unit arithmetic |
 | [prices](crates/prices/README.md) | USD spot prices, cache + provider fallback |
@@ -293,6 +293,7 @@ rows and rewind. See [database](crates/database/README.md#reorg-retraction).
 - Rust 1.95 (pinned via `rust-toolchain.toml`)
 - [`just`](https://github.com/casey/just)
 - Docker (local stack, integration tests)
+- `cargo-nextest` (`brew install cargo-nextest`) for `just test`
 - `protoc` and libclang (`brew install protobuf llvm` /
   `apt-get install protobuf-compiler libclang-dev`) — the relayer's
   `circom-witnesscalc` build script generates its witness-graph reader with
@@ -302,7 +303,8 @@ rows and rewind. See [database](crates/database/README.md#reorg-retraction).
 
 ```sh
 just build    # cargo build --workspace
-just test     # cargo test --workspace
+just test     # cargo nextest run, whole workspace (args pass through: -p relayer)
+just test-doc # doctests, which nextest skips
 just ci       # fmt + clippy + test
 ```
 

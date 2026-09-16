@@ -190,17 +190,6 @@ mod tests {
     fn accepts_an_integer_written_with_a_decimal_point() {
         assert_eq!(scale("1.0").to_base(3), U256::from(3u8));
     }
-}
-
-#[cfg(test)]
-mod rate_tests {
-    use super::*;
-    use std::str::FromStr;
-
-    fn scale(s: &str) -> Scale {
-        Scale::from_decimal(&BigDecimal::from_str(s).expect("decimal")).expect("usable scale")
-    }
-
     /// An empty pool has no ratio yet, so a unit is worth exactly `scale` and
     /// the rate is indistinguishable from a plain asset's.
     #[test]
@@ -235,7 +224,7 @@ mod rate_tests {
     /// broke: a quote rounded up must never come back worth less than the
     /// amount it was quoted for.
     #[test]
-    fn a_rounded_up_note_always_covers_the_amount_it_came_from() {
+    fn a_rounded_up_note_at_any_rate_covers_the_amount_it_came_from() {
         let rates = [
             Rate::plain(scale("1000")),
             Rate::yielding(

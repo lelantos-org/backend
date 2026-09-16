@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::advisory::{ChainLock, MIGRATE_KEY};
 use diesel::Connection;
 use diesel::pg::PgConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
@@ -52,9 +53,9 @@ pub async fn run_locked(database_url: &str) -> Result<(), MigrateError> {
     result.map_err(|e| MigrateError::Run(format!("join migrate task: {e}")))?
 }
 
-async fn acquire_lock(database_url: &str) -> Result<crate::ChainLock, MigrateError> {
+async fn acquire_lock(database_url: &str) -> Result<ChainLock, MigrateError> {
     for attempt in 0..LOCK_ATTEMPTS {
-        match crate::ChainLock::try_acquire(database_url, crate::advisory::MIGRATE_KEY).await {
+        match ChainLock::try_acquire(database_url, MIGRATE_KEY).await {
             Ok(Some(lock)) => return Ok(lock),
             Ok(None) => {
                 if attempt == 0 {

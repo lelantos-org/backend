@@ -1,110 +1,23 @@
 //! snarkjs-shaped witness builder for `tree_update_batch.circom`.
 
-use crate::domain::batch::MAX_L_BATCH;
+use crate::domain::batch::PaddedBatch;
 use crate::services::tree::{AdvancedState, ReservedSlot};
-use alloy::primitives::{FixedBytes, U256};
-use common_crypto::tree::Field;
+use alloy::primitives::U256;
+use crypto::tree::Field;
 use groth16::TreeUpdateBatchWitness;
 
-/// One escrowed deposit leaf. The circuit pins
-/// `cv_dep == public_in · V^asset + rcv · H` for every slot flagged
-/// `is_deposit`, so each leaf carries its own binding and there is no per-pair
-/// aggregate.
-#[derive(Debug, Clone)]
-pub struct LeafDeposit {
-    pub cv_dep: [U256; 2],
-    pub leaf_asset: u64,
-    pub leaf_public_in: u64,
-    pub rcv: U256,
-}
-
-/// The circuit's leaf-indexed signals, every column padded to `MAX_L_BATCH`.
+/// The `tree_update_batch` witness for `batch` advancing the tree from `slot` to
+/// `advanced`, under challenge `z`.
 ///
-/// Held together rather than as five same-shaped vectors: both builders fill the
-/// same slot index across all of them, and the circuit rejects a short or long
-/// signal with no useful message. Zero is the padding the circuit and the
-/// contract both enforce, so a column nobody fills is already correct.
-struct LeafColumns {
-    cms: Vec<String>,
-    cv_dep: Vec<[String; 2]>,
-    leaf_asset: Vec<String>,
-    leaf_public_in: Vec<String>,
-    is_deposit: Vec<String>,
-    rcv: Vec<String>,
-}
-
-impl LeafColumns {
-    fn zeroed() -> Self {
-        let zeros = || vec!["0".to_string(); MAX_L_BATCH];
-        Self {
-            cms: zeros(),
-            cv_dep: vec![["0".to_string(), "0".to_string()]; MAX_L_BATCH],
-            leaf_asset: zeros(),
-            leaf_public_in: zeros(),
-            is_deposit: zeros(),
-            rcv: zeros(),
-        }
-    }
-
-    /// The commitment column, which both witnesses supply the same way.
-    fn set_cms(&mut self, cms: &[FixedBytes<32>]) {
-        for (i, cm) in cms.iter().enumerate() {
-            self.cms[i] = bytes32_to_dec(&cm.0);
-        }
-    }
-}
-
-/// Spend-side witness: `TRANSACT_OUT` leaves, all with `is_deposit = 0`. The
-/// transact SNARK already proves conservation, so the per-leaf deposit binding is
-/// skipped and `rcv` stays zero.
-pub fn build_spend(
+/// Every leaf-indexed signal is read from `batch`, already padded to
+/// `MAX_L_BATCH`: the circuit rejects a short or long signal with no useful
+/// message, and zero is the padding the circuit and the contract both enforce.
+/// A spend batch carries no deposit binding, so its `is_deposit`, `leaf_asset`,
+/// `leaf_public_in` and `rcv` columns are already zero.
+pub fn build(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
-    cms_real: &[FixedBytes<32>],
-    cv_deps_real: &[[U256; 2]],
-    z: String,
-) -> TreeUpdateBatchWitness {
-    debug_assert_eq!(cms_real.len(), cv_deps_real.len());
-
-    let mut cols = LeafColumns::zeroed();
-    cols.set_cms(cms_real);
-    for (i, cv) in cv_deps_real.iter().enumerate() {
-        cols.cv_dep[i] = [u256_to_dec(&cv[0]), u256_to_dec(&cv[1])];
-    }
-
-    build_inner(slot, advanced, cms_real.len() as u64, cols, z)
-}
-
-/// Flush-side witness, one leaf per escrowed deposit, so `deposits.len()` is the
-/// leaf count. Padding slots emit zero for `cm`, `cv_dep`, `leaf_asset`,
-/// `leaf_public_in`, `is_deposit` and `rcv`.
-pub fn build_batch(
-    slot: &ReservedSlot,
-    advanced: &AdvancedState,
-    real_cms: &[FixedBytes<32>],
-    deposits: &[LeafDeposit],
-    z: String,
-) -> TreeUpdateBatchWitness {
-    debug_assert_eq!(real_cms.len(), deposits.len());
-
-    let mut cols = LeafColumns::zeroed();
-    cols.set_cms(real_cms);
-    for (i, d) in deposits.iter().enumerate() {
-        cols.cv_dep[i] = [u256_to_dec(&d.cv_dep[0]), u256_to_dec(&d.cv_dep[1])];
-        cols.leaf_asset[i] = d.leaf_asset.to_string();
-        cols.leaf_public_in[i] = d.leaf_public_in.to_string();
-        cols.is_deposit[i] = "1".to_string();
-        cols.rcv[i] = u256_to_dec(&d.rcv);
-    }
-
-    build_inner(slot, advanced, deposits.len() as u64, cols, z)
-}
-
-fn build_inner(
-    slot: &ReservedSlot,
-    advanced: &AdvancedState,
-    actual_count: u64,
-    cols: LeafColumns,
+    batch: &PaddedBatch,
     z: String,
 ) -> TreeUpdateBatchWitness {
     TreeUpdateBatchWitness {
@@ -112,13 +25,17 @@ fn build_inner(
         old_root: field_to_dec(&slot.old_root),
         new_root: field_to_dec(&advanced.new_root),
         start_index: slot.start_index.to_string(),
-        actual_count: actual_count.to_string(),
-        cms: cols.cms,
-        cv_dep: cols.cv_dep,
-        leaf_asset: cols.leaf_asset,
-        leaf_public_in: cols.leaf_public_in,
-        is_deposit: cols.is_deposit,
-        rcv: cols.rcv,
+        actual_count: batch.actual_count.to_string(),
+        cms: batch.cms.iter().map(|cm| field_to_dec(&cm.0)).collect(),
+        cv_dep: batch
+            .cv_deps
+            .iter()
+            .map(|cv| [cv[0].to_string(), cv[1].to_string()])
+            .collect(),
+        leaf_asset: dec_column(&batch.leaf_asset),
+        leaf_public_in: dec_column(&batch.leaf_public_in),
+        is_deposit: dec_column(&batch.is_deposit),
+        rcv: dec_column(&batch.rcv),
         frontier_in: slot
             .old_frontier
             .iter()
@@ -133,23 +50,20 @@ fn build_inner(
     }
 }
 
+fn dec_column<T: ToString>(column: &[T]) -> Vec<String> {
+    column.iter().map(ToString::to_string).collect()
+}
+
 fn field_to_dec(b: &Field) -> String {
     U256::from_be_bytes(*b).to_string()
-}
-
-fn bytes32_to_dec(b: &[u8; 32]) -> String {
-    U256::from_be_bytes(*b).to_string()
-}
-
-fn u256_to_dec(v: &U256) -> String {
-    v.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::batch::MAX_L_BATCH;
     use crate::domain::dto::TRANSACT_OUT;
-    use crate::services::tree::{AdvancedState, ReservedSlot};
+    use alloy::primitives::FixedBytes;
 
     /// A spend witness: `TRANSACT_OUT` leaves with no deposit binding, the shape
     /// both single-spend pipelines produce.
@@ -158,6 +72,7 @@ mod tests {
             start_index: 4,
             old_root: [1u8; 32],
             old_frontier: vec![[[2u8; 32], [3u8; 32], [4u8; 32]]; 10],
+            anchor_index: None,
         };
         let advanced = AdvancedState {
             new_root: [5u8; 32],
@@ -168,7 +83,12 @@ mod tests {
         let cv_deps: Vec<[U256; 2]> = (0..TRANSACT_OUT)
             .map(|i| [U256::from(8u8 + i as u8), U256::from(9u8 + i as u8)])
             .collect();
-        build_spend(&slot, &advanced, &cms, &cv_deps, "12".to_string())
+        build(
+            &slot,
+            &advanced,
+            &PaddedBatch::from_spend(&cms, &cv_deps),
+            "12".to_string(),
+        )
     }
 
     /// One signal's flattened values, by the name the circuit declares.

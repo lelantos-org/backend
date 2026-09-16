@@ -36,7 +36,7 @@ DCP := DC + " --profile " + PROFILE
 # rpc-proxy is the one where a stale entry is silent rather than noisy: its
 # contract allowlist comes from the seeds in addresses.env, so a missed restart
 # leaves it refusing every read of the freshly deployed tokens.
-ADDRESS_CONSUMERS := "ingester|relayer|metaquoter|registry-webserver|protocol-indexer|rpc-proxy"
+ADDRESS_CONSUMERS := "ingester|relayer|metaquoter|protocol-webserver|protocol-indexer|rpc-proxy"
 
 default:
     @just --list
@@ -158,7 +158,7 @@ sh SVC:
 
 # Globbed rather than named after the service: each container mounts exactly
 # one TOML under /etc/, and the filename does not always match the service
-# (registry-webserver mounts /etc/registry.toml).
+# (protocol-webserver mounts /etc/registry.toml).
 
 # Effective TOML a service actually mounted (post STACK_ENV selection).
 show-config SVC:

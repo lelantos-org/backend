@@ -156,6 +156,8 @@ services:
             # anvil dev key #0 — public, no secret.
             DEPLOYER_KEY: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
             FUND_RECIPIENT: "0x6bDA96a7204E597857E2e5B7Ac8F8e23557B0a1E"
+            # The relayer's signer (anvil dev account #1, config/dev/relayer.toml).
+            BUNDLER_OPERATOR: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
             FUND_NATIVE: 100ether
             FUND_WETH: "100000000000000000000"     # 100 e18
             FUND_ERC20: "1000000000000000000000000" # 1 e24
@@ -408,11 +410,11 @@ services:
     # Reads tables explorer-indexer owns and runs no migrations of its own. It
     # writes only the APY estimate, and only from the one replica that wins this
     # chain's advisory lock — see `services::venue_apy`.
-    registry-webserver:
+    protocol-webserver:
         <<: *backend-base
         profiles: *profiles-registry
-        build: { <<: *rust-build, args: { PACKAGE: registry-webserver } }
-        image: lelantos/registry-webserver:dev
+        build: { <<: *rust-build, args: { PACKAGE: protocol-webserver } }
+        image: lelantos/protocol-webserver:dev
         environment:
             <<: *backend-env
             REGISTRY_CONFIG: /etc/registry.toml

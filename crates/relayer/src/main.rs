@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use groth16::{Groth16Prover, TreeUpdateBatchProver};
 use relayer::{RelayerConfig, build_router, build_state};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 #[tokio::main]
@@ -38,6 +39,10 @@ async fn main() -> Result<()> {
     let state = build_state(&cfg, pool, prover)
         .await
         .context("build app state")?;
+    for c in &cfg.chains {
+        let flush = state.flush_pipeline(c.chain_id).context("flush pipeline")?;
+        relayer::handlers::worker::flush::spawn(flush, Duration::from_secs(c.flush_interval_s));
+    }
 
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr)
         .await

@@ -12,7 +12,7 @@
 //! clear the other's stored value.
 
 use super::tick::ConsumeCtx;
-use crate::adapters::DynTokenMetadata;
+use crate::adapters::erc20::DynTokenMetadata;
 use crate::domain::address;
 use crate::repositories::{asset_yield, assets};
 use futures::stream::{self, StreamExt};

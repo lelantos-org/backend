@@ -24,6 +24,19 @@ pub struct RawEvent {
     pub data: Vec<u8>,
 }
 
+/// Per-block facts the ingester needs beyond the log itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockMeta {
+    pub timestamp: u64,
+    /// What Solidity's `block.number` returns inside this block.
+    ///
+    /// Equal to the block's own height on Ethereum and OP-stack chains. On
+    /// Arbitrum it is the L1 height, which is what MASP hashes into the deposit
+    /// digest; replaying the L2 height there reverts `DigestMismatch`. Taken from
+    /// the block's non-standard `l1BlockNumber` field when the node reports one.
+    pub evm_block_number: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockCursor {
     pub chain_id: i64,

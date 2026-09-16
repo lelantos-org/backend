@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/shared",
     "crates/chain-types",
-    "crates/common-crypto",
+    "crates/crypto",
     "crates/groth16",
     "crates/database",
     "crates/asset-registry",
@@ -14,7 +14,7 @@ members = [
     "crates/protocol-indexer",
     "crates/fmd-webserver",
     "crates/explorer-webserver",
-    "crates/registry-webserver",
+    "crates/protocol-webserver",
     "crates/relayer",
     "crates/metaquoter",
     "crates/rpc-proxy",
@@ -99,7 +99,7 @@ dotenvy = "0.15"
 
 # crypto (FMD crates only)
 #
-# Pinned to arkworks 0.4 by `light-poseidon`, not by preference. `common-crypto`
+# Pinned to arkworks 0.4 by `light-poseidon`, not by preference. `crypto`
 # calls `get_poseidon_parameters::<Fq>()` with its own field type, and that
 # function is bounded on `light-poseidon`'s ark-ff, so the two versions cannot
 # diverge. light-poseidon 0.2 requires ark 0.4; its latest release (0.4) requires
@@ -145,7 +145,7 @@ async-trait = "0.1"
 mockall = "0.13"
 vergen-gix = { version = "9", features = ["build", "cargo", "rustc"] }
 
-testcontainers = "0.23"
+testcontainers = { version = "0.23", features = ["reusable-containers"] }
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
 [profile.release]

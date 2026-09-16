@@ -4,8 +4,8 @@
 //! `consumer_cursors` table. The trait and its Postgres impl live here so every
 //! crate depends on a single source of truth.
 
-use crate::DbPool;
 use crate::schema::{chain_state, consumer_cursors};
+use crate::{DbConn, DbPool};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -61,6 +61,13 @@ impl PostgresCursorRepo {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
+
+    async fn conn(&self) -> CursorResult<DbConn<'_>> {
+        self.pool
+            .get()
+            .await
+            .map_err(|e| CursorError::Pool(e.to_string()))
+    }
 }
 
 /// `INSERT … ON CONFLICT … DO UPDATE SET … WHERE last_event_id < $new`.
@@ -85,11 +92,7 @@ fn monotonic_stmt(
 #[async_trait]
 impl CursorRepo for PostgresCursorRepo {
     async fn fetch(&self, name: &str, chain_id: i64) -> CursorResult<(i64, i64)> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| CursorError::Pool(e.to_string()))?;
+        let mut conn = self.conn().await?;
         let row: Option<(i64, i64)> = consumer_cursors::table
             .filter(consumer_cursors::name.eq(name))
             .filter(consumer_cursors::chain_id.eq(chain_id))
@@ -104,11 +107,7 @@ impl CursorRepo for PostgresCursorRepo {
     }
 
     async fn upsert(&self, row: UpsertCursor) -> CursorResult<()> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| CursorError::Pool(e.to_string()))?;
+        let mut conn = self.conn().await?;
         diesel::insert_into(consumer_cursors::table)
             .values(&row)
             .on_conflict((consumer_cursors::name, consumer_cursors::chain_id))
@@ -120,11 +119,7 @@ impl CursorRepo for PostgresCursorRepo {
     }
 
     async fn upsert_monotonic(&self, row: UpsertCursor) -> CursorResult<bool> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| CursorError::Pool(e.to_string()))?;
+        let mut conn = self.conn().await?;
         // The `WHERE last_event_id < $new` predicate lives in the `DO UPDATE`
         // clause, so a rejected advance reports zero affected rows rather than
         // an error.
@@ -132,11 +127,7 @@ impl CursorRepo for PostgresCursorRepo {
     }
 
     async fn list_chain_ids(&self) -> CursorResult<Vec<i64>> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| CursorError::Pool(e.to_string()))?;
+        let mut conn = self.conn().await?;
         Ok(chain_state::table
             .select(chain_state::chain_id)
             .load(&mut conn)

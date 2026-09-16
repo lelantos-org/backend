@@ -46,9 +46,7 @@ async fn fmd_consume_pairs_root_advanced_with_note_created() {
     insert_note_payload_event(&pool, CHAIN_ID, 100, 1700000000, &tx, 1, cm0).await;
     insert_note_payload_event(&pool, CHAIN_ID, 100, 1700000000, &tx, 2, cm1).await;
 
-    let cursors = Arc::new(fmd_indexer::repositories::cursor::PostgresCursorRepo::new(
-        pool.clone(),
-    ));
+    let cursors = Arc::new(database::PostgresCursorRepo::new(pool.clone()));
     let raw_events_repo =
         Arc::new(fmd_indexer::repositories::raw_events::PostgresRawEventsRepo::new(pool.clone()));
     let notes_repo = Arc::new(fmd_indexer::repositories::notes::PostgresNotesRepo::new(
@@ -102,17 +100,10 @@ async fn explorer_consume_writes_tree_advances() {
     .await;
     insert_asset_registered_event(&pool, CHAIN_ID, 200, 1700000100, &tx, 1, 1).await;
 
-    let cfg = Arc::new(protocol_indexer::config::ProtocolIndexerConfig {
-        database_url: String::new(),
-        chains: Vec::new(),
-        tick_ms: 1000,
-        batch: 500,
-    });
-    // No chains and no metadata RPC, so the decimals sweep is a no-op and this
+    // No metadata RPC, so the decimals sweep is a no-op and this
     // covers event consumption only.
     let ctx = protocol_indexer::services::consume::ConsumeCtx {
         pool: pool.clone(),
-        cfg,
         token_meta: Arc::new(std::collections::HashMap::new()),
         refresh: Arc::new(protocol_indexer::services::consume::RefreshGate::new()),
     };
@@ -329,8 +320,9 @@ async fn insert_asset_registered_event(
 /// membership, and every wallet downloads the feed whole.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nullifier_chunk_feed_slices_spent_set() {
+    use fmd_indexer::domain::pending::NewSpentNullifier;
     use fmd_indexer::repositories::spent_nullifiers::{
-        NewSpentNullifier, PostgresSpentNullifiersRepo, SpentNullifiersRepo,
+        PostgresSpentNullifiersRepo, SpentNullifiersRepo,
     };
 
     let (pool, _guard) = fresh_pool().await;

@@ -5,7 +5,7 @@ Fuzzy Message Detection indexer. Two concurrent loops:
 - **consume** — drains ingested clue events into the FMD pipeline.
 - **filter** — runs FMD detection across `filter_workers` rayon threads in batches of `filter_batch`.
 
-Depends on `common-crypto` (private side of the privacy gate).
+Depends on `crypto` (private side of the privacy gate).
 
 ## Replicas
 
@@ -145,3 +145,17 @@ in the binary calls them today — only tests do.
 - **`ChainLocks::is_leader` holds its mutex across a TCP connect.** One slow
   `ChainLock::try_acquire` delays the leadership check for every other chain in
   the same replica.
+
+## Layering
+
+Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Layer | What |
+|-------|------|
+| `app/` | Config (TOML or env-only fallback) and build stamp |
+| `adapters/locks` | The per-chain advisory locks the consume loop leads by |
+| `domain/` | `pending/` (window → `CommitPlan`: `leaf`, `tx`, `batch`), `escrow` side lookup, NUMERIC and clue-bit decoders, error type |
+| `repositories/` | One module per table: `notes`, `spent_nullifiers`, `matches`, `subscriptions`, `raw_events`, `tree_state`. Cursors go through `database::CursorRepo` |
+| `services/consume/` | The consume tick; `kinds` is the fetch filter, `stall` the no-progress alarm, `tree` the frontier fold |
+| `services/filter/` | The filter tick; `subscribers` caches parsed keys, `scan` runs detection, `head` lags the backfill head |
+| `handlers/worker` | Both loops through `shared::tick::run_with_wake` |

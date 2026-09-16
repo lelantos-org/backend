@@ -13,7 +13,7 @@ of the ABI.
 
 ## Events
 
-`abi.rs` declares the pool's log types with alloy's `sol!`; `decode.rs` maps
+`abi/events.rs` declares the pool's log types with alloy's `sol!`; `decode/` maps
 each to a `shared::entities::EventKind` discriminant, which is what
 `raw_events.event_kind` stores.
 
@@ -56,8 +56,7 @@ let decoded: Vec<DecodedEvent> = chain_types::decode(kind, &topics, &data)?;
 ```
 
 `decode` takes the stored `EventKind` and the log's `topics` and `data` as
-`raw_events` holds them. It fails rather than guessing: an unknown discriminant
-is `DecodeError::UnknownKind`, a payload that does not match the ABI is
+`raw_events` holds them. A payload that does not match the ABI is
 `DecodeError::Alloy`.
 
 ## Numeric
@@ -99,5 +98,5 @@ now does not.
 
 ## Layering
 
-May import `shared` and alloy. Must NOT import `database`, `common-crypto`, or any
+May import `shared` and alloy. Must NOT import `database`, `crypto`, or any
 binary or service crate. See [ARCHITECTURE.md](../../ARCHITECTURE.md).

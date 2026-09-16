@@ -4,7 +4,7 @@ pub mod filter;
 pub use consume::{ConsumeService, ConsumeServiceImpl};
 pub use filter::{FilterService, FilterServiceImpl};
 
-use crate::repositories::cursor::CursorRepo;
+use database::CursorRepo;
 use tracing::warn;
 
 /// The chains a tick should visit this round: every chain the shared cursor

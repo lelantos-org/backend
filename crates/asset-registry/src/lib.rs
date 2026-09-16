@@ -5,7 +5,7 @@
 //! through here. A leaf library rather than a shared binary because
 //! `backend/ARCHITECTURE.md` forbids one binary importing another, and three
 //! crates need the same row shape: the relayer (fee decoration and shielded-fee
-//! admission), `registry-webserver` (which serves the catalog) and
+//! admission), `protocol-webserver` (which serves the catalog) and
 //! `explorer-webserver` (asset-backed analytics).
 
 pub mod cache;

@@ -2,5 +2,3 @@
 
 pub mod address;
 pub mod error;
-
-pub use error::{ProtocolIndexerError, Result};

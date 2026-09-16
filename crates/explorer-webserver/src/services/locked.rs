@@ -1,10 +1,10 @@
-use crate::adapters::{TokenKey, TokenPrice};
 use crate::app::AppState;
 use crate::domain::amount::whole_tokens_str;
 use crate::domain::error::AppResult;
 use crate::domain::responses::{ChainLockedOut, LockedAssetOut, LockedBasis};
 use crate::repositories::asset_locked::{self, LockedRow};
 use bigdecimal::ToPrimitive;
+use prices::{TokenKey, TokenPrice, to_usd};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub async fn by_chain(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec
             .iter()
             .map(|r| TokenKey::new(r.chain_id, r.token_hex.clone()))
             .collect();
-        let prices = super::prices::for_tokens(&st, &keys).await;
+        let prices = st.prices.for_tokens(&keys).await;
         Ok(Arc::new(fold(rows, &prices)))
     })
     .await
@@ -44,7 +44,7 @@ fn locked_asset(row: LockedRow, prices: &HashMap<TokenKey, TokenPrice>) -> Locke
     };
     let locked_usd = prices
         .get(&TokenKey::new(row.chain_id, row.token_hex.clone()))
-        .and_then(|p| super::prices::to_usd(locked_base.to_f64()?, row.decimals, p));
+        .and_then(|p| to_usd(locked_base.to_f64()?, row.decimals, p));
     LockedAssetOut {
         asset_id_u64: row.asset_id_u64,
         token_hex: row.token_hex,

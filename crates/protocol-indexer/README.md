@@ -11,7 +11,7 @@ protocol tables" but **who reads them**: `tree_advances` and
 relayer's on-chain write path, so classing them as analytics would have put that
 path behind a service allowed to lag.
 
-Public data only. **Must not depend on `common-crypto`** — the privacy gate is
+Public data only. **Must not depend on `crypto`** — the privacy gate is
 recorded in `Cargo.toml` and `lib.rs`, but nothing in CI checks it, so a new
 dependency edge has to be caught in review.
 
@@ -134,3 +134,16 @@ changed **and** either the consumer has caught up or `MIN_REFRESH_INTERVAL` (30 
 has passed, so a long backfill still publishes progress rather than going dark.
 A failed refresh keeps the dirty flag and backs off rather than retrying every
 tick.
+
+## Layering
+
+Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Layer | What |
+|-------|------|
+| `app/` | Config and build stamp |
+| `adapters/` | `erc20` metadata reads; `masp/` yield rounds, batched through Multicall3 (`multicall`) or per asset (`per_asset`) |
+| `domain/` | Error type and the `bytea` address decoder |
+| `repositories/` | One module per table written: `assets`, `asset_yield`, `tree_advances`, `deposit_escrowed_events`. The cursor goes through `database::CursorRepo` |
+| `services/consume/` | The consume tick: `events` routes each decoded event into a `plan` split by projection (`assets`, `yields`, `tree`, `deposits`), then `metadata` sweeps RPC-only columns and `refresh` gates the materialized view |
+| `services/yield_state/` | The `yieldState` poller |

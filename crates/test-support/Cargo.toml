@@ -13,4 +13,5 @@ diesel = { workspace = true }
 diesel-async = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
+libc = "0.2"
 tokio = { workspace = true }

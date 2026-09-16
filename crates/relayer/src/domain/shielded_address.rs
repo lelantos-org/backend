@@ -18,8 +18,8 @@
 use crate::domain::error::{AppError, AppResult};
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32m, Hrp};
-use common_crypto::clue::unpack_subgroup;
-use common_crypto::tree::Field;
+use crypto::clue::unpack_subgroup;
+use crypto::tree::Field;
 
 pub const ADDRESS_HRP: &str = "lelantos";
 const FIELD_BYTES: usize = 32;
@@ -100,9 +100,12 @@ mod tests {
     use super::*;
 
     /// Emitted by `sdk/src/keys/address.ts :: encodeAddress` for the spending key
-    /// at seed 7777, the same key the `common-crypto` note vectors use, so `pk` here
+    /// at seed 7777, the same key the `crypto` note vectors use, so `pk` here
     /// is checkable against those.
-    const VALID: &str = include_str!("../../tests/vectors/shielded-address.txt");
+    const VALID: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/shielded-address.txt"
+    ));
 
     fn valid() -> &'static str {
         VALID.trim()
@@ -114,7 +117,7 @@ mod tests {
         assert_eq!(
             hex::encode(a.pk),
             // pk for seed 7777, big-endian; matches `pkDec` in
-            // `crates/common-crypto/tests/vectors/note-parity.json`.
+            // `crates/crypto/tests/vectors/note-parity.json`.
             "0c70606823cfb3c8f358f6c1b7faf360ee0fddd827b4493f83b530ee8e41c053"
         );
     }

@@ -58,5 +58,21 @@ jobs:
         # build on the runner.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - uses: extractions/setup-just@v2
-      - run: just test
+      # Database-backed tests start their own Postgres container through the
+      # runner's Docker daemon; nothing needs to be provisioned here.
+      - run: just test --profile ci
+      - run: just test-doc
+      - name: Test report
+        if: ${{ !cancelled() }}
+        uses: test-summary/action@v2
+        with:
+          paths: target/nextest/ci/junit.xml
+      - name: Upload JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore

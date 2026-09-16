@@ -1,4 +1,5 @@
-use crate::domain::error::{Result, log_unique_violation};
+use super::log_unique_violation;
+use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
 use database::listen::{self, CHANNEL_NOTES_APPENDED};

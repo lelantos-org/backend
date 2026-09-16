@@ -15,19 +15,6 @@ struct NewSubscription {
     token_hash: Vec<u8>,
 }
 
-/// Resolve a capability token to the internal subscription id. `None` when it
-/// matches nothing; callers must not distinguish that from an empty result set.
-pub async fn id_by_token(pool: &DbPool, token: &TokenHash) -> AppResult<Option<i64>> {
-    let mut conn = super::conn(pool).await?;
-    subscriptions::table
-        .filter(subscriptions::token_hash.eq(token.as_bytes()))
-        .select(subscriptions::id)
-        .first(&mut conn)
-        .await
-        .optional()
-        .map_err(super::db_err)
-}
-
 /// Internal id and backfill watermark behind a token, without the row.
 ///
 /// Two columns rather than `SubscriptionRow::as_select()`, which is what

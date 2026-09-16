@@ -11,10 +11,13 @@ and reorg retraction. No business logic.
 | `schema` | `diesel::table!` definitions (generated; edit via migrations) |
 | `models` | Queryable/Insertable structs for the shared tables |
 | `pool` | `DbPool`, `DbConn`, `PoolCfg` presets, `build_pool` |
-| `migrate` | `MIGRATIONS` (embedded) + `run(database_url)` |
+| `migrate` | `MIGRATIONS` (embedded), `run_locked` (startup) and `run` (unlocked) |
 | `cursor` | `CursorRepo` trait + `PostgresCursorRepo` |
+| `raw_events` | `RawEventRow` and the shared read queries over `raw_events` |
+| `reorg/` | `apply_pending` and the reorg log (`mod`); per-owner deletions and the cursor rewind (`retract`) |
+| `direct` | `DATABASE_DIRECT_URL` resolution for the session-scoped connections below |
 | `advisory` | Session-level per-chain advisory locks |
-| `reorg` | `apply_pending` — retract derived state after a fork |
+| `listen/` | `NOTIFY` publishing and channel names (`mod`); the `LISTEN` wake connection (`session`) |
 
 ## Tables
 
@@ -33,9 +36,9 @@ One Postgres instance backs the whole system. `ingester` is the only writer of
 | `matches` | fmd-indexer | fmd-webserver |
 | `subscriptions` | fmd-webserver | fmd-indexer |
 | `tree_state` | fmd-indexer | fmd-webserver, relayer (mirror bootstrap) |
-| `assets` | protocol-indexer | explorer-webserver, registry-webserver, relayer (`/chains`) — the last two via `asset-registry` |
-| `asset_yield` | protocol-indexer, **plus** registry-webserver for the three estimate columns | same readers as `assets` |
-| `asset_yield_sample` | registry-webserver (venue-APY worker) | registry-webserver (rate estimate, and the index history `/v1/yield-index` serves) |
+| `assets` | protocol-indexer | explorer-webserver, protocol-webserver, relayer (`/chains`) — the last two via `asset-registry` |
+| `asset_yield` | protocol-indexer, **plus** protocol-webserver for the three estimate columns | same readers as `assets` |
+| `asset_yield_sample` | protocol-webserver (venue-APY worker) | protocol-webserver (rate estimate, and the index history `/v1/yield-index` serves) |
 | `asset_flows` | explorer-indexer | explorer-webserver |
 | `yield_fee_events` | explorer-indexer | nothing yet (retracted on reorg; written ahead of a reader) |
 | `tree_advances` | protocol-indexer | explorer-webserver, relayer (tree bootstrap) |
@@ -44,7 +47,7 @@ One Postgres instance backs the whole system. `ingester` is the only writer of
 
 `asset_yield` is the one table with two writers, and they are disjoint by column:
 protocol-indexer creates the row from `YieldAssetAdded` and polls the on-chain
-state columns, while registry-webserver's elected measurer writes only the rate
+state columns, while protocol-webserver's elected measurer writes only the rate
 estimate onto a row that already exists.
 
 Note which crate owns what, because the names mislead. `tree_advances` and
@@ -70,15 +73,15 @@ just db-shell                        # psql, from stack/
 diesel migration generate <name>     # new pair, from crates/database/
 ```
 
-`migrate::run` is synchronous — call it once at startup from
-`tokio::task::spawn_blocking`. Three binaries do: `ingester`, `risk-webserver`
-(nothing else creates `screened_addresses`), and `relayer` (compose dependency
-graphs can bring it up before the ingester). Migrations are idempotent, so the
-overlap is harmless.
+Three binaries migrate at startup through `migrate::run_locked`: `ingester`,
+`risk-webserver` (nothing else creates `screened_addresses`), and `relayer`
+(compose dependency graphs can bring it up before the ingester). Migrations are
+idempotent, so the overlap is harmless.
 
 `diesel_migrations` takes no lock of its own, so N replicas booting together
-can apply the same migration concurrently. `ingester` serialises them under
-`advisory::MIGRATE_KEY`; the other two do not.
+could apply the same migration concurrently. `run_locked` serialises them under
+`advisory::MIGRATE_KEY`; the losers wait and then find nothing pending. The
+unlocked, synchronous `migrate::run` is for test fixtures (`test-support`).
 
 ## Pool presets
 
@@ -138,6 +141,8 @@ same chain without excluding one another:
 |----------|-------|
 | `NS_INGESTER` | ingester's per-chain worker locks |
 | `NS_FMD_CONSUME` | fmd-indexer's per-chain consume locks |
+| `NS_EXPLORER_CONSUME` | explorer-indexer's per-chain consume locks |
+| `NS_VENUE_APY` | protocol-webserver's per-chain venue-APY measurement lock |
 | `NS_MIGRATE` / `MIGRATE_KEY` | the single, chain-independent migration lock |
 
 ## Reorg retraction

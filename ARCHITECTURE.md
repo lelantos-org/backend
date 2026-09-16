@@ -13,7 +13,7 @@ Libraries
                     (no DB, no IO); behind its `rpc` feature it also holds
                     `RpcEndpoint`, the timed and retrying JSON-RPC transport
                     every chain-facing service builds its provider on
-  common-crypto        FMD primitives (poseidon, baby-jubjub, filter, tree) plus
+  crypto            FMD primitives (poseidon, baby-jubjub, filter, tree) plus
                     note recognition (trial decrypt + commitment rebuild)
   groth16           native Groth16 over BN254 against snarkjs artifacts: the
                     vendored zkey parser and QAP reduction, the circom
@@ -24,10 +24,10 @@ Libraries
                     advisory locks, reorg retraction
   asset-registry    the `assets` x `asset_yield` join, circuit-unit arithmetic
                     (Scale/Rate) and a cached read; used by relayer,
-                    registry-webserver and explorer-webserver
+                    protocol-webserver and explorer-webserver
   prices            USD spot prices: `PriceProvider` interface, one module per
                     upstream, and a cache-fronted `PriceService`; shared by
-                    registry-webserver and explorer-webserver
+                    protocol-webserver and explorer-webserver
 
 Binaries
   ingester           live + backfill log ingester (per chain)
@@ -37,7 +37,7 @@ Binaries
   fmd-webserver      FMD HTTP API (notes, matches, subscriptions, tree feeds)
   explorer-webserver explorer HTTP API (assets, flows, tree-advances, txs)
   risk-webserver     read-only address screening API
-  registry-webserver deployment registry + asset catalog + spot prices; also
+  protocol-webserver deployment registry + asset catalog + spot prices; also
                      measures venue APY, single-writer per chain via an
                      advisory lock
   relayer            tree-advance prover + submitter (the only on-chain writer);
@@ -77,8 +77,8 @@ Within a binary crate the layers are:
 - Any binary → another binary. `integration-tests` is the sole exception, and only as a dev-dependency.
 - `database` → any binary or service crate.
 - `shared` → anything internal (it is the bottom of the stack).
-- `protocol-indexer` / `explorer-indexer` / `explorer-webserver` → `common-crypto`. This is the privacy gate; it is a convention, not a CI check.
-- `groth16` → any other internal crate. It is a leaf, and deliberately arkworks-only: it is what keeps ark 0.6 out of everything `common-crypto` (ark 0.4) links. Public inputs cross its boundary as big-endian `[u8; 32]` words and proofs as decimal strings, so no ark type is nameable by a caller.
+- `protocol-indexer` / `explorer-indexer` / `explorer-webserver` → `crypto`. This is the privacy gate; it is a convention, not a CI check.
+- `groth16` → any other internal crate. It is a leaf, and deliberately arkworks-only: it is what keeps ark 0.6 out of everything `crypto` (ark 0.4) links. Public inputs cross its boundary as big-endian `[u8; 32]` words and proofs as decimal strings, so no ark type is nameable by a caller.
 
 ## Conventions
 
@@ -101,7 +101,7 @@ Within a binary crate the layers are:
 - **Pool**: `database::PoolCfg::indexer()` / `webserver()` / `relayer()` presets. Each carries a `statement_timeout`, so one slow query cannot hold a connection until the pool is exhausted; see [database](crates/database/README.md#pool-presets).
 - **Indexer writes**: a tick decodes its whole window into a plan, then writes it in one batched call per table — never one statement per event. No enclosing transaction: writes are idempotent and the cursor moves only after they all land, so a crash replays the window. `fmd_indexer::services::consume::CommitPlan` and `explorer_indexer::services::consume::plan::CommitPlan`.
 - **Materialized views**: refreshed through a gate that rebuilds on catching up, or once per interval while behind — never inline on every tick. A whole-table aggregate run per tick makes catch-up quadratic. The rule lives in `shared::refresh::ViewState`; each indexer owns a `RefreshGate` naming its own views (`explorer_indexer::services::consume::RefreshGate`, `protocol_indexer::services::consume::RefreshGate`).
-- **Replicas**: `ingester` and `fmd-indexer` are safe as N replicas via advisory locks — failover, not scale-out. The webservers are stateless and scale freely. `relayer` must run **one process per chain**. `registry-webserver` serves freely
+- **Replicas**: `ingester` and `fmd-indexer` are safe as N replicas via advisory locks — failover, not scale-out. The webservers are stateless and scale freely. `relayer` must run **one process per chain**. `protocol-webserver` serves freely
 from N replicas, but its venue-APY worker elects one measurer per chain via
 `database::advisory` (`NS_VENUE_APY`) and stores the result, so the replica that
 measures need not be the one that answers.

@@ -8,7 +8,8 @@ use serde::Deserialize;
 /// circuit rejects every submission at the JSON boundary, where serde refuses a
 /// fixed-size array of the wrong length, before the relayer can log a shape
 /// problem. Moving them requires moving the `sol!` aux arity in
-/// `adapters/abi.rs` and the coefficient layout in `domain/transact_pi.rs` in the
+/// `adapters/abi.rs` and the coefficient layout in
+/// `services/transact_verifier/public_signals.rs` in the
 /// same change.
 pub const TRANSACT_IN: usize = 4;
 pub const TRANSACT_OUT: usize = 6;
@@ -30,7 +31,7 @@ pub struct SubmitSpendPayload {
     pub proof: ProofDto,
     /// The base logical public inputs, in `PubInputs.compress(Transact)` order.
     /// The relayer derives the per-output clue slots and the aux digest from
-    /// `aux`, so they are absent here; see `domain::transact_pi` for the full
+    /// `aux`, so they are absent here; see `services::transact_verifier::public_signals` for the full
     /// coefficient count.
     pub pub_inputs: PubInputsDto,
     pub aux: [OutputAuxDto; TRANSACT_OUT],
@@ -79,6 +80,11 @@ pub struct PubInputsDto {
     pub chain_id: u64,
     pub payer: String,
     pub relayer: String,
+    /// `SwapWrapper._intentHash`, proof-bound through the challenge.
+    /// Decimal (or 0x-hex) uint256 string like the other field words. Required
+    /// like its neighbours: a swap must carry the hash of its own output terms
+    /// (see `pipeline::swap`), and spends send `"0"`, which the pool ignores.
+    pub intent_hash: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

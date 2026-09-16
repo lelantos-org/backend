@@ -10,14 +10,14 @@ use crate::domain::error::{FmdIndexerError, Result};
 use crate::domain::pending::TreeLeaf;
 use crate::repositories::notes::NotesRepo;
 use crate::repositories::tree_state::{TreeStateRepo, TreeStateRow};
-use common_crypto::tree::{DEPTH, Field, Frontier, encode_frontier};
+use crypto::tree::{DEPTH, Field, Frontier, encode_frontier};
 use database::models::LeafInputsRow;
 use tracing::{info, warn};
 
 /// Leaves read per round trip during [`backfill`].
 const LEAF_PAGE: i64 = 100_000;
 
-fn tree_err(e: common_crypto::tree::TreeError) -> FmdIndexerError {
+fn tree_err(e: crypto::tree::TreeError) -> FmdIndexerError {
     FmdIndexerError::Decode(e.to_string())
 }
 
@@ -31,8 +31,8 @@ fn hole(chain_id: i64, expected: i64, found: i64) -> FmdIndexerError {
 }
 
 fn leaf_hash_of(row: &LeafInputsRow) -> Result<Field> {
-    let cm = common_crypto::tree::field_from_bytes(&row.cm).map_err(tree_err)?;
-    common_crypto::tree::leaf_hash(
+    let cm = crypto::tree::field_from_bytes(&row.cm).map_err(tree_err)?;
+    crypto::tree::leaf_hash(
         &cm,
         &crate::domain::convert::bigdec_to_field(&row.cv_dep_x),
         &crate::domain::convert::bigdec_to_field(&row.cv_dep_y),
@@ -64,9 +64,9 @@ pub(super) async fn advance(
         Some(row) => Frontier::resume(
             DEPTH,
             row.leaf_count as u64,
-            common_crypto::tree::decode_frontier(DEPTH, &row.frontier)
+            crypto::tree::decode_frontier(DEPTH, &row.frontier)
                 .map_err(|e| FmdIndexerError::Decode(format!("stored frontier: {e}")))?,
-            common_crypto::tree::field_from_bytes(&row.root)
+            crypto::tree::field_from_bytes(&row.root)
                 .map_err(|e| FmdIndexerError::Decode(format!("stored root: {e}")))?,
         ),
         None => Frontier::new(DEPTH),

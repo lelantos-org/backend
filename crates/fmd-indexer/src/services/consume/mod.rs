@@ -2,7 +2,7 @@
 //!
 //! One tick reads a window of `raw_events`, decodes it into a [`CommitPlan`]
 //! ([`crate::domain::pending`]), writes that plan one batched call per table,
-//! and only then advances the cursor. Frontier folding lives in [`tree`], the
+//! and only then advances the cursor. Frontier folding lives in `tree`, the
 //! escrow side lookup in [`crate::domain::escrow`]; what is left here is the
 //! orchestration.
 //!
@@ -10,25 +10,25 @@
 //! read-then-write with no transaction — the cursor and the `spent_nullifiers`
 //! ordinal assignment — and corrupts under a second writer.
 
+mod kinds;
+mod stall;
 mod tree;
 
 use crate::adapters::locks::ChainLocks;
 use crate::domain::error::Result;
 use crate::domain::escrow::{EscrowedMap, decode_escrowed, flushed_deposit_ids};
 use crate::domain::pending::plan_commit;
-use crate::repositories::cursor::{CursorRepo, UpsertCursor};
 use crate::repositories::notes::NotesRepo;
 use crate::repositories::raw_events::{RawEventRow, RawEventsRepo};
 use crate::repositories::spent_nullifiers::SpentNullifiersRepo;
 use crate::repositories::tree_state::TreeStateRepo;
 use async_trait::async_trait;
-use shared::entities::EventKind;
+use database::{CursorRepo, UpsertCursor};
+use kinds::kinds;
 use shared::metrics::{record_event_age, stage};
 use shared::tick::TickProgress;
-use std::collections::HashMap;
+use stall::StallTracker;
 use std::sync::Arc;
-use std::sync::OnceLock;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 /// The plan one tick commits. Defined in the planning domain; re-exported here
@@ -37,62 +37,11 @@ pub use crate::domain::pending::CommitPlan;
 
 pub const NAME: &str = "fmd";
 
-/// Whether this service consumes a kind.
-///
-/// The predicate, not a list — `kinds()` below is derived from it, so the
-/// `WHERE event_kind = ANY` of the fetch cannot fall behind the decision. No
-/// wildcard arm, so a new `EventKind` variant fails to compile here and has to
-/// be classified deliberately.
-///
-/// explorer-indexer had the mirror-image bug: its filter was a hand-written
-/// array, the yield kinds were added to the enum but not to it, and their
-/// handlers were silently unreachable for as long as the mixin had been live.
-/// This service reads the FMD zone plus the two kinds it needs for ordering.
-const fn consumed(kind: EventKind) -> bool {
-    match kind {
-        EventKind::NoteCreated
-        | EventKind::RootAdvanced
-        | EventKind::NullifierConsumed
-        | EventKind::DepositFlushed => true,
-        EventKind::AssetRegistered
-        | EventKind::AssetMoved
-        | EventKind::DepositEscrowed
-        | EventKind::DepositCanceled
-        | EventKind::AssetFeeSet
-        | EventKind::YieldAssetAdded
-        | EventKind::YieldParamsSet
-        | EventKind::PerfFeeAccrued
-        | EventKind::NormalizedFeeSwept
-        | EventKind::Rebalanced
-        | EventKind::HaltedSet
-        | EventKind::EmergencyUnwound => false,
-    }
-}
-
-/// The kinds this service fetches, as the `ANY` array wants them.
-fn kinds() -> &'static [i16] {
-    static KINDS: OnceLock<Vec<i16>> = OnceLock::new();
-    KINDS.get_or_init(|| {
-        EventKind::ALL
-            .into_iter()
-            .filter(|k| consumed(*k))
-            .map(EventKind::as_i16)
-            .collect()
-    })
-}
-
 /// How far the window may be widened when a saturated one is entirely occupied by
 /// a transaction that cannot fit. A transaction needing more than 16 times
 /// `batch` rows is not a batch-sizing problem, so widening stops and the stall
 /// alarm fires.
 const MAX_WINDOW_GROWTH: i64 = 16;
-
-/// Consecutive no-progress ticks before deferral is treated as a stall rather
-/// than a normal wait for the next block. One minute at the default tick.
-const STALL_TICKS: u32 = 120;
-/// Re-report cadence once stalled, so a wedged chain stays visible without
-/// filling the log at tick rate.
-const STALL_REPEAT_TICKS: u32 = STALL_TICKS * 10;
 
 #[async_trait]
 pub trait ConsumeService: Send + Sync {
@@ -414,45 +363,5 @@ impl shared::tick::TickService for ConsumeServiceImpl {
         ConsumeService::tick_chain(self, chain_id, batch)
             .await
             .map_err(Into::into)
-    }
-}
-
-/// How long each chain has been parked on the same cursor.
-///
-/// Deferring a transaction is normal for one tick and an outage after a thousand.
-/// The tick returns `Ok(())` either way, so this counter distinguishes them.
-#[derive(Default)]
-struct StallTracker(Mutex<HashMap<i64, Stall>>);
-
-struct Stall {
-    cursor: i64,
-    ticks: u32,
-}
-
-impl StallTracker {
-    async fn record_idle(&self, chain_id: i64, cursor: i64, rows: usize) {
-        let mut stalls = self.0.lock().await;
-        let stall = stalls.entry(chain_id).or_insert(Stall { cursor, ticks: 0 });
-        if stall.cursor != cursor {
-            *stall = Stall { cursor, ticks: 0 };
-        }
-        stall.ticks += 1;
-
-        let overdue = stall.ticks.checked_sub(STALL_TICKS);
-        if overdue.is_some_and(|n| n % STALL_REPEAT_TICKS == 0) {
-            error!(
-                chain_id,
-                cursor,
-                rows,
-                ticks = stall.ticks,
-                "consume has committed nothing for {} consecutive ticks; the head tx cannot be \
-                 completed (missing DepositEscrowed, or a tx wider than the batch window)",
-                stall.ticks
-            );
-        }
-    }
-
-    async fn clear(&self, chain_id: i64) {
-        self.0.lock().await.remove(&chain_id);
     }
 }

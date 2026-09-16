@@ -1,4 +1,4 @@
-# registry-webserver — PROD. Mounted at /etc/registry.toml.
+# protocol-webserver — PROD. Mounted at /etc/registry.toml.
 #
 # The deployment half of the old `/chains`: what each chain is, independent of
 # which relayer serves it. Addresses arrive from the environment, since they

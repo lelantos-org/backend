@@ -1,5 +1,6 @@
 //! Behaviour of the per-chain tree mirror.
 
+use super::bootstrap::BootSource;
 use super::*;
 
 const CHAIN_ID: i64 = 31337;
@@ -121,7 +122,7 @@ fn parking_keeps_the_first_reason() {
 fn a_non_canonical_leaf_leaves_the_tree_untouched() {
     let mut m = mirror(1);
     let before_root = m.current_root();
-    let modulus: Field = crate::adapters::parse::BN254_R.to_be_bytes();
+    let modulus: Field = crate::domain::field::BN254_R.to_be_bytes();
 
     let err = m
         .reserve_and_advance_batch(&[(cm(10), cv(3)), (modulus, cv(4))])
@@ -139,7 +140,7 @@ fn a_non_canonical_leaf_leaves_the_tree_untouched() {
 #[test]
 fn a_non_canonical_cv_dep_also_leaves_the_tree_untouched() {
     let mut m = mirror(1);
-    let bad = [*crate::adapters::parse::BN254_R, U256::from(1u8)];
+    let bad = [*crate::domain::field::BN254_R, U256::from(1u8)];
 
     assert!(
         m.reserve_and_advance_batch(&[(cm(10), cv(3)), (cm(11), bad)])
@@ -155,7 +156,7 @@ fn a_batch_past_capacity_is_refused_before_any_hashing() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
     // Non-canonical on purpose: if the capacity check ran after hashing, this
     // would fail as a hash error, after hashing a million leaves.
-    let bad = *crate::adapters::parse::BN254_R;
+    let bad = *crate::domain::field::BN254_R;
     let leaves: Vec<(Field, [U256; 2])> = (0..MAX_LEAVES + 1)
         .map(|_| (bad.to_be_bytes::<32>(), cv(1)))
         .collect();
@@ -204,8 +205,8 @@ fn root_history_remembers_what_the_mirror_has_held() {
 }
 
 /// A rolled-back advance published a root the chain never held. Leaving it in the
-/// accepted window would let a wallet that read it from `/chains` pass
-/// `check_known_root` and then revert `StaleOldRoot` on chain.
+/// accepted window would let a wallet that read it from `/chains` pass the
+/// batcher's root check and then revert `UnknownRoot` on chain.
 #[test]
 fn a_rolled_back_root_stops_being_accepted() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
@@ -309,4 +310,461 @@ fn rollback_of_anything_but_the_last_reserve_is_rejected() {
 
     m.rollback(2).expect("the last reserve is still undoable");
     assert_eq!(m.committed_count(), 4);
+}
+
+// -- bundles ------------------------------------------------------------------
+
+/// Three items chained in one bundle and all kept: the mirror ends where a
+/// landed bundle leaves the chain, and every intermediate root stays accepted,
+/// since the pool registers each item's root.
+#[test]
+fn a_fully_kept_bundle_keeps_every_item_and_root() {
+    let mut m = mirror(1);
+    m.begin_bundle().unwrap();
+    let (a, a_adv) = advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    let (b, b_adv) = advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
+    let (c, c_adv) = advance2(&mut m, cm(14), cm(15), cv(5), cv(6)).unwrap();
+
+    assert_eq!(b.start_index, a.start_index + 2, "items chain");
+    assert_eq!(b.old_root, a_adv.new_root, "each builds on the one before");
+    assert_eq!(c.old_root, b_adv.new_root);
+    assert_eq!(m.bundle_len(), 3);
+
+    m.commit_prefix(3).unwrap();
+    assert_eq!(m.bundle_len(), 0, "the bundle is closed");
+    assert_eq!(m.committed_count(), 8);
+    assert_eq!(m.current_root(), c_adv.new_root);
+    for root in [a_adv.new_root, b_adv.new_root, c_adv.new_root] {
+        assert!(m.knows_root(&root), "every landed root is accepted");
+    }
+}
+
+/// The chain stopped after the first item: the mirror keeps exactly that item,
+/// and the discarded items' roots leave the accepted window.
+#[test]
+fn a_partial_prefix_keeps_only_the_items_that_landed() {
+    let mut m = mirror(1);
+    m.begin_bundle().unwrap();
+    let (_, a_adv) = advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    let (b, b_adv) = advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
+    let (_, c_adv) = advance2(&mut m, cm(14), cm(15), cv(5), cv(6)).unwrap();
+
+    m.commit_prefix(1).unwrap();
+    assert_eq!(m.committed_count(), 4, "one item of two leaves kept");
+    assert_eq!(m.current_root(), a_adv.new_root);
+    assert!(m.knows_root(&a_adv.new_root));
+    assert!(!m.knows_root(&b_adv.new_root), "discarded root retracted");
+    assert!(!m.knows_root(&c_adv.new_root), "discarded root retracted");
+
+    // Re-reserving the discarded item lands it exactly where it was, so a proof
+    // made for it before the rollback is still the right one.
+    let (again, again_adv) = advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
+    assert_eq!(again.start_index, b.start_index);
+    assert_eq!(again.old_root, b.old_root);
+    assert_eq!(again.old_frontier, b.old_frontier);
+    assert_eq!(again_adv.new_root, b_adv.new_root);
+}
+
+#[test]
+fn rolling_back_a_bundle_restores_the_pre_bundle_state() {
+    let mut m = mirror(2);
+    let root = m.current_root();
+    let window = m.recent_roots.clone();
+
+    m.begin_bundle().unwrap();
+    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
+    m.rollback_bundle().unwrap();
+
+    assert_eq!(m.committed_count(), 4);
+    assert_eq!(m.current_root(), root);
+    assert_eq!(m.recent_roots, window, "accepted window as it was");
+}
+
+#[test]
+fn a_bundle_cannot_be_opened_twice_or_kept_past_its_length() {
+    let mut m = mirror(1);
+    m.begin_bundle().unwrap();
+    assert!(m.begin_bundle().is_err(), "already open");
+    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    assert!(m.commit_prefix(2).is_err(), "only one item reserved");
+    assert!(
+        m.commit_prefix(0).is_err(),
+        "the failed commit closed the bundle"
+    );
+}
+
+/// An unknown outcome may still land, so the bundle's leaves stay and the mirror
+/// parks, exactly as a single batch does.
+#[test]
+fn abandoning_a_bundle_on_an_unknown_outcome_parks() {
+    let mut m = mirror(1);
+    m.begin_bundle().unwrap();
+    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+
+    let err = m.abandon_bundle(AppError::SubmitUnknown("no receipt".into()));
+    assert!(matches!(err, AppError::SubmitUnknown(_)));
+    assert!(m.is_desynced());
+    assert_eq!(m.committed_count(), 4, "leaves kept");
+    assert!(
+        m.begin_bundle().is_err(),
+        "parked mirror refuses new bundles"
+    );
+}
+
+#[test]
+fn abandoning_a_bundle_on_a_clean_failure_rolls_it_back() {
+    let mut m = mirror(1);
+    let root = m.current_root();
+    m.begin_bundle().unwrap();
+    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+
+    let err = m.abandon_bundle(AppError::Rpc("refused".into()));
+    assert!(matches!(err, AppError::Rpc(_)));
+    assert!(!m.is_desynced());
+    assert_eq!(m.current_root(), root);
+}
+
+#[test]
+fn root_age_counts_advances_since_a_root_was_current() {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    let empty = m.current_root();
+    assert_eq!(m.root_age(&empty), Some(0));
+    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(3), cm(4), cv(3), cv(4)).unwrap();
+    assert_eq!(m.root_age(&empty), Some(2));
+    assert_eq!(m.root_age(&m.current_root()), Some(0));
+    assert_eq!(m.root_age(&[0xEEu8; 32]), None);
+}
+
+/// `BatchAppend` pins every frontier slot a digit does not read to zero, so the
+/// witness a bundle item is proved against must carry zeros there even after the
+/// mirror has been rolled back and re-reserved.
+#[test]
+fn a_bundle_item_witness_zeroes_the_frontier_slots_it_does_not_read() {
+    let mut m = mirror(1);
+    m.begin_bundle().unwrap();
+    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    m.rollback_bundle().unwrap();
+    m.begin_bundle().unwrap();
+    advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
+    let (slot, _) = m.reserve_and_advance_batch(&[(cm(14), cv(5))]).unwrap();
+    // Digit d of the start index is how many slots level d reads.
+    for (level, row) in slot.old_frontier.iter().enumerate() {
+        let digit = ((slot.start_index >> (2 * level)) & 3) as usize;
+        for (k, value) in row.iter().enumerate().skip(digit) {
+            assert_eq!(*value, [0u8; 32], "level {level} slot {k} is not read");
+        }
+    }
+}
+
+// -- anchor slots ---------------------------------------------------------------
+
+/// `CommitmentTree`'s root ring, transcribed: genesis seeds slot 0, every advance
+/// writes the next slot mod 64, and `rootIndexOf` scans newest first.
+struct Ring {
+    roots: [Field; ROOT_HISTORY],
+    index: usize,
+}
+
+impl Ring {
+    fn genesis() -> Self {
+        let mut roots = [[0u8; 32]; ROOT_HISTORY];
+        roots[0] = empty_root().unwrap();
+        Self { roots, index: 0 }
+    }
+
+    fn advance(&mut self, new_root: Field) {
+        self.index = (self.index + 1) % ROOT_HISTORY;
+        self.roots[self.index] = new_root;
+    }
+
+    fn root_index_of(&self, root: &Field) -> Option<u8> {
+        let mut idx = self.index;
+        for _ in 0..ROOT_HISTORY {
+            if self.roots[idx] == *root {
+                return Some(idx as u8);
+            }
+            idx = (idx + ROOT_HISTORY - 1) % ROOT_HISTORY;
+        }
+        None
+    }
+}
+
+/// One advance on both the mirror and the ring. Leaves are unique per `n`, so
+/// every root differs.
+fn advance_both(m: &mut TreeMirror, ring: &mut Ring, n: u16) {
+    let (_, advanced) = advance_n(m, n);
+    ring.advance(advanced.new_root);
+}
+
+fn advance_n(m: &mut TreeMirror, n: u16) -> (ReservedSlot, AdvancedState) {
+    let mut c = [0u8; 32];
+    c[30..].copy_from_slice(&n.to_be_bytes());
+    m.reserve_and_advance_batch(&[(c, cv(1))]).unwrap()
+}
+
+/// Every root the mirror accepts resolves to the slot the pool holds it in, and
+/// the pool holds nothing the mirror would not accept.
+fn assert_anchors_match(m: &TreeMirror, ring: &Ring) {
+    assert_anchors_agree(m, ring);
+    for root in ring.roots.iter().filter(|r| **r != [0u8; 32]) {
+        assert!(
+            m.knows_root(root),
+            "the pool holds a root the mirror dropped"
+        );
+    }
+}
+
+/// Every root the mirror accepts resolves to the slot the pool holds it in. The
+/// mirror may accept fewer: a single-batch rollback does not bring back the root
+/// its advance evicted, which only narrows the window.
+fn assert_anchors_agree(m: &TreeMirror, ring: &Ring) {
+    assert_eq!(m.ring_index, Some(ring.index), "ring position");
+    for root in &m.recent_roots {
+        assert_eq!(
+            m.anchor_index(root).ok(),
+            ring.root_index_of(root),
+            "anchor of {}",
+            field_to_hex(root)
+        );
+    }
+}
+
+/// The mirror's empty tree is the pool's genesis root, so a fresh mirror's slot 0
+/// is the pool's slot 0.
+#[test]
+fn the_empty_root_is_the_pools_genesis_root() {
+    assert_eq!(
+        field_to_hex(&empty_root().unwrap()),
+        "0x1cf92e62b512433b35f0064d537576b0184cad5fa7ab64201cd8084ee2dc171f",
+        "CommitmentTree.EMPTY_ROOT"
+    );
+    let m = TreeMirror::new(CHAIN_ID).unwrap();
+    assert_eq!(m.anchor_index(&m.current_root()).unwrap(), 0);
+}
+
+/// Past 64 advances the ring overwrites its oldest slot; the mirror's slots follow
+/// it all the way round, twice.
+#[test]
+fn anchor_slots_follow_the_pools_ring_through_wrap_around() {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    let mut ring = Ring::genesis();
+    assert_anchors_match(&m, &ring);
+    for n in 0..(2 * ROOT_HISTORY as u16 + 5) {
+        advance_both(&mut m, &mut ring, n);
+        assert_anchors_match(&m, &ring);
+    }
+    assert!(
+        m.anchor_index(&empty_root().unwrap()).is_err(),
+        "the overwritten genesis root has no slot"
+    );
+}
+
+/// Speculative advances inside a bundle do not move an existing root's slot, so
+/// every item anchored on the same root names the same slot, whichever position
+/// it holds in the bundle.
+#[test]
+fn a_bundles_items_see_the_same_anchor_slot() {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    let mut ring = Ring::genesis();
+    for n in 0..70 {
+        advance_both(&mut m, &mut ring, n);
+    }
+    let old = m.recent_roots[m.recent_roots.len() - 20];
+    let current = m.current_root();
+    let (old_slot, current_slot) = (ring.root_index_of(&old), ring.root_index_of(&current));
+
+    m.begin_bundle().unwrap();
+    let mut landed = Ring { ..ring };
+    for n in 100..105 {
+        assert_eq!(m.anchor_index(&old).ok(), old_slot);
+        assert_eq!(m.anchor_index(&current).ok(), current_slot);
+        advance_both(&mut m, &mut landed, n);
+    }
+    // The roots the bundle produces land where the pool would put them.
+    assert_anchors_match(&m, &landed);
+    m.commit_prefix(5).unwrap();
+    assert_anchors_match(&m, &landed);
+}
+
+/// Keeping a prefix restores the ring position the chain actually reached, so the
+/// items after it and the next bundle anchor as the pool does.
+#[test]
+fn committing_a_prefix_keeps_the_ring_position_of_the_items_that_landed() {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    let mut ring = Ring::genesis();
+    for n in 0..62 {
+        advance_both(&mut m, &mut ring, n);
+    }
+    m.begin_bundle().unwrap();
+    // Kept items cross the 64-slot boundary; the discarded ones would too.
+    let mut roots = Vec::new();
+    for n in 100..106 {
+        roots.push(advance_n(&mut m, n).1.new_root);
+    }
+    m.commit_prefix(3).unwrap();
+    for root in &roots[..3] {
+        ring.advance(*root);
+    }
+    assert_anchors_match(&m, &ring);
+    for root in &roots[3..] {
+        assert!(
+            m.anchor_index(root).is_err(),
+            "a discarded root has no slot"
+        );
+    }
+
+    for n in 200..203 {
+        advance_both(&mut m, &mut ring, n);
+        assert_anchors_match(&m, &ring);
+    }
+}
+
+#[test]
+fn rolling_back_restores_the_ring_position() {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    let mut ring = Ring::genesis();
+    for n in 0..66 {
+        advance_both(&mut m, &mut ring, n);
+    }
+
+    // A single reserve, undone. Its advance evicted the oldest root, which the
+    // rollback does not bring back.
+    advance_n(&mut m, 500);
+    m.rollback(1).unwrap();
+    assert_anchors_agree(&m, &ring);
+    assert_eq!(m.recent_roots.len(), ROOT_HISTORY - 1);
+
+    // A whole bundle, undone.
+    m.begin_bundle().unwrap();
+    for n in 600..604 {
+        advance_n(&mut m, n);
+    }
+    m.rollback_bundle().unwrap();
+    assert_anchors_agree(&m, &ring);
+
+    // A bundle abandoned on a clean failure.
+    m.begin_bundle().unwrap();
+    advance_n(&mut m, 700);
+    let _ = m.abandon_bundle(AppError::Rpc("refused".into()));
+    assert_anchors_agree(&m, &ring);
+
+    for n in 800..802 {
+        advance_both(&mut m, &mut ring, n);
+        assert_anchors_agree(&m, &ring);
+    }
+}
+
+/// The indexer's history, newest first, as `tree_advances::recent_roots` returns
+/// it: the last `ROOT_HISTORY` roots `ring` accepted, given `advances` of them.
+fn history_of(ring: &Ring, advances: usize) -> Vec<Vec<u8>> {
+    (0..advances.min(ROOT_HISTORY))
+        .map(|age| ring.roots[(ring.index + ROOT_HISTORY - age) % ROOT_HISTORY].to_vec())
+        .collect()
+}
+
+/// Mirror `advances` advances on a fresh mirror, then scramble its window, so only
+/// a rebuild from the history can bring it back.
+fn scrambled(advances: u16) -> (TreeMirror, Ring) {
+    let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+    let mut ring = Ring::genesis();
+    for n in 0..advances {
+        advance_both(&mut m, &mut ring, n);
+    }
+    m.recent_roots.push_front([0xAA; 32]);
+    m.recent_roots.rotate_left(1);
+    m.ring_index = Some(13);
+    (m, ring)
+}
+
+/// A young chain's history is all of it, so the window regains the genesis root
+/// at slot 0, and the pool's `rootIndex` must agree with the history's length.
+#[test]
+fn bootstrapping_a_young_chain_keeps_the_genesis_root_in_slot_zero() {
+    let (mut m, ring) = scrambled(5);
+    m.adopt_history(&history_of(&ring, 5), BootSource::TreeState)
+        .unwrap();
+    assert!(
+        m.anchor_index(&m.current_root()).is_err(),
+        "no anchor before the pool's ring position is read"
+    );
+    assert!(m.adopt_ring_index(4).is_err(), "history misses an advance");
+    assert!(m.adopt_ring_index(64).is_err(), "not a ring slot");
+    m.adopt_ring_index(5).unwrap();
+    assert_anchors_match(&m, &ring);
+    assert_eq!(m.anchor_index(&empty_root().unwrap()).unwrap(), 0);
+}
+
+#[test]
+fn bootstrapping_a_fresh_chain_anchors_on_the_genesis_root() {
+    let (mut m, ring) = scrambled(0);
+    m.adopt_history(&[], BootSource::Notes).unwrap();
+    m.adopt_ring_index(0).unwrap();
+    assert_anchors_match(&m, &ring);
+}
+
+/// Past 64 advances the history is exactly the ring, and the position can only
+/// come from the pool.
+#[test]
+fn bootstrapping_a_wrapped_chain_adopts_the_pools_ring_position() {
+    let (mut m, ring) = scrambled(100);
+    m.adopt_history(&history_of(&ring, 100), BootSource::TreeState)
+        .unwrap();
+    m.adopt_ring_index(ring.index as u32).unwrap();
+    assert_eq!(ring.index, 100 % ROOT_HISTORY);
+    assert_anchors_match(&m, &ring);
+}
+
+/// 63 advances fill the ring but for genesis; 64 overwrite it. Either side of the
+/// edge the window is the ring.
+#[test]
+fn bootstrapping_at_the_edge_of_a_full_ring() {
+    for advances in [63u16, 64, 65] {
+        let (mut m, ring) = scrambled(advances);
+        m.adopt_history(&history_of(&ring, advances as usize), BootSource::TreeState)
+            .unwrap();
+        assert_eq!(m.recent_roots.len(), ROOT_HISTORY, "{advances}");
+        m.adopt_ring_index(ring.index as u32).unwrap();
+        assert_anchors_match(&m, &ring);
+    }
+}
+
+/// The chain moved without this mirror: a resync rebuilds from the indexer's
+/// history over the chain's tree, and the next advances anchor as the pool does.
+#[test]
+fn a_resync_after_foreign_advances_anchors_as_the_pool_does() {
+    let mut ours = TreeMirror::new(CHAIN_ID).unwrap();
+    let mut chain = TreeMirror::new(CHAIN_ID).unwrap();
+    let mut ring = Ring::genesis();
+    for n in 0..10 {
+        advance_n(&mut ours, n);
+        advance_both(&mut chain, &mut ring, n);
+    }
+    // Another relayer lands 60 advances.
+    for n in 1000..1060 {
+        advance_both(&mut chain, &mut ring, n);
+    }
+
+    ours.tree = chain.tree.clone();
+    ours.adopt_history(&history_of(&ring, 70), BootSource::TreeState)
+        .unwrap();
+    ours.adopt_ring_index(ring.index as u32).unwrap();
+    assert_anchors_match(&ours, &ring);
+
+    for n in 2000..2004 {
+        advance_both(&mut ours, &mut ring, n);
+        assert_anchors_match(&ours, &ring);
+    }
+}
+
+/// A history whose newest root is not the tree's is a divergence, as before.
+#[test]
+fn a_history_that_disagrees_with_the_tree_is_refused() {
+    let (mut m, ring) = scrambled(3);
+    let mut history = history_of(&ring, 3);
+    history[0] = vec![0xEE; 32];
+    assert!(m.adopt_history(&history, BootSource::TreeState).is_err());
+    // An empty history over a non-empty tree too.
+    assert!(m.adopt_history(&[], BootSource::Notes).is_err());
 }

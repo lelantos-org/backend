@@ -29,7 +29,10 @@ pub struct ChainCfg {
 
 impl ProtocolIndexerConfig {
     /// Same env-overlay convention as the other binaries:
-    ///   PROTOCOL_INDEXER_CHAIN_<id>_RPC_URL=http://…
+    ///
+    /// ```text
+    /// PROTOCOL_INDEXER_CHAIN_<id>_RPC_URL=http://…
+    /// ```
     ///
     /// Only rewrites chains already present in the TOML.
     pub fn apply_env_overlay(&mut self) {

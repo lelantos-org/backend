@@ -10,17 +10,26 @@
 //! - `FlushPipeline`, driven by a timer. Pops pending escrowed deposits from the
 //!   database and calls `flushBatch`.
 //!
-//! All three hold the per-chain `TreeMirror` mutex from reserve through submit
-//! completion, so two concurrent submissions on a chain cannot interleave and
-//! reorder on chain.
+//! All three hand their operation to the chain's `batcher`, which reserves,
+//! proves and sends up to `bundle_max_items` of them in one `Bundler.execute`
+//! transaction, chaining each tree update on the previous one's root.
 
-pub mod common;
-pub mod deposit_failures;
-pub mod deposit_preflight;
+use std::time::Duration;
+
+/// The longest a caller waits for a submission.
+///
+/// A submission waits in the chain's batcher until its bundle lands, so a caller
+/// can wait behind the bundle in flight, its proofs and its receipt. Sized above
+/// one submission's worst case, two `receipt_timeout_s` windows of 60 s each by
+/// default plus a proof, so it trips on a stuck server rather than a busy one.
+pub const SUBMISSION_TIMEOUT: Duration = Duration::from_secs(180);
+
+pub mod batcher;
 pub mod flush;
 pub mod spend;
 pub mod swap;
+pub mod transact;
 
 pub use flush::FlushPipeline;
-pub use spend::{NativeRoute, SpendPipeline};
+pub use spend::SpendPipeline;
 pub use swap::SwapPipeline;

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
+use protocol_indexer::adapters::erc20::{DynTokenMetadata, HttpTokenMetadata};
 use protocol_indexer::adapters::masp::{DynMaspYieldReader, HttpMaspYieldReader};
-use protocol_indexer::adapters::{DynTokenMetadata, HttpTokenMetadata};
 use protocol_indexer::app::build_info;
 use protocol_indexer::app::config::ProtocolIndexerConfig;
 use protocol_indexer::services::consume::ConsumeServiceImpl;
@@ -55,11 +55,7 @@ async fn main() -> Result<()> {
 
     info!(tick_ms, batch, "protocol-indexer ready");
 
-    let consume = Arc::new(ConsumeServiceImpl::new(
-        pool.clone(),
-        Arc::new(cfg),
-        token_meta,
-    ));
+    let consume = Arc::new(ConsumeServiceImpl::new(pool.clone(), token_meta));
     let yield_state = Arc::new(YieldStateServiceImpl::new(pool, yield_readers));
 
     let (trigger, shutdown) = shared::shutdown::channel();

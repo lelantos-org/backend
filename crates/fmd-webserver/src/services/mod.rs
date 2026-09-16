@@ -10,11 +10,6 @@ pub mod nullifiers;
 pub mod subscriptions;
 pub mod tree;
 
-/// The wire-format helpers these services map rows with. They are IO-free
-/// transforms and live in `domain`; re-exported here so `services::field` and
-/// `services::poseidon` keep resolving.
-pub use crate::domain::{field, poseidon};
-
 /// Read a key from a cache, running the loader once on a miss, and report the
 /// outcome under a `metric` label.
 ///

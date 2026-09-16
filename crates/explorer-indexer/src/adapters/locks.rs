@@ -22,25 +22,14 @@ use tracing::{debug, info, warn};
 /// Locks held by this process, keyed by chain. Acquired lazily on first tick
 /// for a chain and then held for process lifetime.
 pub struct ChainLocks {
-    database_url: Option<String>,
+    database_url: String,
     held: Mutex<HashMap<i64, ChainLock>>,
 }
 
 impl ChainLocks {
-    pub fn enabled(database_url: impl Into<String>) -> Self {
+    pub fn new(database_url: impl Into<String>) -> Self {
         Self {
-            database_url: Some(database_url.into()),
-            held: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// No locking: every caller acts as leader.
-    ///
-    /// For single-process tests only. In a deployment this reintroduces the
-    /// duplicate fetch and the doubled view rebuild the locks exist to prevent.
-    pub fn disabled() -> Self {
-        Self {
-            database_url: None,
+            database_url: database_url.into(),
             held: Mutex::new(HashMap::new()),
         }
     }
@@ -52,9 +41,6 @@ impl ChainLocks {
     /// write would be a split brain. The guard is dropped and re-acquired on the
     /// next tick.
     pub async fn is_leader(&self, chain_id: i64) -> Result<bool> {
-        let Some(url) = &self.database_url else {
-            return Ok(true);
-        };
         let mut held = self.held.lock().await;
 
         if let Some(lock) = held.get_mut(&chain_id) {
@@ -67,7 +53,7 @@ impl ChainLocks {
         }
 
         let key = chain_key(NS_EXPLORER_CONSUME, chain_id);
-        match ChainLock::try_acquire(url, key).await {
+        match ChainLock::try_acquire(&self.database_url, key).await {
             Ok(Some(lock)) => {
                 info!(chain_id, "consume lock acquired; acting as leader");
                 held.insert(chain_id, lock);

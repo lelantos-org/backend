@@ -1,10 +1,11 @@
-//! Submits one MASP call per chain. Nonces are sequential because the pipeline
-//! mutex serialises per-chain submissions.
+//! Sends a chain's transactions to its target, the relayer's `Bundler`. Nonces are
+//! sequential because the chain's batcher is its only sender and sends one bundle
+//! at a time.
 //!
 //! The provider is built once at construction. Alloy's filler stack is deeply
 //! generic and resists `dyn Provider` boxing, but the type can be named, and
 //! rebuilding it per submission would discard `ChainIdFiller`'s cache and pay an
-//! `eth_chainId` round trip before every transaction. See [`PoolProvider`].
+//! `eth_chainId` round trip before every transaction. See `PoolProvider`.
 
 use crate::adapters::rpc::{HttpTransport, RpcEndpoint};
 use crate::domain::error::{AppError, AppResult, revert_reason};
@@ -50,11 +51,12 @@ type TxRequest = alloy::rpc::types::TransactionRequest;
 type ChainReceipt = alloy::rpc::types::TransactionReceipt;
 
 pub struct Submitter {
-    pub chain_id: i64,
-    pub pool_address: Address,
+    chain_id: i64,
+    /// Where every transaction goes: this relayer's `Bundler`.
+    pub target: Address,
     pub signer_address: Address,
-    pub receipt_timeout_s: u64,
-    pub receipt_poll_interval_ms: u64,
+    receipt_timeout_s: u64,
+    receipt_poll_interval_ms: u64,
     provider: PoolProvider,
 }
 
@@ -67,22 +69,23 @@ pub struct SubmissionReceipt {
     pub block_number: i64,
     /// Gas units used by the executed transaction, a post-EIP-1559 receipt field.
     pub gas_used: u64,
+    /// Every log the transaction emitted, in order. A bundle reports how far it
+    /// got through `Bundler.BundleExecuted`, which only the logs carry.
+    pub logs: Vec<alloy::rpc::types::Log>,
 }
 
 impl Submitter {
     pub fn new(
         chain_id: i64,
-        rpc: RpcEndpoint,
+        rpc: &RpcEndpoint,
         signer_key_hex: &str,
-        pool_address_hex: &str,
+        target: Address,
         receipt_timeout_s: u64,
         receipt_poll_interval_ms: u64,
     ) -> AppResult<Self> {
         let signer = PrivateKeySigner::from_str(signer_key_hex)
             .map_err(|e| AppError::Internal(format!("signer key: {}", e)))?;
         let signer_address = signer.address();
-        let pool_address = Address::from_str(pool_address_hex)
-            .map_err(|e| AppError::Internal(format!("pool addr: {}", e)))?;
         let provider = ProviderBuilder::new()
             .with_recommended_fillers()
             .wallet(EthereumWallet::from(signer))
@@ -92,7 +95,7 @@ impl Submitter {
             .set_poll_interval(Duration::from_millis(receipt_poll_interval_ms));
         Ok(Self {
             chain_id,
-            pool_address,
+            target,
             signer_address,
             receipt_timeout_s,
             receipt_poll_interval_ms,
@@ -100,15 +103,13 @@ impl Submitter {
         })
     }
 
-    /// Submit ABI-encoded calldata to this submitter's target and await one
-    /// confirmation.
+    /// Submit ABI-encoded calldata to this submitter's target with `gas_limit`, and
+    /// await one confirmation.
     ///
-    /// The target is fixed at construction and is not always the pool: a native
-    /// unshield goes to the `NativeAdapter` and a swap to the `SwapWrapper`, each
-    /// of which is the pool's own caller. The pipeline picks the encoding —
-    /// `flushBatch`, `transfer`, `withdraw`, `withdrawNative` or `swap` — and
-    /// passes the bytes here, keeping this layer agnostic of the call shape. None
-    /// of the supported entry points are payable.
+    /// The batcher encodes the `Bundler.execute` call and passes the bytes here,
+    /// keeping this layer agnostic of the call shape. It is not payable. The limit
+    /// is the caller's: `execute` absorbs a failing item, out-of-gas included, so
+    /// `eth_estimateGas` would settle on a limit where an item runs dry.
     ///
     /// The failure modes are distinct because the caller's tree-mirror rollback is
     /// sound only for some of them:
@@ -118,18 +119,47 @@ impl Submitter {
     ///     the timeout. It may still mine, so do not roll back.
     #[instrument(
         skip_all,
-        fields(chain_id = self.chain_id, pool = %self.pool_address, calldata_len = data.len()),
+        fields(chain_id = self.chain_id, target = %self.target, calldata_len = data.len()),
     )]
-    pub async fn submit(&self, data: Vec<u8>) -> AppResult<SubmissionReceipt> {
+    pub async fn submit(&self, data: Vec<u8>, gas_limit: u64) -> AppResult<SubmissionReceipt> {
         let tx = TxRequest::default()
-            .to(self.pool_address)
-            .input(data.into());
+            .to(self.target)
+            .input(data.into())
+            .gas_limit(gas_limit);
         let envelope = self.fill_and_sign(tx).await?;
         // Known before the broadcast, which makes an unanswered send resolvable
         // against the chain rather than guessed at.
         let tx_hash = *envelope.tx_hash();
         let receipt = self.broadcast(envelope, tx_hash).await?;
         self.receipt_outcome(receipt, tx_hash)
+    }
+
+    /// `eth_call` `data` against this submitter's target, from the signer, on the
+    /// latest state with `overrides` applied, capped at `gas` if given.
+    ///
+    /// A bundle's `execute` does not revert when an operation fails — it reports
+    /// how far it got — so the return data, not a gas estimate, is what tells the
+    /// batcher whether a bundle will land. An `Err` carries the node's text, which
+    /// is a revert only when [`revert_reason`] finds one in it.
+    pub async fn simulate(
+        &self,
+        data: Vec<u8>,
+        overrides: Option<&alloy::rpc::types::state::StateOverride>,
+        gas: Option<u64>,
+    ) -> Result<alloy::primitives::Bytes, String> {
+        let mut tx = TxRequest::default()
+            .from(self.signer_address)
+            .to(self.target)
+            .input(data.into());
+        if let Some(gas) = gas {
+            tx = tx.gas_limit(gas);
+        }
+        let call = self.provider.call(&tx);
+        let call = match overrides {
+            Some(o) => call.overrides(o),
+            None => call,
+        };
+        call.await.map_err(|e| e.to_string())
     }
 
     /// Price and sign, without broadcasting.
@@ -226,6 +256,7 @@ impl Submitter {
             tx_hash: receipt.transaction_hash,
             block_number,
             gas_used: receipt.gas_used as u64,
+            logs: receipt.inner.logs().to_vec(),
         })
     }
 
@@ -253,7 +284,7 @@ impl Submitter {
     /// node may never have seen it, or the node took it and is slow — call for
     /// different responses and are the first thing a log reader needs.
     ///
-    /// [`AppError::SubmitUnknown`] parks the chain's tree mirror until a restart,
+    /// [`AppError::SubmitUnknown`] parks the chain's tree mirror until it resyncs,
     /// so a full polling window is spent before reporting it.
     async fn resolve_by_hash(
         &self,

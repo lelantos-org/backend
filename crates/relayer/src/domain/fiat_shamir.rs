@@ -21,7 +21,7 @@ use crate::domain::batch::{MAX_L_BATCH, PaddedBatch};
 use crate::domain::field::BN254_R;
 use alloy::primitives::{U256, keccak256};
 use alloy::sol_types::SolValue;
-use common_crypto::tree::Field;
+use crypto::tree::Field;
 
 pub fn compute_z(
     old_root: &Field,
@@ -100,6 +100,8 @@ mod tests {
                 leaf_asset: self.leaf_asset,
                 leaf_public_in: self.leaf_public_in,
                 is_deposit: self.is_deposit,
+                // Private witness; the challenge never covers it.
+                rcv: [U256::ZERO; MAX_L_BATCH],
                 actual_count: self.actual_count,
             }
         }

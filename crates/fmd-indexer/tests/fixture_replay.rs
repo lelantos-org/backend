@@ -7,19 +7,19 @@ use alloy::sol_types::SolEvent;
 use ark_ed_on_bn254::Fq;
 use ark_ff::{BigInteger, PrimeField};
 use chain_types::abi::{NotePayload, NullifierConsumed, RootAdvanced};
-use common_crypto::clue;
-use common_crypto::tree::{DEPTH, Field, MerkleTree, leaf_hash};
+use crypto::clue;
+use crypto::tree::{DEPTH, Field, MerkleTree, leaf_hash};
 use database::advisory::ChainLock;
-use database::{CursorRepo, UpsertCursor};
+use database::{CursorRepo, PostgresCursorRepo, UpsertCursor};
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use fmd_indexer::adapters::locks::ChainLocks;
-use fmd_indexer::repositories::cursor::PostgresCursorRepo;
+use fmd_indexer::domain::pending::NewSpentNullifier;
 use fmd_indexer::repositories::matches::PostgresMatchesRepo;
 use fmd_indexer::repositories::notes::PostgresNotesRepo;
 use fmd_indexer::repositories::raw_events::PostgresRawEventsRepo;
 use fmd_indexer::repositories::spent_nullifiers::{
-    NewSpentNullifier, PostgresSpentNullifiersRepo, SpentNullifiersRepo,
+    PostgresSpentNullifiersRepo, SpentNullifiersRepo,
 };
 use fmd_indexer::repositories::subscriptions::{PostgresSubscriptionsRepo, SubscriptionsRepo};
 use fmd_indexer::repositories::tree_state::{PostgresTreeStateRepo, TreeStateRepo, TreeStateRow};
@@ -841,7 +841,7 @@ async fn insert_tree_advance(
 /// Root of a tree holding exactly these leaves, built with [`MerkleTree`].
 ///
 /// An independent oracle: the indexer advances a `Frontier`, so a bug shared by
-/// both would have to be in code `common-crypto`'s differential test already covers.
+/// both would have to be in code `crypto`'s differential test already covers.
 fn expected_root(cm_bytes: &[u8]) -> Vec<u8> {
     let mut tree = MerkleTree::new(DEPTH).unwrap();
     tree.extend(cm_bytes.iter().copied().map(expected_leaf))
@@ -1171,14 +1171,82 @@ async fn a_tx_wider_than_the_batch_still_commits() {
 }
 
 #[tokio::test]
-async fn a_second_root_advanced_in_one_tx_is_refused() {
+async fn a_bundle_with_several_roots_commits_across_a_cut_window() {
     let (pool, _serial) = fresh_pool().await;
     insert_chain_state(&pool, CHAIN_A).await;
     let (rx, ry) = gamma3_r();
 
-    // Two roots in one transaction. Renumbering the first root's leaf onto the
-    // second's start_index would write indices belonging to another range and
-    // collide on `notes_chain_leaf_idx`, so the tick fails instead.
+    // Two transfers landed by one `Bundler` transaction: each burns four
+    // nullifiers, advances the root, and emits six notes, the second starting
+    // where the first ended. 11 rows per item.
+    let mut log_idx = 0u64;
+    let mut cms = Vec::new();
+    for item in 0..2u8 {
+        for i in 0..4u8 {
+            insert_log(
+                &pool,
+                CHAIN_A,
+                &nullifier_consumed_log(0xc0 + item * 4 + i, 100, 0x57, log_idx),
+                EventKind::NullifierConsumed,
+            )
+            .await;
+            log_idx += 1;
+        }
+        insert_log(
+            &pool,
+            CHAIN_A,
+            &root_advanced_log(item as u64 * 6, 6, 100, 0x57, log_idx),
+            EventKind::RootAdvanced,
+        )
+        .await;
+        log_idx += 1;
+        for i in 0..6u8 {
+            let cm = 0xa0 + item * 6 + i;
+            insert_log(
+                &pool,
+                CHAIN_A,
+                &note_payload_log(cm, rx, ry, GAMMA3_BITS_LE, vec![0u8; 8], 100, 0x57, log_idx),
+                EventKind::NoteCreated,
+            )
+            .await;
+            log_idx += 1;
+            cms.push(cm);
+        }
+    }
+
+    // A window of one item cuts the transaction between its two roots. The first
+    // item commits on its own, against a root the chain registered.
+    let consume = build_consume(&pool);
+    let _ = consume.tick_chain(CHAIN_A, 11).await.unwrap();
+    assert_eq!(
+        leaf_indices(&pool, CHAIN_A).await,
+        (0..6).collect::<Vec<_>>()
+    );
+    let state = tree_state_of(&pool, CHAIN_A).await.expect("prefix folded");
+    assert_eq!(state.root, expected_root(&cms[..6]));
+
+    // The rest arrives as a transaction of its own, numbered from its root.
+    let _ = consume.tick_chain(CHAIN_A, 11).await.unwrap();
+    assert_eq!(
+        leaf_indices(&pool, CHAIN_A).await,
+        (0..12).collect::<Vec<_>>()
+    );
+    assert_eq!(seqs(&pool, CHAIN_A).await, (0..8).collect::<Vec<_>>());
+    let state = tree_state_of(&pool, CHAIN_A).await.expect("written");
+    assert_eq!(state.leaf_count, 12);
+    assert_eq!(state.root, expected_root(&cms));
+}
+
+#[tokio::test]
+async fn a_non_contiguous_root_advanced_in_one_tx_is_refused() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let (rx, ry) = gamma3_r();
+
+    // Two roots in one transaction, the second not starting where the first
+    // ended. Numbering the second root's leaves on from the first would write
+    // indices belonging to another range and collide on `notes_chain_leaf_idx`,
+    // so the tick fails instead.
     insert_log(
         &pool,
         CHAIN_A,

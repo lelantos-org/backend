@@ -31,16 +31,9 @@ pub enum WorkerExit {
     LockLost,
 }
 
-pub async fn run(deps: WorkerDeps, shutdown: Shutdown) -> Result<WorkerExit, IngesterError> {
-    run_inner(deps, shutdown, true).await
-}
-
-/// Test entry point: optionally skip the advisory lock.
-pub async fn run_inner(
-    deps: WorkerDeps,
-    mut shutdown: Shutdown,
-    take_lock: bool,
-) -> Result<WorkerExit, IngesterError> {
+/// Stand by for the chain's advisory lock, then ingest until shutdown, lock
+/// loss or an error.
+pub async fn run(deps: WorkerDeps, mut shutdown: Shutdown) -> Result<WorkerExit, IngesterError> {
     let chain_id = deps.cfg.chain_id;
     let lock_poll = Duration::from_millis(deps.cfg.block_poll_ms).max(LOCK_POLL_FLOOR);
     info!(
@@ -53,43 +46,29 @@ pub async fn run_inner(
         "worker starting"
     );
 
-    let lock = if take_lock {
-        match acquire(&deps.database_url, chain_id, lock_poll, shutdown.clone()).await? {
-            Some(lock) => Some(lock),
-            // Shutdown arrived while standing by, so there is nothing to run.
-            None => return Ok(WorkerExit::Shutdown),
-        }
-    } else {
-        None
+    let Some(lock) = acquire(&deps.database_url, chain_id, lock_poll, shutdown.clone()).await?
+    else {
+        // Shutdown arrived while standing by, so there is nothing to run.
+        return Ok(WorkerExit::Shutdown);
     };
 
     let chain = Chain::from_deps(deps)?;
-    let body = chain.ingest();
 
-    match lock {
-        // Stop as soon as the lock goes away rather than write alongside whichever
-        // replica has taken over. Cancelling mid-batch is safe: every write is
-        // transactional and idempotent under `ON CONFLICT`, so the new leader
-        // redoes it.
-        Some(lock) => tokio::select! {
-            r = body => r.map(|()| WorkerExit::Shutdown),
-            () = until_lock_lost(lock, lock_poll) => {
-                record_chain_leader(chain_id, false);
-                error!(chain_id, "advisory lock lost; stopping worker to avoid two writers");
-                Ok(WorkerExit::LockLost)
-            }
-            () = shutdown.recv() => {
-                info!(chain_id, "shutdown signalled; releasing chain lock");
-                Ok(WorkerExit::Shutdown)
-            }
-        },
-        None => tokio::select! {
-            r = body => r.map(|()| WorkerExit::Shutdown),
-            () = shutdown.recv() => {
-                info!(chain_id, "shutdown signalled");
-                Ok(WorkerExit::Shutdown)
-            }
-        },
+    // Stop as soon as the lock goes away rather than write alongside whichever
+    // replica has taken over. Cancelling mid-batch is safe: every write is
+    // transactional and idempotent under `ON CONFLICT`, so the new leader redoes
+    // it.
+    tokio::select! {
+        r = chain.ingest() => r.map(|()| WorkerExit::Shutdown),
+        () = until_lock_lost(lock, lock_poll) => {
+            record_chain_leader(chain_id, false);
+            error!(chain_id, "advisory lock lost; stopping worker to avoid two writers");
+            Ok(WorkerExit::LockLost)
+        }
+        () = shutdown.recv() => {
+            info!(chain_id, "shutdown signalled; releasing chain lock");
+            Ok(WorkerExit::Shutdown)
+        }
     }
 }
 

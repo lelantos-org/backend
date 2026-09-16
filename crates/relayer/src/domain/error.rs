@@ -69,6 +69,12 @@ pub enum AppError {
     ShieldedFeeAssetRejected { asset_id: u64, reason: String },
     #[error("stale estimate: {0}")]
     StaleEstimate(String),
+    /// A flush this relayer bundled was landed first by someone else: `flushBatch`
+    /// is permissionless, and another relayer flushing the same deposits in the
+    /// same order reaches the same root. The batch was sound, so it is not charged
+    /// to its deposits. Only the flush worker sees this.
+    #[error("flush landed externally: {0}")]
+    LandedExternally(String),
     #[error("internal: {0}")]
     Internal(String),
     /// The outcome of a submission another caller made under the same idempotency
@@ -131,7 +137,8 @@ impl AppError {
             AppError::NullifierAlreadySpent(_)
             | AppError::NullifierInFlight(_)
             | AppError::IdempotencyKeyReused(_)
-            | AppError::StaleEstimate(_) => StatusCode::CONFLICT,
+            | AppError::StaleEstimate(_)
+            | AppError::LandedExternally(_) => StatusCode::CONFLICT,
             AppError::ShieldedFeeMissing { .. }
             | AppError::ShieldedFeeTooLow { .. }
             | AppError::ShieldedFeeAssetRejected { .. } => StatusCode::PAYMENT_REQUIRED,
@@ -159,6 +166,7 @@ impl AppError {
             | AppError::NullifierInFlight(_)
             | AppError::IdempotencyKeyReused(_)
             | AppError::StaleEstimate(_)
+            | AppError::LandedExternally(_)
             // Every field of these is either the caller's own payload or
             // already public in `/chains`.
             | AppError::ShieldedFeeMissing { .. }

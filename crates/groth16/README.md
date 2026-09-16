@@ -106,7 +106,7 @@ other lock.
 ## Why a crate
 
 This is where arkworks 0.6 lives, and it links nothing else internal, so it
-cannot meet the arkworks 0.4 that `light-poseidon` pins for `common-crypto`. The two
+cannot meet the arkworks 0.4 that `light-poseidon` pins for `crypto`. The two
 versions coexist because no crate reaches both, which the layering rule in
 [ARCHITECTURE.md](../../ARCHITECTURE.md) states and this crate's dependency list
 enforces. It also keeps the git-pinned `circom-witnesscalc`, the vendored zkey

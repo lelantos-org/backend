@@ -45,7 +45,7 @@ justfile
 | `explorer-webserver` | 3002 | `explorer` `all` `prod` |
 | `relayer` | 3003 | `relayer` `all` `prod` |
 | `risk-webserver` | 3004 | `risk` `all` `prod` |
-| `registry-webserver` | 3005 | `registry` `explorer` `relayer` `all` `prod` |
+| `protocol-webserver` | 3005 | `registry` `explorer` `relayer` `all` `prod` |
 | `rpc-proxy` | 3006 | `rpc` `all` `prod` |
 | `metaquoter` | 8081 | `metaquoter` `all` `prod` |
 | `oracle` (price stub) | — | `relayer` `all` |
@@ -71,7 +71,7 @@ STACK_ENV=prod just up     # config/prod/ — mainnet templates
 
 Seven services mount a TOML from that directory — `ingester`,
 `protocol-indexer`, `explorer-indexer`, `relayer`, `metaquoter`,
-`registry-webserver` and `rpc-proxy`. The rest are configured entirely through
+`protocol-webserver` and `rpc-proxy`. The rest are configured entirely through
 environment variables in `docker-compose.yml`.
 
 A TOML missing from `config/<env>/` is not a compose error: Docker creates a
@@ -98,7 +98,8 @@ profile to boot.
 Under profile `all`, the one-shot `deploy` service runs before the backends:
 
 1. `forge script DeployTest.s.sol` — verifiers, MASP, mock tokens, `NativeAdapter`
-2. `forge script DeployTestSwap.s.sol` — `UniV3Adapter`, `SwapWrapper`, swap mocks
+2. `forge script DeployTestSwap.s.sol` — `UniV3Adapter`, `SwapWrapper`, swap mocks,
+   `BundlerFactory` and the relayer's `Bundler` (operator `BUNDLER_OPERATOR`)
 3. `forge script DeployTestYield.s.sol` — a `MockERC4626` vault and its
    `ERC4626Venue` per asset, registered as new yield ids
 4. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
@@ -110,7 +111,7 @@ is how the freshly deployed addresses reach the per-chain overlay.
 Re-running the deploy mints new addresses (new nonces), so backends must be
 restarted to pick them up — `just redeploy` does both. The services carrying
 injected per-chain values are `ingester`, `relayer`, `metaquoter`,
-`registry-webserver`, `protocol-indexer` and `rpc-proxy`; those are what it
+`protocol-webserver`, `protocol-indexer` and `rpc-proxy`; those are what it
 restarts. `rpc-proxy` is the one to watch: its contract allowlist comes from the
 seeds in `addresses.env`, so a stale one refuses every read of the freshly
 deployed tokens rather than erroring in a way that names the cause.

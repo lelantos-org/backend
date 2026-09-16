@@ -16,7 +16,7 @@ use crate::domain::error::{AppError, AppResult};
 use crate::domain::field::field_to_hex;
 use crate::domain::responses::TreeStateOut;
 use crate::repositories::tree_state;
-use common_crypto::tree::{DEPTH, Frontier, decode_frontier, field_from_bytes};
+use crypto::tree::{DEPTH, Frontier, decode_frontier, field_from_bytes};
 
 #[tracing::instrument(skip(st))]
 pub async fn tree_state(st: &AppState, chain_id: i64) -> AppResult<TreeStateOut> {
@@ -60,7 +60,7 @@ fn empty(chain_id: i64) -> AppResult<TreeStateOut> {
     })
 }
 
-fn hex_rows(frontier: &[[common_crypto::tree::Field; 3]]) -> Vec<Vec<String>> {
+fn hex_rows(frontier: &[[crypto::tree::Field; 3]]) -> Vec<Vec<String>> {
     frontier
         .iter()
         .map(|row| row.iter().map(field_to_hex).collect())
@@ -70,7 +70,7 @@ fn hex_rows(frontier: &[[common_crypto::tree::Field; 3]]) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common_crypto::tree::encode_frontier;
+    use crypto::tree::encode_frontier;
 
     /// A tree with no leaves still has a root: `zeros[DEPTH]`, the fold of the
     /// empty subtree up every level. Serving 32 zero bytes instead would be a

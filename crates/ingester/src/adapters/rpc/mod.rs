@@ -9,6 +9,7 @@
 mod classify;
 
 use crate::domain::error::{IngesterError, RpcError};
+use crate::domain::models::BlockMeta;
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::client::RpcClient;
@@ -43,19 +44,6 @@ pub trait ChainRpc: Send + Sync {
     /// The primitive reorg detection is built on: the stored cursor anchor is
     /// trustworthy only while the chain reports the same hash at the same height.
     async fn block_hash_at(&self, n: u64) -> Result<Option<B256>, IngesterError>;
-}
-
-/// Per-block facts the ingester needs beyond the log itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockMeta {
-    pub timestamp: u64,
-    /// What Solidity's `block.number` returns inside this block.
-    ///
-    /// Equal to the block's own height on Ethereum and OP-stack chains. On
-    /// Arbitrum it is the L1 height, which is what MASP hashes into the deposit
-    /// digest; replaying the L2 height there reverts `DigestMismatch`. Taken from
-    /// the block's non-standard `l1BlockNumber` field when the node reports one.
-    pub evm_block_number: u64,
 }
 
 pub type DynRpc = Arc<dyn ChainRpc>;

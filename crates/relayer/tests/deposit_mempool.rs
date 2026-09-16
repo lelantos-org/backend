@@ -14,7 +14,8 @@ use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-use relayer::services::deposit_mempool::DepositMempool;
+use relayer::domain::deposit::PendingDeposit;
+use relayer::repositories::deposit_escrowed_events::DepositMempool;
 
 /// Wide enough that these fixtures never hit it; `pop_pending`'s own bound is
 /// exercised by `a_scan_bound_stops_the_walk` below.
@@ -50,6 +51,7 @@ struct NewDeposit {
     cv_dep_y: BigDecimal,
     rcv: BigDecimal,
     aux: serde_json::Value,
+    fee_asset_id: i64,
     fee_in: BigDecimal,
     fee_cm: Vec<u8>,
     fee_cv_dep_x: BigDecimal,
@@ -78,6 +80,7 @@ fn deposit(id: u64) -> NewDeposit {
         cv_dep_y: n(4),
         rcv: n(5),
         aux: serde_json::json!({}),
+        fee_asset_id: 9,
         fee_in: n(250),
         fee_cm: vec![0x55; 32],
         fee_cv_dep_x: n(6),
@@ -105,11 +108,7 @@ async fn excluded_deposits_do_not_consume_the_limit_window() {
     insert(&pool, (1..=4).map(deposit).collect()).await;
     let mempool = DepositMempool::new(pool, CHAIN);
 
-    let ids = |v: Vec<_>| -> Vec<u64> {
-        v.into_iter()
-            .map(|d: relayer::services::deposit_mempool::PendingDeposit| d.id)
-            .collect()
-    };
+    let ids = |v: Vec<_>| -> Vec<u64> { v.into_iter().map(|d: PendingDeposit| d.id).collect() };
 
     assert_eq!(
         ids(mempool.pop_pending(2, &excluding(&[]), SCAN).await.unwrap()),
@@ -174,6 +173,32 @@ async fn one_unreadable_row_does_not_fail_the_query() {
         got.iter().map(|d| d.id).collect::<Vec<_>>(),
         vec![1, 3],
         "the readable rows must still flush"
+    );
+}
+
+/// The fee asset is digest preimage and may differ from the deposit's asset, so
+/// it must read back from its own column, exactly.
+#[tokio::test]
+async fn the_fee_asset_reads_back_independently_of_the_deposit_asset() {
+    let (pool, _guard) = fresh_pool().await;
+    let mut rows: Vec<NewDeposit> = (1..=3).map(deposit).collect();
+    // A zero-fee deposit names fee asset 0.
+    rows[1].fee_asset_id = 0;
+    rows[1].fee_in = BigDecimal::from(0);
+    // The indexer writes a `uint64` id as `id as i64`, so the top bit reads as a
+    // negative `BIGINT` and must still round-trip.
+    rows[2].fee_asset_id = u64::MAX as i64;
+    insert(&pool, rows).await;
+    let mempool = DepositMempool::new(pool, CHAIN);
+
+    let got = mempool.pop_pending(8, &excluding(&[]), SCAN).await.unwrap();
+    let assets: Vec<_> = got
+        .iter()
+        .map(|d| (d.id, d.public_asset_id, d.fee_asset_id, d.fee_in))
+        .collect();
+    assert_eq!(
+        assets,
+        vec![(1, 7, 9, 250), (2, 7, 0, 0), (3, 7, u64::MAX, 250)]
     );
 }
 

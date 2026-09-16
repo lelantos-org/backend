@@ -17,16 +17,17 @@ use crate::domain::error::RpcError;
 /// spends it on rate limits as often as on oversized queries, so matching the
 /// code rather than the wording classified every throttle as a range cap. The
 /// wording alone is unambiguous.
+///
+/// Each entry is a substring no other entry already contains, so
+/// "range is too large" also covers "block range is too large", and
+/// "response size" covers "log response size exceeded".
 const RANGE_MARKERS: &[&str] = &[
     "query returned more than",
-    "block range is too large",
     "block range too large",
     "exceed maximum block range",
     "range is too large",
     "too many results",
-    "response size exceeded",
     "response size",
-    "log response size exceeded",
     "query timeout exceeded",
 ];
 

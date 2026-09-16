@@ -3,7 +3,7 @@
 use crate::app::AppState;
 use crate::app::cache::MatchesPageKey;
 use crate::domain::error::AppResult;
-use crate::domain::field::pack_point_hex;
+use crate::domain::point::pack_point_hex;
 use crate::domain::responses::{MatchOut, MatchesPage};
 use crate::repositories::matches;
 use crate::services::cached;

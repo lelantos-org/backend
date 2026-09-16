@@ -3,10 +3,7 @@ use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use std::fmt;
 use std::str::FromStr;
 
-/// The modulus these parsers check against. It describes the circuits rather
-/// than the wire, so it lives in `domain`; re-exported here because this module
-/// is where a caller parsing a field element already looks.
-pub use crate::domain::field::BN254_R;
+use crate::domain::field::BN254_R;
 
 /// Parse a `0x`-hex or decimal integer. Accepts either case of the prefix and
 /// strips it exactly once, so `"0x0x12"` is malformed rather than `0x12`.
@@ -48,7 +45,7 @@ impl NotAField {
 }
 
 /// Core field parse. Rejects anything at or above the BN254 scalar modulus: such
-/// a value is not a field element, `common_crypto`'s Poseidon refuses it, and the
+/// a value is not a field element, `crypto`'s Poseidon refuses it, and the
 /// contract's coefficient range check reverts on it. Unchecked, a non-canonical
 /// `outCm` would reach [`crate::services::tree`] and fail between two speculative
 /// leaf inserts, permanently desyncing that chain's mirror.

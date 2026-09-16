@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
+use database::PostgresCursorRepo;
 use database::listen::{
     self, CHANNEL_NOTES_APPENDED, CHANNEL_RAW_EVENTS_APPENDED, CHANNEL_RAW_EVENTS_REORG,
 };
-use fmd_indexer::adapters;
 use fmd_indexer::adapters::locks::ChainLocks;
 use fmd_indexer::app::{self, FmdIndexerConfig};
 use fmd_indexer::handlers::worker;
-use fmd_indexer::repositories::cursor::PostgresCursorRepo;
 use fmd_indexer::repositories::matches::PostgresMatchesRepo;
 use fmd_indexer::repositories::notes::PostgresNotesRepo;
 use fmd_indexer::repositories::raw_events::PostgresRawEventsRepo;
@@ -45,7 +44,7 @@ async fn main() -> Result<()> {
         .build_global()
         .ok();
 
-    let pool = adapters::db::build_pool(&cfg.database_url, database::PoolCfg::indexer())
+    let pool = database::build_pool(&cfg.database_url, database::PoolCfg::indexer())
         .await
         .context("build pool")?;
 

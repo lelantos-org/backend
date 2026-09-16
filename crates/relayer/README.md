@@ -35,13 +35,14 @@ leaving them unable to tell a failed spend from a landed one.
 | Route | Notes |
 |-------|-------|
 | `GET /health` | version + commit |
-| `GET /chains` | Per-chain registry: leaf count, current root, MASP + relayer addresses, `desynced`, the wallet-facing config block, the registered assets, and the [shielded fee](#shielded-fees) terms where one is charged |
+| `GET /chains` | Per-chain registry: leaf count, current root, MASP, relayer (Bundler) and refund addresses, `desynced`, the wallet-facing config block, the registered assets, and the [shielded fee](#shielded-fees) terms where one is charged |
 | `POST /v1/deposit/estimate` | Fee quote for a deposit, before one is escrowed |
 | `POST /v1/spend` | `transfer` / `withdraw` / `withdrawNative`. Honours `Idempotency-Key`. **402** when a required shielded fee is missing or short |
 | `POST /v1/spend/estimate` | Fee quote for the same payload, including the note value to pay. Does **not** prove or submit |
-| `POST /v1/swap` | Leg-1 SNARK + leg-2 escrow blob via `SwapWrapper` |
+| `POST /v1/swap` | Leg-1 SNARK + leg-2 escrow blob via `SwapWrapper`. `swap.deadline` and `swap.refundTo` are required. 400, before any proving, when `pubInputs.intentHash` is not `SwapWrapper._intentHash` of the payload's `refundTo`, `tokenOut`, `minOut`, `adapter`, `deadline`, `depositD`, `auxD`, `feeAuxD`, `refundD`, `refundAuxD` and `refundFeeAuxD`, when `swap.refundTo` is zero, this relayer's Bundler, or the swap wrapper, or when `swap.deadline` is less than 180 s away (the wrapper would refund rather than swap a swap landing after it) |
 | `POST /v1/swap/estimate` | Fee quote for a swap |
 | `GET /v1/deposits/stream?chain_id=` | SSE of deposit lifecycle events |
+| `POST /test/bundler/{chain_id}/hold`, `GET …/queue`, `POST …/release` | Test hooks; mounted only with `[test_hooks] enabled = true`. See [Bundling](#bundling) |
 
 Bodies are capped at 256 kB — generous for a transact payload plus its
 per-output ciphertexts, and far below the 2 MB axum would otherwise buffer per
@@ -51,14 +52,30 @@ request.
 that already enumerates every chain, so publishing the wallet-facing half of
 its config here is what lets a deployment add a chain without rebuilding any
 frontend. It reads the *published snapshot* of the tree, never the mirror
-itself: the mirror mutex is held from reserve through confirmation, so locking
-it here would park the endpoint every wallet boots from behind whatever
-submission is in flight.
+itself: the batcher holds the mirror from reserve through confirmation, so
+locking it here would park the endpoint every wallet boots from behind whatever
+bundle is in flight.
+
+Its `relayerAddress` is this relayer's **Bundler**, not the signer: the Bundler
+is what calls the pool and the swap wrapper, so it is what a wallet binds as
+`pi.relayer` (spends) or `payer` (swaps). As the swap payer, the Bundler (and so
+every operator key) drives the swap, but it cannot redirect or cheapen the
+output: the leg-1 proof carries `intentHash`, which commits to `deposit_d`, its
+aux payloads, `min_out`, the adapter, the deadline and `refundTo`, and
+`SwapWrapper` reverts `IntentMismatch` on any other values. The relayer only
+chooses the route and when, before the deadline, the swap lands.
+
+Its `refundAddress` is the opposite: an account (the signer's address unless
+`refund_address` is configured) that can move tokens. A swap's leg-1 proof binds
+`swap.refundTo` through `intentHash`; `SwapWrapper` refunds the output escrow
+there if leg 2 is cancelled. A wallet sets it to its own EVM account, and one with no EVM account
+falls back to this `refundAddress`. The Bundler must never be the refund target,
+since it cannot move the tokens out.
 
 A yield-bearing asset carries its venue, `gross`, `supply` and `index` here —
 what a wallet needs to size a shield against *this* relayer's pool — but **no
 rate**. The estimated annual rate lives on
-[registry-webserver](../registry-webserver/README.md)'s `/v1/assets`, which is
+[protocol-webserver](../protocol-webserver/README.md)'s `/v1/assets`, which is
 also where it is measured and stored. A rate is a property of the venue, the
 same for every relayer serving the chain, so a relayer republishing one would be
 asserting a deployment-wide fact from a service a wallet cannot check it
@@ -76,12 +93,14 @@ that can never emit anything reads to a client as "no deposits yet".
 parse nullifiers + fingerprint     400 on a malformed payload, before anything is cached
   └─ idempotency (per chain, per key)
        └─ nullifier guard          409 on a double-spend
-            └─ verify transact proof   locally, before the tree lock
-                 └─ tree mirror lock
-                      ├─ reserve leaves
-                      ├─ tree_update_batch Groth16
-                      ├─ submit + await receipt
-                      └─ commit, or rollback the speculative inserts
+            └─ verify transact proof   locally, before the batcher
+                 └─ chain batcher queue    the job owns the nullifier reservation
+                      └─ bundle of up to bundle_max_items (see Bundling)
+                           ├─ reserve leaves, chained
+                           ├─ dry run (verifiers stubbed) ∥ tree_update_batch Groth16 per item
+                           ├─ simulate the proved bundle
+                           ├─ Bundler.execute + await receipt
+                           └─ keep the executed prefix, roll back the rest
 ```
 
 The ordering is the point. Parsing precedes the idempotency run so a malformed
@@ -91,8 +110,8 @@ replay the first answer rather than be refused as a double-spend.
 
 Every RPC call carries a deadline and a retry budget (`adapters/rpc.rs`), and
 routes other than the SSE stream carry one too. That is not belt-and-braces:
-the mirror mutex is held from reserve through confirmation, so an untimed call
-against a hung node holds the whole chain — and everything queued behind it —
+the batcher holds the mirror from reserve through confirmation, so an untimed
+call against a hung node holds the whole chain — and everything queued behind it —
 for as long as the node stays hung.
 
 Filling a transaction and broadcasting it are separate steps, because their
@@ -104,7 +123,7 @@ refuses is treated as "nothing landed".
 
 ### Nullifier guard
 
-Three layers, cheapest first, all before the tree lock so a doomed submission
+Three layers, cheapest first, all before the batcher so a doomed submission
 never costs a Groth16 or a reverted transaction's gas:
 
 1. Per-chain set of nullifiers this relayer is currently processing — catches
@@ -126,33 +145,43 @@ with a *different* payload is refused, since the key is pinned to a fingerprint
 of what produced the answer. A retry that races the original waits for it, and a
 failed submission leaves the key free.
 
-Single-process state, deliberately — as is the nullifier guard, and for the same
-reason: the tree mirror is per-process, so two relayers cannot serve one chain
-anyway.
+Single-process state, deliberately — as is the nullifier guard. A key is only
+ever replayed to the relayer it was sent to, and each relayer has its own
+Bundler, so a proof bound to one cannot be submitted through another.
 
 ### Local proof verification
 
 The wallet's `transact` proof — 4x6, the arity `TRANSACT_IN` / `TRANSACT_OUT`
-declare — is verified in-process before the mirror lock
-is taken. Without it, the first thing to check a wallet's proof would be the
-contract — after a multi-second `tree_update_batch` Groth16 behind a
-single-permit gate, holding the chain's tree mutex. Any unauthenticated caller
+declare — is verified in-process before the operation is
+queued. Without it, the first thing to check a wallet's proof would be the
+contract — after a `tree_update_batch` Groth16 behind a single-permit gate,
+holding up every operation bundled with it. Any unauthenticated caller
 could therefore spend the relayer's prover on payloads that were never going to
 land. Verification is a few pairings: milliseconds against seconds.
 
 This needs `prover.transact_vkey_path`. It is optional so a deployment that has
-not shipped the artifact still boots, but it should always be set.
+not shipped the artifact still boots, but it should always be set, and it is
+required once `bundle_max_items > 1`: an invalid proof in a bundle would fail
+its item on chain and stop every item behind it.
 
 ### Tree mirror
 
-One `Arc<Mutex<TreeMirror>>` per chain, depth 10, quaternary, matching
-`MASP.MAX_LEAVES`. The pipeline holds the mutex across
-`reserve → prove → submit → receipt`, which is what serialises submissions
-within a chain: two of them cannot interleave and reorder on chain, and nonces
-stay sequential without any explicit nonce management.
+One `Arc<Mutex<TreeMirror>>` per chain, depth 11, quaternary, matching
+`MASP.MAX_LEAVES`. The chain's batcher is the only writer and holds the mutex
+across `reserve → prove → submit → receipt` for a whole bundle, which is what
+keeps bundles in order: two cannot interleave on chain, and nonces stay
+sequential without any explicit nonce management.
 
-On a revert the speculative inserts are unwound. A mirror that cannot be
-reconciled parks itself as **desynced**, which `/chains` reports per chain.
+`begin_bundle` checkpoints the tree and its recent roots; `commit_prefix(j)`
+keeps the first `j` items' inserts and rolls back the rest, which is exactly what
+a bundle that stopped at item `j` left on chain. The mirror remembers the last
+`ROOT_HISTORY = 64` roots in ring order, the pool's own window, and the ring
+slot of the newest (`rootIndex()`, read from the pool at boot and on every
+resync, then advanced one slot per root). A spend names its anchor's slot as
+`SpendTree.anchorIndex`: `(ring slot − age of pi.merkleRoot) mod 64`, which an
+earlier item in the same bundle cannot move. A mirror that cannot be
+reconciled parks itself as **desynced**, which `/chains` reports per chain; the
+batcher tries to [resync](#resync) it before its next bundle.
 
 ### Prover
 
@@ -164,9 +193,82 @@ is CPU-bound, and letting two run concurrently makes both slower rather than
 either faster.
 
 The relayer's side of that boundary is `services/witness.rs`, which builds the
-witness in the shape the circuit declares, and `services/transact_verifier.rs`,
+witness in the shape the circuit declares, and `services/transact_verifier/`,
 which derives the transact circuit's two public signals and hands them over as
 plain 32-byte words.
+
+## Bundling
+
+Every tree-advancing call must extend the pool's live root, so a chain lands its
+operations strictly in order. Instead of one transaction per operation, each
+chain has a **batcher** (`services/pipeline/batcher/`) that sends up to
+`bundle_max_items` of them in one `Bundler.execute`: it reserves them in a row on
+the mirror, each building on the tree the previous leaves, proves the chained
+tree updates, and calls this relayer's Bundler, which `CALL`s the pool, the
+native adapter or the swap wrapper once per item. Each call sees the state the
+one before it left, so every position check passes.
+
+**The Bundler** is created by the permissionless `BundlerFactory`, one per
+relayer (`contracts/src/README.md`, "Bundling"). Its targets — the pool, the
+native adapter and the swap wrapper — are fixed at creation, each admitting only
+its tree-advancing selectors; its owner manages operators, and `signer_key_hex`
+must be one. It stops at the first
+failing call rather than reverting, emitting `BundleItemFailed(index, reason)`
+and `BundleExecuted(executed, total)`, so earlier items stay committed.
+
+**Batching is natural.** An idle batcher sends a lone operation at once;
+operations arriving while a bundle is in flight become the next bundle. Every
+kind can be bundled; swaps go last, since their success depends on the market
+and a failure stops every item behind it. `bundle_linger_ms` optionally waits for
+more before sending. A bundle is also cut short of `max_tx_bytes` of calldata.
+
+**Checks before sending.**
+1. Items whose wallet root is about to leave the pool's 64-root window are
+   refused before anything is reserved.
+2. A dry run `eth_call`s the bundle with both verifiers' code replaced by an
+   always-accepting stub, while the real proofs are made. It runs every other
+   check the pool and adapters make — spent nullifiers, escrow digests, deadlines,
+   fees — so a failing item is dropped before its successors are proved. It is
+   skipped on an RPC that ignores code overrides (probed at boot).
+3. The proved bundle is simulated once more, catching state that moved meanwhile.
+   `eth_estimateGas` on the real send sets the gas limit.
+
+**The receipt.** All executed: every job is answered with the shared hash and
+its share of the gas (`gas_used` split by each item's expected gas). Stopped at
+`j`: the first `j` are answered, the mirror keeps their inserts, item `j` is
+failed back to its caller (a flush charges its deposits), and the rest are
+requeued at the head and reproved on the new root.
+
+### Resync
+
+A misaligned batch (`BatchMisaligned`: a spend's or flush's `startIndex`) or a
+stale root (`StaleOldRoot`, flush only) on the **first** item means the pool moved
+without this relayer — another relayer's bundle or a third party's `flushBatch`.
+The batcher parks the mirror, rebuilds it from the indexer's tables, checks it
+against `currentRoot()` and `rootIndex()`, and retries after a random jitter so two relayers that
+collided do not collide again in lockstep. Relayers do not coordinate: several
+can serve one chain, each through its own Bundler, but their throughput does not
+add up.
+
+### Sizing `bundle_max_items`
+
+Three caps, per chain:
+- **Transaction size.** Σ item calldata ≤ the node's limit: a transfer or
+  withdraw is ~4.5 kB and a swap ~6.1 kB, against 128 kB on Ethereum and Base
+  and 95 kB on Arbitrum (set `max_tx_bytes`).
+- **Gas.** ~560–830k per item with real verifiers, against the per-transaction cap.
+- **Latency.** A caller can wait behind a whole bundle and then its own, roughly
+  `2·(K·prove + inclusion)`, which must fit the SDK's submit timeout.
+
+`bundle_max_items > 1` requires `prover.transact_vkey_path`.
+
+### Test hooks
+
+With `[test_hooks] enabled = true` (never in production) three routes make
+bundling deterministic for end-to-end tests: `POST /test/bundler/{chain_id}/hold`
+stops dispatching, `GET …/queue` lists what is queued
+(`{kind, nullifiers, depositIds}`), and `POST …/release` sends the queue as
+normal bundles and resumes.
 
 ## Flush worker
 
@@ -183,11 +285,9 @@ receiver, which is ample at ≤ 4 deposits per tick.
 read pending deposits          oldest first, scanning past quarantined
                                and deferred ids
   └─ pre-flight                escrowed(id) + local digest, before the prover
-       └─ tree mirror lock
-            ├─ reserve leaves
-            ├─ tree_update_batch Groth16
-            ├─ submit + await receipt
-            └─ commit, or roll back and charge the batch
+       └─ partial batch?       wait up to flush_partial_after_s for a full one
+            └─ chain batcher   bundled with spends and swaps (see Bundling)
+                 └─ landed, or charge the batch
 ```
 
 Two properties shape the sections below. `flushBatch` is **all-or-nothing**:
@@ -209,7 +309,7 @@ relayer replays at flush time. Reading that slot back and re-deriving the digest
 locally (`domain::deposit_digest`, byte-identical to `MASP._depositDigest`)
 reproduces the per-deposit guards in `_drainDeposit` for one `eth_call` each,
 instead of one wasted Groth16 per tick. The decision table is
-`services::pipeline::deposit_preflight::classify`, kept pure so it is testable
+`services::pipeline::flush::preflight::classify`, kept pure so it is testable
 without a node:
 
 * **`public_in` over `uint48`** — `_drainDeposit` bounds it before narrowing,
@@ -230,7 +330,7 @@ without a node:
   the deposit remains flushable by the relayer it does pay and reclaimable by
   its payer. Deferred rather than skipped, since only the payer or a change in
   gas will alter the verdict; see below.
-* **the flush cannot be priced** — an asset this relayer does not take, or an
+* **the flush cannot be priced** — a fee asset this relayer does not take, or an
   oracle that is down. The relayer's problem, not the deposit's, so it is
   dropped from this batch and reconsidered on the next tick, without deferral:
   the condition is chain-wide and clears on its own.
@@ -241,7 +341,7 @@ never be judged unflushable because the node was unreachable.
 ### Failure budget
 
 What pre-flight cannot classify is bounded by attempt count
-(`flush_max_attempts`, `services::pipeline::deposit_failures`). Only reverts,
+(`flush_max_attempts`, `services::pipeline::flush::failures`). Only reverts,
 contract rejections and prover errors are charged — an RPC outage or a busy
 prover must not quarantine the mempool.
 
@@ -366,19 +466,24 @@ signer_key_hex = "0x…"
 |-----|----------|---------|-------|
 | `chain_id` | yes | — | Must be unique. A duplicate builds two independent tree mirrors and two flush workers for one chain — a guaranteed desync |
 | `rpc_url` | yes | — | The relayer's own endpoint, typically cluster-internal. Not what wallets get; see `public.rpc_url` |
-| `pool_address` | yes | — | MASP pool, target of `transact` |
-| `signer_key_hex` | yes | — | 32-byte hex. Must match the on-chain bound `relayer` address wallets pin in their transact proofs |
+| `pool_address` | yes | — | MASP pool. Read from, and the target of the pool calls a bundle makes |
+| `bundler_address` | yes | — | This relayer's Bundler (`BundlerFactory.create`). Every transaction goes to it, and `/chains` publishes it as the address wallets bind. Zero refuses to boot |
+| `signer_key_hex` | yes | — | 32-byte hex. Must be an operator of `bundler_address` |
+| `refund_address` | no | signer's address | Published by `/chains` as `refundAddress`, the fallback swap `refundTo` for wallets with no EVM account. Zero, `bundler_address` or `swap_wrapper_address` refuses to boot |
+| `bundle_max_items` | no | 1 | Operations per transaction, 1–32. See [Sizing](#sizing-bundle_max_items). `> 1` requires `prover.transact_vkey_path` |
+| `bundle_linger_ms` | no | 0 | Wait for more operations before sending a bundle |
+| `max_tx_bytes` | no | 120000 | Calldata cap per bundle; ≥ 16000 |
 | `receipt_timeout_s` | no | 60 | Receipt poll budget. A revert rolls the mirror back and answers 502 |
 | `receipt_poll_interval_ms` | no | 250 | Pick ~¼ of block time |
 | `flush_interval_s` | no | 30 | Must be > 0 |
 | `flush_max_n` | no | 4 | Clamped to `MAX_DEPOSITS_PER_BATCH = 4` (`MAX_L_BATCH = 8`, two leaves per deposit) |
 | `flush_max_attempts` | no | 5 | Attributable failures before a deposit is skipped. `0` disables quarantine |
+| `flush_partial_after_s` | no | 0 | How long a batch smaller than `flush_max_n` waits for more deposits. `0` flushes on every tick |
 | `native_adapter_address` | no | — | Enables `withdrawNative`. The SNARK must name it as both `recipient` and `relayer` — the adapter is the pool's caller there |
 | `swap_wrapper_address` | no | — | Enables `/v1/swap` |
 | `native_symbol` | no | `ETH` | Oracle base for the native gas token |
 | `native_decimals` | no | 18 | Must be ≤ 38 |
 | `fee_markup_bps` | no | 1000 | 10%. Must be ≤ 1_000_000 |
-| `swap_default_deadline_s` | no | 300 | Applied when the wallet pinned no deadline. Without a bound a swap can sit in the mempool and execute at an arbitrarily later price with only `min_out` protecting the user |
 | `accepted_fee_tokens` | no | `[]` | `{symbol, address, decimals, quote_symbol}`; decimals ≤ 38 |
 | `shielded_fee_address` | no | — | bech32m address the relayer is paid at. **Setting it makes a fee mandatory** — see below |
 | `shielded_fee_ivk` | no | — | Incoming viewing key for that address, big-endian. Must be set together with it. Normally from the environment, not the TOML |
@@ -387,7 +492,7 @@ signer_key_hex = "0x…"
 | `public` | no | — | Wallet-facing block, served verbatim by `/chains`: `name`, `rpc_url`, `tree_depth`, `permit2_address`, `explorer_url` |
 
 Per-chain env overlay:
-`RELAYER_CHAIN_<id>_{POOL_ADDRESS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS,SHIELDED_FEE_ADDRESS,SHIELDED_FEE_IVK,ACCEPTED_FEE_TOKENS}`.
+`RELAYER_CHAIN_<id>_{POOL_ADDRESS,BUNDLER_ADDRESS,REFUND_ADDRESS,BUNDLE_MAX_ITEMS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS,SHIELDED_FEE_ADDRESS,SHIELDED_FEE_IVK,ACCEPTED_FEE_TOKENS}`.
 `ACCEPTED_FEE_TOKENS` is the one that is not a scalar: a JSON array of
 `{symbol,address,decimals,quote_symbol}` records, replacing the TOML list
 wholesale. Malformed JSON panics at startup rather than leaving the relayer
@@ -427,9 +532,12 @@ Consequences worth knowing before enabling it:
 - **A fee consumes an output slot.** `TRANSACT_OUT` is 3 and fixed by the
   circuit, so the fee replaces a change slot: a transfer goes from
   `[recipient, change, change]` to `[recipient, change, fee]`.
-- **The fee is paid in the asset being spent**, because a spend is built in a
-  single asset. An asset this relayer will not take as a fee therefore cannot be
-  relayed at all, not merely cannot pay for itself.
+- **The fee asset is the payer's choice.** A spend's fee note, and a deposit's
+  fee leaf (its escrowed `feeAssetId`), may be in a different asset than the one
+  being moved. An asset this relayer will not take as a fee can still be moved if
+  the fee is paid in one it does take. A deposit whose fee leaf is in an asset it
+  will not take cannot be priced and is left for another relayer or a cancel. A
+  zero-fee deposit (`feeAssetId = 0`) is priced in its deposit asset.
 - **`accepted_fee_tokens` is the effective list**, whatever
   `shielded_fee_assets` says. The two are ANDed: the allowlist can only narrow,
   never widen, because an asset the fee table cannot price has no quote to check
@@ -457,14 +565,31 @@ slot.
 
 ## Replicas
 
-**Do not run more than one replica per chain.** Unlike the indexers there is no
-advisory lock here: the tree mirror, the nullifier guard, and the idempotency
-cache are all per-process state, and two relayers on one chain would reserve
-overlapping leaf ranges and race each other's `flushBatch`.
+**Do not run more than one replica of a relayer.** Unlike the indexers there is
+no advisory lock here: the tree mirror, the nullifier guard, and the idempotency
+cache are all per-process state, and two replicas sharing a signer and a Bundler
+would collide on nonces and flush the same deposits.
+
+*Independent* relayers, each with its own signer and Bundler, can serve one
+chain: whichever bundle lands first wins, and the other [resyncs](#resync) and
+retries.
 
 ## Layering
 
-Standard binary layout, plus `services/pipeline/` (spend, swap and flush over a
-shared `common`, with the flush worker's decision table in `deposit_preflight`
-and its attempt bookkeeping in `deposit_failures`) and `services/tree/`.
+Standard binary layout. `services/` groups by job:
+
+| Folder | What |
+|--------|------|
+| `tree/` | The per-chain mirror: reserve and advance (`mod.rs`), bundle prefixes and rollback (`bundle.rs`), boot and resync from the indexer and the pool (`bootstrap.rs`) |
+| `admission/` | `idempotency` and `nullifier_guard`, run before a pipeline spends anything |
+| `transact_verifier/` | Local check of a wallet's transact proof, and the public signals it is checked against |
+| `fees/` | Gas units (`gas_witness`), gas price (`gas_estimator`), prices (`oracle`), quotes (`quote`) and shielded fee collection (`shielded/`) |
+| `pipeline/` | `spend/`, `swap/` and `flush/` over the shared `transact/` checks, all submitted through the per-chain `batcher/` |
+
+`flush/` holds the flush worker's decision table (`preflight`) and its attempt
+bookkeeping (`failures`). The MASP view calls (`currentRoot`, the root ring,
+`escrowed`, the verifier addresses) go through one `adapters::masp::MaspReader`,
+and the escrowed-deposit ledger query lives in
+`repositories::deposit_escrowed_events`. The flush worker's tick loop is
+`handlers::worker::flush`, spawned by `main`.
 `build.rs` stamps the version and git SHA that `/health` reports. See [ARCHITECTURE.md](../../ARCHITECTURE.md).

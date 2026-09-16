@@ -1,7 +1,7 @@
-use crate::adapters::TokenKey;
 use crate::app::AppState;
 use crate::domain::error::AppResult;
 use crate::domain::responses::AssetOut;
+use prices::TokenKey;
 use std::sync::Arc;
 
 pub async fn list(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<AssetOut>>> {
@@ -9,7 +9,7 @@ pub async fn list(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<Ass
     let st = st.clone();
     super::cached(&cache, chain_id, async move {
         // The catalog rows come from `asset-registry` so this service and
-        // the registry-webserver read one row shape; `chain_id` arrives
+        // the protocol-webserver read one row shape; `chain_id` arrives
         // beside each row rather than inside it.
         let rows = match chain_id {
             Some(c) => asset_registry::list_for_chains(&st.pool, &[c]).await?,
@@ -28,11 +28,10 @@ pub async fn list(st: &AppState, chain_id: Option<i64>) -> AppResult<Arc<Vec<Ass
             .collect();
         // One upstream call for the whole registry, covering only tokens the
         // price cache has not already answered for.
-        let prices = super::prices::for_tokens(
-            &st,
-            &keyed.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-        )
-        .await;
+        let prices = st
+            .prices
+            .for_tokens(&keyed.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>())
+            .await;
 
         let out: Vec<AssetOut> = keyed
             .into_iter()

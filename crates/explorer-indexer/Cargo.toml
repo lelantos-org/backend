@@ -12,7 +12,7 @@ path = "src/main.rs"
 shared = { path = "../shared" }
 database = { path = "../database" }
 chain-types = { path = "../chain-types" }
-# NOTE: must NOT depend on common-crypto. Privacy gate; a convention caught in
+# NOTE: must NOT depend on crypto. Privacy gate; a convention caught in
 # review, not by CI — see the README.
 tokio = { workspace = true }
 diesel = { workspace = true }

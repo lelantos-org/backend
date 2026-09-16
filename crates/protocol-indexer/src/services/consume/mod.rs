@@ -23,8 +23,7 @@ mod yields;
 pub use refresh::RefreshGate;
 pub use tick::{ConsumeCtx, tick_chain};
 
-use crate::adapters::DynTokenMetadata;
-use crate::app::config::ProtocolIndexerConfig;
+use crate::adapters::erc20::DynTokenMetadata;
 use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
@@ -39,35 +38,21 @@ pub trait ConsumeService: Send + Sync {
     async fn list_chain_ids(&self) -> Vec<i64>;
 }
 
+/// Owns its context rather than rebuilding one per tick, as
+/// `YieldStateServiceImpl` does. The [`RefreshGate`] inside it is shared by every
+/// chain: the views are global, so one refresh serves all of them.
 pub struct ConsumeServiceImpl {
-    pub pool: DbPool,
-    pub cfg: Arc<ProtocolIndexerConfig>,
-    pub token_meta: Arc<HashMap<i64, DynTokenMetadata>>,
-    /// Shared by every chain: the views are global, so one refresh serves all of
-    /// them. See [`RefreshGate`].
-    refresh: Arc<RefreshGate>,
+    ctx: ConsumeCtx,
 }
 
 impl ConsumeServiceImpl {
-    pub fn new(
-        pool: DbPool,
-        cfg: Arc<ProtocolIndexerConfig>,
-        token_meta: Arc<HashMap<i64, DynTokenMetadata>>,
-    ) -> Self {
+    pub fn new(pool: DbPool, token_meta: Arc<HashMap<i64, DynTokenMetadata>>) -> Self {
         Self {
-            pool,
-            cfg,
-            token_meta,
-            refresh: Arc::new(RefreshGate::new()),
-        }
-    }
-
-    fn ctx(&self) -> ConsumeCtx {
-        ConsumeCtx {
-            pool: self.pool.clone(),
-            cfg: self.cfg.clone(),
-            token_meta: self.token_meta.clone(),
-            refresh: self.refresh.clone(),
+            ctx: ConsumeCtx {
+                pool,
+                token_meta,
+                refresh: Arc::new(RefreshGate::new()),
+            },
         }
     }
 }
@@ -75,12 +60,12 @@ impl ConsumeServiceImpl {
 #[async_trait]
 impl ConsumeService for ConsumeServiceImpl {
     async fn tick_chain(&self, chain_id: i64, batch: i64) -> Result<TickProgress> {
-        tick::tick_chain(&self.ctx(), chain_id, batch).await
+        tick::tick_chain(&self.ctx, chain_id, batch).await
     }
 
     async fn list_chain_ids(&self) -> Vec<i64> {
         use database::CursorRepo;
-        match database::PostgresCursorRepo::new(self.pool.clone())
+        match database::PostgresCursorRepo::new(self.ctx.pool.clone())
             .list_chain_ids()
             .await
         {

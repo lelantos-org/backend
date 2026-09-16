@@ -3,7 +3,7 @@
 use crate::app::AppState;
 use crate::app::cache::NotesPageKey;
 use crate::domain::error::AppResult;
-use crate::domain::field::pack_point_hex;
+use crate::domain::point::pack_point_hex;
 use crate::domain::responses::NoteOut;
 use crate::repositories::notes;
 use crate::services::cached;

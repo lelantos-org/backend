@@ -40,6 +40,7 @@ pub struct MatchesPageKey {
     pub after: i64,
     pub limit: i64,
 }
+
 /// `(chain_id, chunk_id)`. Only complete, immutable chunks are stored.
 pub type ChunkKey = (i64, u64);
 

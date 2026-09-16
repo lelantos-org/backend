@@ -16,13 +16,24 @@ chain_id = 31337
 rpc_url = "http://anvil:8545"
 # Overridden by RELAYER_CHAIN_31337_POOL_ADDRESS (the deployed MASP).
 pool_address = "0x0000000000000000000000000000000000000000"
-# Anvil deterministic account #1 — public test key, no secret. MASP enforces
-# `pubInputs.relayer == msg.sender`, so this must match the address wallets
-# pin as `relayerAddress` (0x70997970C51812dc3A010C7d01b50e0d17dc79C8).
+# Overridden by RELAYER_CHAIN_31337_BUNDLER_ADDRESS (the Bundler deploy creates).
+# Every transaction goes through it, and wallets bind it as `relayerAddress`.
+bundler_address = "0x0000000000000000000000000000000000000000"
+# Bundles up to this many operations per transaction; see `pipeline::batcher`.
+bundle_max_items = 8
+# Anvil deterministic account #1 — public test key, no secret. It must be an
+# operator of `bundler_address`; deploy-contracts.sh makes
+# 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 one (compose `BUNDLER_OPERATOR`).
 # A placeholder zero key is NOT usable here: it fails secp256k1 validation in
 # `Submitter::new` and aborts startup. Override with
 # RELAYER_CHAIN_31337_SIGNER_KEY.
 signer_key_hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+# Published by `/chains` as `refundAddress`: where a wallet with no EVM account
+# points a swap's `refundTo`, so a cancelled output escrow is refunded to an
+# account that can move it. Unset means the signer's address (account #1 here).
+# Must not be the Bundler or the swap wrapper. Overridden by
+# RELAYER_CHAIN_31337_REFUND_ADDRESS.
+# refund_address = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 receipt_timeout_s = 60
 flush_interval_s = 5
 # A deposit mints two leaves — the depositor's note and the note paying
@@ -55,7 +66,7 @@ flush_max_attempts = 5
 # the compose line instead) and the relayer reverts to subsidising gas.
 shielded_fee_grace_bps = 300
 # Empty means "every asset in accepted_fee_tokens", which is what we want here:
-# a payer can only pay in the asset they are already moving.
+# a payer may pay the fee in any of them, whatever asset they are moving.
 shielded_fee_assets = []
 
 # The chain's name, browser RPC, explorer, Permit2 and tree depth used to live
@@ -69,7 +80,7 @@ shielded_fee_assets = []
 #
 # Points at the SAME anvil and the SAME pool as 31337. It exists so `/chains`
 # returns two entries and `ChainSwitcher` stops hiding itself. The wallet
-# intersects this with registry-webserver's list, so config/dev/registry.toml
+# intersects this with protocol-webserver's list, so config/dev/registry.toml
 # has to declare 31338 too — it does. It is not an
 # independent deployment and nothing indexes it, so it shows zero leaves and
 # no tokens.

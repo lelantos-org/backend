@@ -2,33 +2,43 @@
 //! argument structs. Pure conversions, no I/O.
 
 use crate::adapters::abi::IMasp;
-use crate::adapters::parse::{parse_address, parse_b32, parse_u256};
+use crate::adapters::parse::{parse_address, parse_b32, parse_hex_bytes, parse_u256};
+use crate::domain::batch::PaddedBatch;
 use crate::domain::dto::{
     DepositRequestDto, OutputAuxDto, PointDto, ProofDto, PubInputsDto, TRANSACT_IN, TRANSACT_OUT,
 };
-use crate::domain::error::AppResult;
+use crate::domain::error::{AppError, AppResult};
 use alloy::primitives::{FixedBytes, U256};
-use common_crypto::tree::Field;
+use crypto::tree::Field;
 use groth16::TreeUpdateBatchProof;
 
-/// The batch shape lives in `domain::batch`; it is pure protocol arithmetic with
-/// no ABI in it. Re-exported here so this module stays the one import a calldata
-/// builder needs.
-pub use crate::domain::batch::{
-    DepositLeaf, LEAVES_PER_DEPOSIT, MAX_DEPOSITS_PER_BATCH, MAX_L_BATCH, PaddedBatch,
-};
-
+/// A wallet's transact proof.
 pub fn build_proof(p: &ProofDto) -> AppResult<IMasp::Proof> {
+    snarkjs_proof(&p.pi_a, &p.pi_b, &p.pi_c)
+}
+
+/// A proof this relayer's prover made.
+pub fn build_tu_proof(tp: &TreeUpdateBatchProof) -> AppResult<IMasp::Proof> {
+    snarkjs_proof(&tp.pi_a, &tp.pi_b, &tp.pi_c)
+}
+
+/// A snarkjs-shaped proof, projective coordinates and all, as the on-chain
+/// verifier takes it.
+fn snarkjs_proof(
+    pi_a: &[String; 3],
+    pi_b: &[[String; 2]; 3],
+    pi_c: &[String; 3],
+) -> AppResult<IMasp::Proof> {
     Ok(IMasp::Proof {
-        a: [parse_u256(&p.pi_a[0])?, parse_u256(&p.pi_a[1])?],
+        a: [parse_u256(&pi_a[0])?, parse_u256(&pi_a[1])?],
         b: [
             // snarkjs stores `pi_b` low-then-high while the on-chain Solidity
             // verifier expects [imag, real]. The swap matches SDK fixture
             // generation.
-            [parse_u256(&p.pi_b[0][1])?, parse_u256(&p.pi_b[0][0])?],
-            [parse_u256(&p.pi_b[1][1])?, parse_u256(&p.pi_b[1][0])?],
+            [parse_u256(&pi_b[0][1])?, parse_u256(&pi_b[0][0])?],
+            [parse_u256(&pi_b[1][1])?, parse_u256(&pi_b[1][0])?],
         ],
-        c: [parse_u256(&p.pi_c[0])?, parse_u256(&p.pi_c[1])?],
+        c: [parse_u256(&pi_c[0])?, parse_u256(&pi_c[1])?],
     })
 }
 
@@ -70,21 +80,12 @@ pub fn build_pub_inputs(pi: &PubInputsDto) -> AppResult<IMasp::Transact> {
         chainId: U256::from(pi.chain_id),
         payer: parse_address(&pi.payer)?,
         relayer: parse_address(&pi.relayer)?,
+        intentHash: parse_u256(&pi.intent_hash)?,
     })
 }
 
-pub fn build_tu_proof(tp: &TreeUpdateBatchProof) -> AppResult<IMasp::Proof> {
-    Ok(IMasp::Proof {
-        a: [parse_u256(&tp.pi_a[0])?, parse_u256(&tp.pi_a[1])?],
-        b: [
-            [parse_u256(&tp.pi_b[0][1])?, parse_u256(&tp.pi_b[0][0])?],
-            [parse_u256(&tp.pi_b[1][1])?, parse_u256(&tp.pi_b[1][0])?],
-        ],
-        c: [parse_u256(&tp.pi_c[0])?, parse_u256(&tp.pi_c[1])?],
-    })
-}
-
-/// Build the `TreeUpdateBatch` public inputs for `flushBatch` or a spend.
+/// Build the `TreeUpdateBatch` public inputs for `flushBatch`. A spend passes a
+/// [`build_spend_tree`] instead; the pool rebuilds the rest of its image.
 pub fn build_tu_batch_pub_inputs(
     start_index: u64,
     old_root: &Field,
@@ -104,15 +105,23 @@ pub fn build_tu_batch_pub_inputs(
     }
 }
 
+/// Build a spend's `SpendTree`: the root its advance lands on, the position it
+/// starts at, and the ring slot of the root the transact proof names.
+pub fn build_spend_tree(start_index: u64, new_root: &Field, anchor_index: u8) -> IMasp::SpendTree {
+    IMasp::SpendTree {
+        newRoot: FixedBytes::<32>::from(*new_root),
+        startIndex: start_index,
+        anchorIndex: anchor_index,
+    }
+}
+
 pub fn build_one_aux(a: &OutputAuxDto) -> AppResult<IMasp::OutputAux> {
-    let bytes = hex::decode(a.ciphertext.trim_start_matches("0x"))
-        .map_err(|e| crate::domain::error::AppError::BadRequest(format!("aux hex: {}", e)))?;
     Ok(IMasp::OutputAux {
         clueRx: parse_u256(&a.clue_r.x)?,
         clueRy: parse_u256(&a.clue_r.y)?,
         ephPubX: parse_u256(&a.eph_pub.x)?,
         ephPubY: parse_u256(&a.eph_pub.y)?,
-        ciphertext: bytes.into(),
+        ciphertext: parse_hex_bytes(&a.ciphertext, "aux ciphertext")?,
     })
 }
 
@@ -123,7 +132,7 @@ pub fn build_aux(
     let built: Vec<IMasp::OutputAux> = aux.iter().map(build_one_aux).collect::<AppResult<_>>()?;
     built
         .try_into()
-        .map_err(|_| crate::domain::error::AppError::Internal("aux arity".into()))
+        .map_err(|_| AppError::Internal("aux arity".into()))
 }
 
 /// Map a wire deposit request into the on-chain struct. Used by the swap
@@ -139,6 +148,7 @@ pub fn build_deposit_request(d: &DepositRequestDto) -> AppResult<IMasp::DepositR
         outCm: parse_b32(&d.out_cm)?,
         cvDep: [parse_u256(&d.cv_dep[0])?, parse_u256(&d.cv_dep[1])?],
         rcv: parse_u256(&d.rcv)?,
+        feeAssetId: d.fee_asset_id,
         feeIn: d.fee_in,
         feeCm: parse_b32(&d.fee_cm)?,
         feeCvDep: [parse_u256(&d.fee_cv_dep[0])?, parse_u256(&d.fee_cv_dep[1])?],

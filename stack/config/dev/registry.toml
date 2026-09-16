@@ -1,4 +1,4 @@
-# registry-webserver — DEV (local anvil stack). Mounted at /etc/registry.toml.
+# protocol-webserver — DEV (local anvil stack). Mounted at /etc/registry.toml.
 #
 # The deployment half of what a wallet used to read from the relayer's `/chains`:
 # what each chain *is*, rather than what any one relayer will do on it. A
@@ -39,7 +39,7 @@ rpc_url = "http://localhost:8545"
 # 404 is even visible — the browser reports only the missing
 # `Access-Control-Allow-Origin`. The webapp's dev server proxies `/rpc` here,
 # which is the same shape prod publishes (see the `read_rpc_url` test in
-# registry-webserver's `services/chains.rs`).
+# protocol-webserver's `services/chains.rs`).
 read_rpc_url = "/rpc/v1/31337"
 tree_depth = 11
 # Injected by deploy-contracts.sh as REGISTRY_CHAIN_31337_{MASP,PERMIT2}_ADDRESS.

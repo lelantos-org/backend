@@ -49,7 +49,7 @@ Server-side callers using `PrivateKeySigner` point at the upstream directly.
 ## The `eth_call` allowlist is static
 
 The set of contracts comes from config and changes only on redeploy. There is no
-runtime dependency on registry-webserver.
+runtime dependency on protocol-webserver.
 
 **So adding an asset on-chain without an `rpc-proxy` converge breaks it** — its
 `balanceOf`/`symbol`/`decimals` return `-32602`, and in the UI the transparent
@@ -298,3 +298,15 @@ by a sweep every 60s:
 | `rpc_proxy_ratelimit_keys{bucket}` | Sustained growth. The key is an unauthenticated IP prefix, and the sweep is the only thing that retires one — `governor` never does it on its own. |
 | `rpc_proxy_cache_entries{chain,class}` | Tuning input for the byte budgets above. |
 | `rpc_proxy_upstream_permits_available{chain}` | A sustained zero means requests are queueing against their own deadline; raise `upstream_max_inflight` or find out why the upstream slowed down. |
+
+## Layering
+
+Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Layer | What |
+|-------|------|
+| `app/` | Config, state wiring, the per-class result caches, the in-flight map and the log throttle |
+| `adapters/` | `upstream/`: the `Upstream` trait, sequential failover (`http`) and the wire body (`body`). `ratelimit/`: the client key (`client`) and the GCRA buckets (`limiter`) |
+| `domain/` | Pure JSON-RPC types and checks: `allowlist/` (the `Policy` checks, and the `method` table with its weights), `multicall/` (upstream packing in `pack`, a client's `aggregate3` in `client`), `policy` (cache classes), `targets`, `cache_key`, `blocktag`, `tip`, `jsonrpc`, `error` |
+| `services/` | `proxy/`: one chain's service, split into `plan` (how each call is served) and `fetch` (cache, coalescing, upstream). `housekeeping`: the periodic sweep |
+| `handlers/http/` | The router and the JSON-RPC endpoint |
