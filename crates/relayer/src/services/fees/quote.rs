@@ -247,7 +247,10 @@ mod tests {
     fn compute_token_amount_exact_division_is_not_bumped() {
         // Rounding up must not add a unit when the cost is already whole.
         let total_wei = U256::from(11_000_000_000_000_000u128);
-        assert_eq!(compute_token_amount(total_wei, 18, 6, 3000.0), U256::from(33_000_000u128));
+        assert_eq!(
+            compute_token_amount(total_wei, 18, 6, 3000.0),
+            U256::from(33_000_000u128)
+        );
         assert_eq!(compute_token_amount(U256::ZERO, 18, 8, 3000.0), U256::ZERO);
     }
 
