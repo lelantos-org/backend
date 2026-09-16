@@ -171,9 +171,17 @@ impl FeeQuoter {
     }
 }
 
-/// `token_base = total_native_wei * price_scaled * 10^token_dec
-///              / (10^native_dec * PRICE_SCALE)`
+/// `token_base = ceil(total_native_wei * price_scaled * 10^token_dec
+///                   / (10^native_dec * PRICE_SCALE))`
 /// Scaled-integer math; `price` is folded into u128 once at the boundary.
+///
+/// Rounded up, not down. A fee is what the relayer must recover, so a nonzero
+/// cost has to price at least one base unit: flooring priced a flush's gas at
+/// zero in any token whose base unit is worth more than that gas (an 8-decimal
+/// token on cheap gas), the estimate then quoted a free fee, the wallet paid a
+/// zero-value note that carries no fee asset, and the flush re-priced that leaf
+/// in the deposit asset and deferred it until the payer cancelled. Both the
+/// quote and the flush requirement come through here, so they stay equal.
 pub fn compute_token_amount(
     total_native_wei: U256,
     native_dec: u8,
@@ -190,7 +198,7 @@ pub fn compute_token_amount(
     let ten = U256::from(10u8);
     let num = total_native_wei * U256::from(price_scaled) * ten.pow(U256::from(token_dec));
     let den = ten.pow(U256::from(native_dec)) * U256::from(PRICE_SCALE);
-    num / den
+    num.div_ceil(den)
 }
 
 #[cfg(test)]
@@ -223,6 +231,24 @@ mod tests {
         let total_wei = U256::from(11_000_000_000_000_000u128);
         let amt = compute_token_amount(total_wei, 18, 18, 1.0);
         assert_eq!(amt, U256::from(11_000_000_000_000_000u128));
+    }
+
+    #[test]
+    fn compute_token_amount_rounds_a_sub_unit_cost_up() {
+        // 420_000 gas at 1 gwei is 4.2e14 wei; at 0.00002 USD per ETH that is
+        // 0.00084 of one base unit of an 8-decimal token. A charged fee must not
+        // price that at zero.
+        let total_wei = U256::from(420_000_000_000_000u128);
+        let amt = compute_token_amount(total_wei, 18, 8, 0.00002);
+        assert_eq!(amt, U256::from(1u8));
+    }
+
+    #[test]
+    fn compute_token_amount_exact_division_is_not_bumped() {
+        // Rounding up must not add a unit when the cost is already whole.
+        let total_wei = U256::from(11_000_000_000_000_000u128);
+        assert_eq!(compute_token_amount(total_wei, 18, 6, 3000.0), U256::from(33_000_000u128));
+        assert_eq!(compute_token_amount(U256::ZERO, 18, 8, 3000.0), U256::ZERO);
     }
 
     #[test]
