@@ -24,6 +24,11 @@ async fn main() -> Result<()> {
         shared::config::load_toml("PROTOCOL_INDEXER_CONFIG", "protocol-indexer.toml")
             .context("load config")?;
     cfg.apply_env_overlay();
+    let governors = Arc::new(
+        cfg.governors()
+            .map_err(anyhow::Error::msg)
+            .context("governor config")?,
+    );
     let tick_ms = cfg.tick_ms;
     let batch = cfg.batch;
 
@@ -53,9 +58,9 @@ async fn main() -> Result<()> {
         .await
         .context("build pool")?;
 
-    info!(tick_ms, batch, "protocol-indexer ready");
+    info!(tick_ms, batch, governors = ?governors, "protocol-indexer ready");
 
-    let consume = Arc::new(ConsumeServiceImpl::new(pool.clone(), token_meta));
+    let consume = Arc::new(ConsumeServiceImpl::new(pool.clone(), token_meta, governors));
     let yield_state = Arc::new(YieldStateServiceImpl::new(pool, yield_readers));
 
     let (trigger, shutdown) = shared::shutdown::channel();

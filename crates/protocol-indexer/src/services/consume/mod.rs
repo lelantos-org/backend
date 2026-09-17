@@ -4,7 +4,7 @@
 //! `shared::tick`, mirroring fmd-indexer.
 //!
 //! One module per concern this crate projects — `assets`, `yields`, `tree`,
-//! `deposits` — each owning its slice of the tick's plan and the writes that
+//! `deposits`, `governance` — each owning its slice of the tick's plan and the writes that
 //! land it. `events` is the routing table between the decoded event and those
 //! modules, `plan` the container and the causal order, `tick` the loop,
 //! `metadata` the RPC sweep beside it and [`RefreshGate`] the materialized-view
@@ -13,6 +13,7 @@
 mod assets;
 mod deposits;
 mod events;
+mod governance;
 mod metadata;
 mod plan;
 mod refresh;
@@ -25,6 +26,7 @@ pub use tick::{ConsumeCtx, tick_chain};
 
 use crate::adapters::erc20::DynTokenMetadata;
 use crate::domain::error::Result;
+use alloy::primitives::Address;
 use async_trait::async_trait;
 use database::DbPool;
 use shared::tick::TickProgress;
@@ -46,11 +48,16 @@ pub struct ConsumeServiceImpl {
 }
 
 impl ConsumeServiceImpl {
-    pub fn new(pool: DbPool, token_meta: Arc<HashMap<i64, DynTokenMetadata>>) -> Self {
+    pub fn new(
+        pool: DbPool,
+        token_meta: Arc<HashMap<i64, DynTokenMetadata>>,
+        governors: Arc<HashMap<i64, Address>>,
+    ) -> Self {
         Self {
             ctx: ConsumeCtx {
                 pool,
                 token_meta,
+                governors,
                 refresh: Arc::new(RefreshGate::new()),
             },
         }

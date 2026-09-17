@@ -6,8 +6,10 @@
 #   2. forge script DeployTestSwap.s.sol  → UniV3Adapter, SwapWrapper, mocks,
 #                                           BundlerFactory + the relayer's Bundler
 #   3. forge script DeployTestYield.s.sol → MockERC4626 vaults, ERC4626Venues
-#   4. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
-#   5. write addresses.env, sourced by every backend's entrypoint wrapper
+#   4. forge script DeployTestGovernance.s.sol → LNT, Timelock, Governor,
+#                                           FeeBurner, ProtocolAdmin
+#   5. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
+#   6. write addresses.env, sourced by every backend's entrypoint wrapper
 #
 # Required env (set in docker-compose.yml):
 #   RPC_URL DEPLOYER_KEY FUND_RECIPIENT FUND_NATIVE FUND_WETH FUND_ERC20
@@ -116,6 +118,19 @@ deploy_core() {
     # simply runs without the floor.
     DEPLOY_BLOCK=$(cast block-number --rpc-url "$RPC_URL" 2>/dev/null || echo "")
     log "deploy_block=${DEPLOY_BLOCK:-<unknown>}"
+    # DeployTest reads Permit2's bytecode with `vm.getCode`, but nothing it
+    # imports pulls Permit2 in, and `forge script` compiles only the script's own
+    # import graph. Without this the artifact exists only if an earlier full
+    # `forge build` happened to leave it in out/, and the deploy fails with
+    # "vm.getCode: no matching artifact found" once out/ is rebuilt.
+    #
+    # Retried once: when the artifact was removed but forge's cache still lists
+    # it, the first build fails writing it and repairs the cache, and the second
+    # succeeds. Not `--force`, which would wipe all of out/ — shared with the host.
+    log "forge build script/Permit2Import.sol"
+    forge build script/Permit2Import.sol >> "$FORGE_LOG" 2>&1 \
+        || forge build script/Permit2Import.sol >> "$FORGE_LOG" 2>&1 \
+        || die "forge build script/Permit2Import.sol failed; see ${FORGE_LOG}"
     forge_script "DeployTest.s.sol:DeployTest"
     reload_addresses
 
@@ -190,6 +205,26 @@ deploy_yield() {
     debug "YIELD_VAULT_4=${YIELD_VAULT_4} (empty; index starts at RAY)"
 }
 
+# LNT + TimelockController + LelantosGovernor (+ FeeBurner, ProtocolAdmin) on
+# dev timings: a proposal goes from `propose` to `execute` in minutes. The whole
+# LNT supply goes to FUND_RECIPIENT, the funded dev account, so it can delegate
+# to itself and propose. Ownership handover is not run, so MASP and SwapWrapper
+# keep their dev owners and nothing else on the stack changes.
+deploy_governance() {
+    step "deploy governance (LNT + Timelock + Governor)"
+    GOV_TOKEN_RECIPIENT="$FUND_RECIPIENT"
+    export MASP SWAP_WRAPPER GOV_TOKEN_RECIPIENT
+    forge_script "DeployTestGovernance.s.sol:DeployTestGovernance"
+    reload_addresses
+
+    GOV_TOKEN=$(addr_req GOV_TOKEN)
+    GOVERNOR=$(addr_req GOVERNOR)
+    TIMELOCK=$(addr_req TIMELOCK)
+
+    log "GOVERNOR=${GOVERNOR}"
+    debug "GOV_TOKEN=${GOV_TOKEN} (supply to ${GOV_TOKEN_RECIPIENT}) TIMELOCK=${TIMELOCK}"
+}
+
 fund_recipient() {
     step "fund ${FUND_RECIPIENT}"
 
@@ -247,6 +282,10 @@ write_env_file() {
     {
         _emit INGESTER POOL_ADDRESS "$MASP"
         _emit INGESTER RPC_URL "$RPC_URL"
+        # The governor's proposal and vote logs are fetched alongside the pool's.
+        # The token's are not decoded yet; declared so the filter is complete.
+        _emit INGESTER GOVERNOR_ADDRESS "$GOVERNOR"
+        _emit INGESTER GOV_TOKEN_ADDRESS "$GOV_TOKEN"
 
         _emit RELAYER POOL_ADDRESS "$MASP"
         _emit RELAYER RPC_URL "$RPC_URL"
@@ -295,6 +334,10 @@ write_env_file() {
         # there would hand every wallet an endpoint it cannot reach. This one is
         # the venue-APY worker's own endpoint, which runs inside the network.
         _emit REGISTRY APY_RPC_URL "$RPC_URL"
+        # Governance: what a wallet reads proposals, votes and voting power from.
+        _emit REGISTRY GOVERNOR_ADDRESS "$GOVERNOR"
+        _emit REGISTRY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
+        _emit REGISTRY TIMELOCK_ADDRESS "$TIMELOCK"
 
         # 31338 mirrors the relayer's second chain: same anvil, same pool, so
         # the registry lists two chains and the frontend's switcher is reachable.
@@ -303,6 +346,9 @@ write_env_file() {
         _emit_for 31338 REGISTRY NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
         _emit_for 31338 REGISTRY SWAP_WRAPPER_ADDRESS "$SWAP_WRAPPER"
         _emit_for 31338 REGISTRY APY_RPC_URL "$RPC_URL"
+        _emit_for 31338 REGISTRY GOVERNOR_ADDRESS "$GOVERNOR"
+        _emit_for 31338 REGISTRY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
+        _emit_for 31338 REGISTRY TIMELOCK_ADDRESS "$TIMELOCK"
 
         # The read proxy's contract allowlist. Unlike every other service, this
         # one refuses a call to an address it was not told about — so a token or
@@ -318,16 +364,24 @@ write_env_file() {
         # ERC4626Venue addresses are CREATE-derived at deploy and appear in no
         # config file at all; this is their only source.
         _emit RPC_PROXY VENUE_SEED "${YIELD_VENUE_4},${YIELD_VENUE_5},${YIELD_VENUE_6}"
+        # The governance UI's reads (`state`, `proposalVotes`, `getVotes`, …).
+        _emit RPC_PROXY GOVERNOR_ADDRESS "$GOVERNOR"
+        _emit RPC_PROXY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
 
         _emit_for 31338 RPC_PROXY MASP_ADDRESS "$MASP"
         _emit_for 31338 RPC_PROXY DEPLOY_BLOCK "$DEPLOY_BLOCK"
         _emit_for 31338 RPC_PROXY PERMIT2_ADDRESS "$PERMIT2"
         _emit_for 31338 RPC_PROXY ERC20_SEED "${TOKEN_1},${TOKEN_2},${TOKEN_3}"
         _emit_for 31338 RPC_PROXY VENUE_SEED "${YIELD_VENUE_4},${YIELD_VENUE_5},${YIELD_VENUE_6}"
+        _emit_for 31338 RPC_PROXY GOVERNOR_ADDRESS "$GOVERNOR"
+        _emit_for 31338 RPC_PROXY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
 
         # protocol-indexer reads ERC20 `decimals()` and polls `yieldState`.
         # Its TOML declares the chain; this supplies the endpoint.
         _emit PROTOCOL_INDEXER RPC_URL "$RPC_URL"
+        # Governance events are accepted only from this emitter; without it the
+        # indexer skips every proposal and vote the ingester fetched.
+        _emit PROTOCOL_INDEXER GOVERNOR_ADDRESS "$GOVERNOR"
 
         _emit METAQUOTER RPC_URL "$RPC_URL"
         _emit METAQUOTER UNIV3_QUOTER "$UNIV3_QUOTER"
@@ -360,6 +414,9 @@ print_summary() {
         YIELD_VENUE_4  "$YIELD_VENUE_4" \
         YIELD_VENUE_5  "$YIELD_VENUE_5" \
         YIELD_VENUE_6  "$YIELD_VENUE_6" \
+        GOV_TOKEN      "$GOV_TOKEN" \
+        GOVERNOR       "$GOVERNOR" \
+        TIMELOCK       "$TIMELOCK" \
         funded         "$FUND_RECIPIENT" >&2
 }
 
@@ -368,6 +425,7 @@ main() {
     deploy_core
     deploy_swap
     deploy_yield
+    deploy_governance
     fund_recipient
     write_env_file
     print_summary

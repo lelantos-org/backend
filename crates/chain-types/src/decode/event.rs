@@ -143,4 +143,44 @@ pub enum DecodedEvent {
         asset_id: u64,
         recovered: U256,
     },
+    /// A governor proposal. `calldatas[i]` is sent to `targets[i]` with
+    /// `values[i]` wei; `signatures` is kept for OZ's ABI shape and is empty
+    /// strings for proposals made through `propose`.
+    ProposalCreated {
+        proposal_id: U256,
+        proposer: Address,
+        targets: Vec<Address>,
+        values: Vec<U256>,
+        signatures: Vec<String>,
+        calldatas: Vec<Vec<u8>>,
+        vote_start: U256,
+        vote_end: U256,
+        description: String,
+    },
+    /// After this instant only Against votes are accepted.
+    ProposalQuorumVoteDeadline {
+        proposal_id: U256,
+        quorum_vote_deadline: U256,
+    },
+    /// Both `VoteCast` and `VoteCastWithParams`: the two differ only in
+    /// `params`, which is `None` for the former.
+    VoteCast {
+        voter: Address,
+        proposal_id: U256,
+        /// 0 Against, 1 For, 2 Abstain.
+        support: u8,
+        weight: U256,
+        reason: String,
+        params: Option<Vec<u8>>,
+    },
+    ProposalQueued {
+        proposal_id: U256,
+        eta_seconds: U256,
+    },
+    ProposalExecuted {
+        proposal_id: U256,
+    },
+    ProposalCanceled {
+        proposal_id: U256,
+    },
 }

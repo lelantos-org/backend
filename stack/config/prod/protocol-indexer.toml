@@ -37,3 +37,4 @@ batch = 500
 # [[chains]]
 # chain_id = 1
 # rpc_url = "https://eth.example"   # or PROTOCOL_INDEXER_CHAIN_1_RPC_URL
+# governor_address = "0x0000000000000000000000000000000000000000"   # or PROTOCOL_INDEXER_CHAIN_1_GOVERNOR_ADDRESS; zero indexes no governance

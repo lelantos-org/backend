@@ -1,5 +1,5 @@
-//! The pool's log types. Their topic0 hashes are pinned against the contract ABI
-//! in `tests/sig_check.rs`.
+//! The pool's and the governor's log types. Their topic0 hashes are pinned
+//! against the contract ABI in `tests/sig_check.rs`.
 
 use alloy::sol;
 
@@ -211,4 +211,60 @@ sol! {
     /// repeatable, so several of these can describe one unwind.
     #[derive(Debug)]
     event EmergencyUnwound(uint64 indexed assetId, uint256 recovered);
+
+    // ── LelantosGovernor (OpenZeppelin Governor v5) ─────────────────────────
+    //
+    // Emitted by the governor, not the pool. Topic0 alone does not say which
+    // contract emitted a log, so consumers check `raw_events.address` too.
+
+    /// A new proposal. The governor has no `GovernorStorage`, so this log is the
+    /// only way to enumerate proposals. `voteStart`/`voteEnd` are in the
+    /// governor's clock, which for `LelantosToken` is the timestamp clock.
+    #[derive(Debug)]
+    event ProposalCreated(
+        uint256 proposalId,
+        address proposer,
+        address[] targets,
+        uint256[] values,
+        string[] signatures,
+        bytes[] calldatas,
+        uint256 voteStart,
+        uint256 voteEnd,
+        string description
+    );
+
+    /// Emitted right after `ProposalCreated`, in the same transaction: after
+    /// `quorumVoteDeadline` only Against votes are accepted. Fixed per proposal, so
+    /// a later `setQuorumVoteCutoff` does not move it.
+    #[derive(Debug)]
+    event ProposalQuorumVoteDeadline(uint256 proposalId, uint256 quorumVoteDeadline);
+
+    /// `support` is 0 Against, 1 For, 2 Abstain (`GovernorCountingSimple`).
+    #[derive(Debug)]
+    event VoteCast(
+        address indexed voter,
+        uint256 proposalId,
+        uint8 support,
+        uint256 weight,
+        string reason
+    );
+
+    #[derive(Debug)]
+    event VoteCastWithParams(
+        address indexed voter,
+        uint256 proposalId,
+        uint8 support,
+        uint256 weight,
+        string reason,
+        bytes params
+    );
+
+    #[derive(Debug)]
+    event ProposalQueued(uint256 proposalId, uint256 etaSeconds);
+
+    #[derive(Debug)]
+    event ProposalExecuted(uint256 proposalId);
+
+    #[derive(Debug)]
+    event ProposalCanceled(uint256 proposalId);
 }

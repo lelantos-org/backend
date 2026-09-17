@@ -77,5 +77,13 @@ pub fn plan_event(plan: &mut CommitPlan, chain_id: i64, row: &RawEventRow, event
         // Write no derived state anywhere.
         DecodedEvent::Rebalanced { .. } => {}
         DecodedEvent::EmergencyUnwound { .. } => {}
+
+        // Governance, owned by protocol-indexer.
+        DecodedEvent::ProposalCreated { .. }
+        | DecodedEvent::ProposalQuorumVoteDeadline { .. }
+        | DecodedEvent::VoteCast { .. }
+        | DecodedEvent::ProposalQueued { .. }
+        | DecodedEvent::ProposalExecuted { .. }
+        | DecodedEvent::ProposalCanceled { .. } => {}
     }
 }

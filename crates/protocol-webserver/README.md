@@ -26,6 +26,9 @@ It also starts undoing a duplication: the relayer and explorer-webserver each ha
 | GET | `/v1/assets?chainId=` | `public, max-age={cache_ttl_s}` |
 | GET | `/v1/prices` | `public, max-age=60` |
 | GET | `/v1/yield-index?chainId=` | `public, max-age=900` |
+| GET | `/v1/governance/proposals?chainId=&cursor=&limit=` | `public, max-age=10` |
+| GET | `/v1/governance/proposals/{proposalId}?chainId=` | `public, max-age=10` |
+| GET | `/v1/governance/proposals/{proposalId}/votes?chainId=&cursor=&limit=` | `public, max-age=10` |
 | GET | `/swagger-ui`, `/api-docs/openapi.json` | — |
 
 Every API route also carries an `ETag`, so a wallet re-polling the catalog with `If-None-Match` gets a `304` rather than the body.

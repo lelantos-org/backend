@@ -15,6 +15,10 @@ chain_id = 31337
 rpc_url = "http://anvil:8545"
 # Overridden by INGESTER_CHAIN_31337_POOL_ADDRESS (the deployed MASP).
 pool_address = "0x0000000000000000000000000000000000000000"
+# Overridden by INGESTER_CHAIN_31337_{GOVERNOR,GOV_TOKEN}_ADDRESS. Zero means no
+# governance on this chain: only the pool's logs are fetched.
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"
 start_block = 0
 # Single-node anvil never reorgs, so index straight up to the tip.
 reorg_depth = 0

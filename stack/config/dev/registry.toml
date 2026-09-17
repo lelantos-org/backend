@@ -56,6 +56,11 @@ permit2_address = "0x0000000000000000000000000000000000000000"
 # than offering either and failing at submit — so a zero here is not cosmetic.
 native_adapter_address = "0x0000000000000000000000000000000000000000"
 swap_wrapper_address = "0x0000000000000000000000000000000000000000"
+# Also injected, as REGISTRY_CHAIN_31337_{GOVERNOR,GOV_TOKEN,TIMELOCK}_ADDRESS.
+# Zero is published as absent, which hides governance on the chain.
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"
+timelock_address = "0x0000000000000000000000000000000000000000"
 # The endpoint the rate measurement reads with — inside the network, and needing
 # archive state, unlike the browser-facing `rpc_url` above. Also injected, as
 # REGISTRY_CHAIN_31337_APY_RPC_URL; `rpc_url` deliberately is not, because
@@ -80,4 +85,7 @@ masp_address = "0x0000000000000000000000000000000000000000"
 permit2_address = "0x0000000000000000000000000000000000000000"
 native_adapter_address = "0x0000000000000000000000000000000000000000"
 swap_wrapper_address = "0x0000000000000000000000000000000000000000"
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"
+timelock_address = "0x0000000000000000000000000000000000000000"
 apy_rpc_url = "http://anvil:8545"

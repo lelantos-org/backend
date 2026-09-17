@@ -17,7 +17,8 @@
 //!
 //! One field per concern this crate projects, each owning its own rows and its
 //! own writes: [`super::assets`], [`super::yields`], [`super::tree`],
-//! [`super::deposits`]. This struct is only the container and the order.
+//! [`super::deposits`], [`super::governance`]. This struct is only the
+//! container and the order.
 //!
 //! # Ordering
 //!
@@ -30,6 +31,7 @@
 
 use super::assets::AssetPlan;
 use super::deposits::DepositPlan;
+use super::governance::GovernancePlan;
 use super::tree::TreePlan;
 use super::yields::YieldPlan;
 use crate::domain::error::ProtocolIndexerError;
@@ -41,6 +43,7 @@ pub struct CommitPlan {
     pub yields: YieldPlan,
     pub tree: TreePlan,
     pub deposits: DepositPlan,
+    pub governance: GovernancePlan,
 }
 
 impl CommitPlan {
@@ -61,6 +64,7 @@ impl CommitPlan {
         self.yields.apply(pool).await?;
         self.tree.apply(pool).await?;
         self.deposits.apply(pool).await?;
+        self.governance.apply(pool).await?;
         Ok(())
     }
 }

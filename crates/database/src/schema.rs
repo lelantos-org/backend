@@ -13,6 +13,7 @@ diesel::table! {
         event_kind -> Int2,
         topics -> Array<Bytea>,
         data -> Bytea,
+        address -> Nullable<Bytea>,
     }
 }
 
@@ -247,6 +248,46 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    gov_proposals (chain_id, proposal_id) {
+        chain_id -> Int8,
+        proposal_id -> Numeric,
+        proposer -> Bytea,
+        targets -> Array<Bytea>,
+        call_values -> Array<Numeric>,
+        signatures -> Array<Text>,
+        calldatas -> Array<Bytea>,
+        description -> Text,
+        vote_start -> Int8,
+        vote_end -> Int8,
+        quorum_vote_deadline -> Nullable<Int8>,
+        block_number -> Int8,
+        log_index -> Int4,
+        tx_hash -> Bytea,
+        block_ts -> Int8,
+        queued_at_block -> Nullable<Int8>,
+        eta -> Nullable<Int8>,
+        executed_at_block -> Nullable<Int8>,
+        canceled_at_block -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
+    gov_votes (chain_id, proposal_id, voter) {
+        chain_id -> Int8,
+        proposal_id -> Numeric,
+        voter -> Bytea,
+        support -> Int2,
+        weight -> Numeric,
+        reason -> Text,
+        params -> Nullable<Bytea>,
+        block_number -> Int8,
+        log_index -> Int4,
+        tx_hash -> Bytea,
+        block_ts -> Int8,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     raw_events,
     chain_state,
@@ -265,4 +306,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     asset_yield_sample,
     yield_fee_events,
     tree_state,
+    gov_proposals,
+    gov_votes,
 );

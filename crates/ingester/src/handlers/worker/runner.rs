@@ -4,7 +4,7 @@ use crate::adapters::DynRpc;
 use crate::app::config::{ChainConfig, redact_url};
 use crate::app::state::WorkerDeps;
 use crate::domain::error::IngesterError;
-use crate::domain::models::{parse_address, scanned_watermark};
+use crate::domain::models::scanned_watermark;
 use crate::handlers::worker::live::run as run_live;
 use crate::repositories::ChainStateRepo;
 use crate::services::backfill::BackfillService;
@@ -42,6 +42,7 @@ pub async fn run(deps: WorkerDeps, mut shutdown: Shutdown) -> Result<WorkerExit,
         // in the path, and this line reaches every log consumer.
         rpc_url = %redact_url(&deps.cfg.rpc_url),
         pool_address = %deps.cfg.pool_address,
+        governor_address = ?deps.cfg.governor_address,
         start_block = deps.cfg.start_block,
         "worker starting"
     );
@@ -121,7 +122,7 @@ async fn until_lock_lost(mut lock: ChainLock, poll: Duration) {
 /// One chain's ingest pipeline, without the lock plumbing.
 struct Chain {
     cfg: ChainConfig,
-    pool_addr: Address,
+    emitters: Vec<Address>,
     rpc: DynRpc,
     chain_state: Arc<dyn ChainStateRepo>,
     backfill: Arc<BackfillService>,
@@ -140,10 +141,10 @@ impl Chain {
             log_window,
             database_url: _,
         } = deps;
-        let pool_addr = parse_address(&cfg.pool_address)?;
+        let emitters = cfg.emitters()?;
         let live = Arc::new(LiveServiceImpl::new(
             cfg.clone(),
-            pool_addr,
+            emitters.clone(),
             rpc.clone(),
             chain_state.clone(),
             ingest,
@@ -152,7 +153,7 @@ impl Chain {
         )) as Arc<dyn LiveService>;
         Ok(Self {
             cfg,
-            pool_addr,
+            emitters,
             rpc,
             chain_state,
             backfill,
@@ -215,7 +216,7 @@ impl Chain {
         self.backfill
             .run(
                 &self.cfg,
-                self.pool_addr,
+                &self.emitters,
                 (last_scanned + 1) as u64,
                 safe_to as u64,
             )

@@ -55,7 +55,9 @@ struct CachedCursor {
 /// see `cursor`.
 pub struct LiveServiceImpl {
     cfg: ChainConfig,
-    pool_addr: Address,
+    /// The pool plus any configured governance contracts; see
+    /// [`ChainConfig::emitters`].
+    emitters: Vec<Address>,
     rpc: DynRpc,
     chain_state: Arc<dyn ChainStateRepo>,
     ingest: Arc<IngestService>,
@@ -78,7 +80,7 @@ pub struct LiveServiceImpl {
 impl LiveServiceImpl {
     pub fn new(
         cfg: ChainConfig,
-        pool_addr: Address,
+        emitters: Vec<Address>,
         rpc: DynRpc,
         chain_state: Arc<dyn ChainStateRepo>,
         ingest: Arc<IngestService>,
@@ -87,7 +89,7 @@ impl LiveServiceImpl {
     ) -> Self {
         Self {
             cfg,
-            pool_addr,
+            emitters,
             rpc,
             chain_state,
             ingest,
@@ -290,7 +292,7 @@ impl LiveServiceImpl {
             &self.rpc,
             &self.log_window,
             chain_id,
-            self.pool_addr,
+            &self.emitters,
             from as u64,
             to as u64,
         )

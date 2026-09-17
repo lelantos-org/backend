@@ -66,6 +66,10 @@ permit2_address = "0x0000000000000000000000000000000000000000"
 # Empty here means every token read is refused until the deploy step runs.
 erc20_seed = []
 venue_seed = []
+# Injected as RPC_PROXY_CHAIN_31337_{GOVERNOR,GOV_TOKEN}_ADDRESS. Zero means
+# absent: neither contract is callable until the deploy step runs.
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"
 
 [[chains]]
 chain_id = 31338
@@ -82,3 +86,5 @@ masp_address = "0x0000000000000000000000000000000000000000"
 permit2_address = "0x0000000000000000000000000000000000000000"
 erc20_seed = []
 venue_seed = []
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"

@@ -96,7 +96,48 @@ pub(super) async fn retract_derived(
             .execute(conn)
             .await?;
 
-            tree + escrow + flushed + canceled
+            // Governance: proposals and votes created inside the fork go, and
+            // lifecycle marks inside the fork on an older proposal are undone
+            // for the same reason as the deposit marks above. `eta` belongs to
+            // the queue mark, so it goes with it. `quorum_vote_deadline` needs no
+            // unmarking: it is emitted in the creating transaction, so it only
+            // exists on a proposal the delete already handled.
+            use crate::schema::gov_proposals as g;
+            let proposals = delete_at_or_above!(conn, gov_proposals, chain_id, from_block);
+            let votes = delete_at_or_above!(conn, gov_votes, chain_id, from_block);
+            let queued = diesel::update(
+                g::table
+                    .filter(g::chain_id.eq(chain_id))
+                    .filter(g::queued_at_block.ge(from_block)),
+            )
+            .set((g::queued_at_block.eq(None::<i64>), g::eta.eq(None::<i64>)))
+            .execute(conn)
+            .await?;
+            let executed = diesel::update(
+                g::table
+                    .filter(g::chain_id.eq(chain_id))
+                    .filter(g::executed_at_block.ge(from_block)),
+            )
+            .set(g::executed_at_block.eq(None::<i64>))
+            .execute(conn)
+            .await?;
+            let gov_canceled = diesel::update(
+                g::table
+                    .filter(g::chain_id.eq(chain_id))
+                    .filter(g::canceled_at_block.ge(from_block)),
+            )
+            .set(g::canceled_at_block.eq(None::<i64>))
+            .execute(conn)
+            .await?;
+
+            tree + escrow
+                + flushed
+                + canceled
+                + proposals
+                + votes
+                + queued
+                + executed
+                + gov_canceled
         }
         Owner::Explorer => {
             let flows = delete_at_or_above!(conn, asset_flows, chain_id, from_block);

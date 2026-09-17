@@ -12,6 +12,9 @@ fn chain(chain_id: i64) -> ChainCfg {
         tree_depth: None,
         native_adapter_address: None,
         swap_wrapper_address: None,
+        governor_address: None,
+        gov_token_address: None,
+        timelock_address: None,
         apy_rpc_url: None,
     }
 }
@@ -56,4 +59,38 @@ fn test_empty_database_url_is_rejected() {
     let mut c = cfg(vec![chain(31337)]);
     c.database_url = String::new();
     assert!(c.validate().is_err());
+}
+
+/// The governance addresses arrive from the deploy like every other address.
+#[test]
+fn test_the_overlay_supplies_the_governance_addresses() {
+    const KEYS: [(&str, &str); 3] = [
+        (
+            "REGISTRY_CHAIN_772001_GOVERNOR_ADDRESS",
+            "0x1111111111111111111111111111111111111111",
+        ),
+        (
+            "REGISTRY_CHAIN_772001_GOV_TOKEN_ADDRESS",
+            "0x2222222222222222222222222222222222222222",
+        ),
+        (
+            "REGISTRY_CHAIN_772001_TIMELOCK_ADDRESS",
+            "0x3333333333333333333333333333333333333333",
+        ),
+    ];
+    for (k, v) in KEYS {
+        // SAFETY: these keys name a chain id no other test uses.
+        unsafe { std::env::set_var(k, v) };
+    }
+    let mut c = cfg(vec![chain(772001)]);
+    c.apply_env_overlay();
+    for (k, _) in KEYS {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(k) };
+    }
+
+    let got = &c.chains[0];
+    assert_eq!(got.governor_address.as_deref(), Some(KEYS[0].1));
+    assert_eq!(got.gov_token_address.as_deref(), Some(KEYS[1].1));
+    assert_eq!(got.timelock_address.as_deref(), Some(KEYS[2].1));
 }

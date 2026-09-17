@@ -138,10 +138,13 @@ rpc_connect_timeout_ms  = 10_000  # optional
 | `chains[].meta_concurrency` | no | 32 | Cap on simultaneous `eth_getBlockByNumber` calls |
 | `chains[].rpc_timeout_ms` | no | 30000 | Whole-request RPC timeout |
 | `chains[].rpc_connect_timeout_ms` | no | 10000 | RPC connect timeout |
+| `chains[].governor_address` | no | — | `LelantosGovernor`; its logs are fetched with the pool's. Zero means absent |
+| `chains[].gov_token_address` | no | — | Governance token, added to the log filter (no events decoded yet). Zero means absent |
 
 Any key can be overridden per chain from the environment:
 `INGESTER_CHAIN_<id>_POOL_ADDRESS`, `INGESTER_CHAIN_<id>_RPC_URL`,
-`INGESTER_CHAIN_<id>_START_BLOCK`. A malformed `START_BLOCK` fails startup
+`INGESTER_CHAIN_<id>_START_BLOCK`, `INGESTER_CHAIN_<id>_GOVERNOR_ADDRESS`,
+`INGESTER_CHAIN_<id>_GOV_TOKEN_ADDRESS`. A malformed `START_BLOCK` fails startup
 rather than silently falling back to the TOML value.
 
 ## Layering

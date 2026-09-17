@@ -39,6 +39,11 @@ pub struct RawEventRow {
     pub event_kind: i16,
     pub topics: Vec<Vec<u8>>,
     pub data: Vec<u8>,
+    /// The emitting contract, NULL for rows ingested before the column existed
+    /// (all of which came from the pool). Consumers of events a contract other
+    /// than the pool emits check it, since topic0 alone does not name the
+    /// emitter.
+    pub address: Option<Vec<u8>>,
 }
 
 async fn conn(pool: &DbPool) -> RawEventsResult<DbConn<'_>> {

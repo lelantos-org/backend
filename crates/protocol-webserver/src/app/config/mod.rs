@@ -69,6 +69,14 @@ pub struct ChainCfg {
     pub native_adapter_address: Option<String>,
     /// `SwapWrapper`, enabling swaps.
     pub swap_wrapper_address: Option<String>,
+    /// `LelantosGovernor`, enabling the governance UI. The zero address counts
+    /// as absent, so a TOML can declare the key for the env overlay to rewrite.
+    pub governor_address: Option<String>,
+    /// The governance token (LNT). Zero counts as absent.
+    pub gov_token_address: Option<String>,
+    /// The `TimelockController` that executes passed proposals. Zero counts as
+    /// absent.
+    pub timelock_address: Option<String>,
     /// Endpoint the rate measurement reads, which needs archive state. Separate
     /// from `rpc_url`: that one is published to browsers, while this issues slow
     /// historical calls and is frequently a different, privileged node.
@@ -161,6 +169,15 @@ impl RegistryConfig {
             }
             if let Some(v) = get("SWAP_WRAPPER_ADDRESS") {
                 c.swap_wrapper_address = Some(v);
+            }
+            if let Some(v) = get("GOVERNOR_ADDRESS") {
+                c.governor_address = Some(v);
+            }
+            if let Some(v) = get("GOV_TOKEN_ADDRESS") {
+                c.gov_token_address = Some(v);
+            }
+            if let Some(v) = get("TIMELOCK_ADDRESS") {
+                c.timelock_address = Some(v);
             }
         }
     }

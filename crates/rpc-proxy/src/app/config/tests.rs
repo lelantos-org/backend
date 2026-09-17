@@ -40,6 +40,8 @@ fn chain(chain_id: u64) -> ChainCfg {
         permit2_address: TOML_PERMIT2,
         erc20_seed: vec![],
         venue_seed: vec![],
+        governor_address: None,
+        gov_token_address: None,
     }
 }
 
@@ -134,6 +136,37 @@ fn a_malformed_seed_entry_fails_startup() {
     );
     let err = cfg(vec![chain(881005)]).apply_env_overlay().unwrap_err();
     assert!(err.to_string().contains("0xnope"), "{err}");
+}
+
+#[test]
+fn overlay_supplies_the_governance_addresses_and_zero_reads_as_absent() {
+    let gov = "0x7777777777777777777777777777777777777777";
+    let _g = EnvVar::set("RPC_PROXY_CHAIN_881006_GOVERNOR_ADDRESS", gov);
+    let _t = EnvVar::set(
+        "RPC_PROXY_CHAIN_881006_GOV_TOKEN_ADDRESS",
+        "0x0000000000000000000000000000000000000000",
+    );
+
+    let mut c = cfg(vec![chain(881006)]);
+    c.apply_env_overlay().unwrap();
+
+    assert_eq!(c.chains[0].governor(), Some(gov.parse().unwrap()));
+    assert_eq!(
+        c.chains[0].gov_token(),
+        None,
+        "zero is the TOML placeholder"
+    );
+}
+
+#[test]
+fn a_malformed_governor_address_fails_startup() {
+    let _g = EnvVar::set("RPC_PROXY_CHAIN_881007_GOVERNOR_ADDRESS", "0xnope");
+    let err = cfg(vec![chain(881007)]).apply_env_overlay().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("RPC_PROXY_CHAIN_881007_GOVERNOR_ADDRESS"),
+        "{err}"
+    );
 }
 
 #[test]

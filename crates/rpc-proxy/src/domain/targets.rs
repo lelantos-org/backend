@@ -34,6 +34,10 @@ pub enum TargetClass {
     Permit2,
     Erc20,
     Venue,
+    /// `LelantosGovernor`, read by the webapp's governance UI.
+    Governor,
+    /// The governance token: an ERC-20 with `ERC20Votes`.
+    GovToken,
 }
 
 impl TargetClass {
@@ -43,6 +47,8 @@ impl TargetClass {
             TargetClass::Permit2 => "permit2",
             TargetClass::Erc20 => "erc20",
             TargetClass::Venue => "venue",
+            TargetClass::Governor => "governor",
+            TargetClass::GovToken => "gov_token",
         }
     }
 
@@ -75,6 +81,63 @@ impl TargetClass {
             ],
             // YIELD_VENUE_ABI. Reached only through `fetchAssetYield`.
             TargetClass::Venue => &["totalAssets()"],
+            // `LelantosGovernor` views the webapp reads: OpenZeppelin Governor
+            // v5 with GovernorSettings, CountingSimple, VotesQuorumFraction and
+            // TimelockControl, plus the For/Abstain quorum-vote window. The two
+            // writes at the top are here only as `eth_call` simulations: the
+            // webapp runs each vote and proposal through one first so a custom-error
+            // refusal (`QuorumVotingClosed`, `GovernorAlreadyCastVote`) can be
+            // explained before the wallet prompts. An `eth_call` changes no
+            // state; the transaction itself goes through the user's wallet.
+            TargetClass::Governor => &[
+                "castVoteWithReason(uint256,uint8,string)",
+                "propose(address[],uint256[],bytes[],string)",
+                "name()",
+                "version()",
+                "clock()",
+                "CLOCK_MODE()",
+                "COUNTING_MODE()",
+                "token()",
+                "timelock()",
+                "state(uint256)",
+                "proposalSnapshot(uint256)",
+                "proposalDeadline(uint256)",
+                "proposalProposer(uint256)",
+                "proposalEta(uint256)",
+                "proposalNeedsQueuing(uint256)",
+                "proposalVotes(uint256)",
+                "hasVoted(uint256,address)",
+                "hashProposal(address[],uint256[],bytes[],bytes32)",
+                "proposalThreshold()",
+                "votingDelay()",
+                "votingPeriod()",
+                "quorum(uint256)",
+                "quorumNumerator()",
+                "getVotes(address,uint256)",
+                "nonces(address)",
+                "quorumVoteCutoff()",
+                "proposalQuorumVoteDeadline(uint256)",
+            ],
+            // ERC20_ABI's reads plus `ERC20Votes`: the balance, the delegate and
+            // the voting power the UI explains before a user votes. `delegate`
+            // is an `eth_call` simulation target only, as with the governor's
+            // writes above.
+            TargetClass::GovToken => &[
+                "delegate(address)",
+                "symbol()",
+                "decimals()",
+                "balanceOf(address)",
+                "allowance(address,address)",
+                "name()",
+                "totalSupply()",
+                "delegates(address)",
+                "getVotes(address)",
+                "getPastVotes(address,uint256)",
+                "getPastTotalSupply(uint256)",
+                "clock()",
+                "CLOCK_MODE()",
+                "nonces(address)",
+            ],
         }
     }
 }
@@ -163,6 +226,8 @@ impl Targets {
             TargetClass::Permit2,
             TargetClass::Erc20,
             TargetClass::Venue,
+            TargetClass::Governor,
+            TargetClass::GovToken,
         ]
         .into_iter()
         .map(|c| (c, c.signatures().iter().map(|s| selector(s)).collect()))
@@ -172,6 +237,30 @@ impl Targets {
             by_address,
             by_class,
         }
+    }
+
+    /// Add the governance contracts, each optional per chain.
+    ///
+    /// The governor keeps the "first class wins" rule, since sharing an address
+    /// with the pool is a config bug. The token instead replaces an `Erc20`
+    /// entry for the same address: LNT may also be a registered asset, its
+    /// selector set is a superset of the ERC-20 one, and keeping the narrower
+    /// class would refuse `delegates` and `getVotes` on it.
+    pub fn with_governance(
+        mut self,
+        governor: Option<Address>,
+        gov_token: Option<Address>,
+    ) -> Self {
+        if let Some(g) = governor {
+            self.by_address.entry(g).or_insert(TargetClass::Governor);
+        }
+        if let Some(t) = gov_token {
+            let class = self.by_address.entry(t).or_insert(TargetClass::GovToken);
+            if *class == TargetClass::Erc20 {
+                *class = TargetClass::GovToken;
+            }
+        }
+        self
     }
 
     /// How many addresses are allowlisted, for the startup banner. An operator
@@ -412,6 +501,73 @@ mod tests {
             targets().check(None, call("symbol()")).unwrap_err(),
             Rejection::Malformed(_)
         ));
+    }
+
+    const GOVERNOR: Address = address!("5555555555555555555555555555555555555555");
+    const GOV_TOKEN: Address = address!("6666666666666666666666666666666666666666");
+
+    /// What the governance UI reads, on the contract it reads it from.
+    #[test]
+    fn governance_reads_are_accepted_on_their_own_contracts() {
+        let t = targets().with_governance(Some(GOVERNOR), Some(GOV_TOKEN));
+        for sig in [
+            "state(uint256)",
+            "proposalVotes(uint256)",
+            "hasVoted(uint256,address)",
+            "getVotes(address,uint256)",
+            "proposalQuorumVoteDeadline(uint256)",
+            "quorum(uint256)",
+            "clock()",
+        ] {
+            assert_eq!(
+                t.check(Some(GOVERNOR), call(sig)),
+                Ok(TargetClass::Governor),
+                "{sig}"
+            );
+        }
+        for sig in [
+            "balanceOf(address)",
+            "delegates(address)",
+            "getVotes(address)",
+        ] {
+            assert_eq!(
+                t.check(Some(GOV_TOKEN), call(sig)),
+                Ok(TargetClass::GovToken),
+                "{sig}"
+            );
+        }
+        // Writes are not reads, and classes stay apart.
+        assert!(
+            t.check(Some(GOVERNOR), call("castVote(uint256,uint8)"))
+                .is_err()
+        );
+        assert!(t.check(Some(GOVERNOR), call("balanceOf(address)")).is_err());
+        assert!(t.check(Some(TOKEN), call("delegates(address)")).is_err());
+    }
+
+    /// Without governance configured, the contracts are unknown like any other.
+    #[test]
+    fn absent_governance_adds_nothing() {
+        let t = targets().with_governance(None, None);
+        assert_eq!(t.len(), 4);
+        assert_eq!(
+            t.check(Some(GOVERNOR), call("state(uint256)")),
+            Err(Rejection::UnknownAddress(GOVERNOR))
+        );
+    }
+
+    /// LNT may also be a registered asset; it must still expose `delegates`.
+    #[test]
+    fn the_gov_token_widens_a_matching_erc20_entry_but_not_the_pool() {
+        let t = Targets::new(MASP, PERMIT2, [GOV_TOKEN], [])
+            .with_governance(Some(MASP), Some(GOV_TOKEN));
+        assert!(t.check(Some(GOV_TOKEN), call("delegates(address)")).is_ok());
+        assert!(t.check(Some(GOV_TOKEN), call("symbol()")).is_ok());
+        assert_eq!(
+            t.check(Some(MASP), call("cancelDelay()")),
+            Ok(TargetClass::Masp),
+            "a governor configured at the pool's address does not replace it"
+        );
     }
 
     /// A generator that emitted one address in two lists must not widen that

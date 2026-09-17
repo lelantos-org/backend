@@ -49,8 +49,8 @@ pub type ReorgResult<T> = Result<T, ReorgError>;
 pub enum Owner {
     /// Notes, spent nullifiers and the tree frontier.
     Fmd,
-    /// The asset catalog, the yield bindings, and the two ledgers the relayer
-    /// transacts against.
+    /// The asset catalog, the yield bindings, the two ledgers the relayer
+    /// transacts against, and the governor's proposals and votes.
     Protocol,
     /// Flow analytics for explorer-ui.
     Explorer,

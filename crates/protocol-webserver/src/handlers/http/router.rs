@@ -22,6 +22,10 @@ const NO_STORE: &str = "no-store";
 const PRICES: &str = "public, max-age=60";
 /// The index history, written once every 30 minutes by the venue-APY worker.
 const YIELD_INDEX: &str = "public, max-age=900";
+/// Governance proposals and votes. Short: a vote cast in the app should show
+/// up in its tallies within seconds, and the ETag layer turns most repeat polls
+/// into 304s anyway.
+const GOVERNANCE: &str = "public, max-age=10";
 
 pub fn build(state: AppState) -> Router {
     // The catalog moves only when the indexer registers an asset or repolls a
@@ -58,6 +62,18 @@ pub fn build(state: AppState) -> Router {
         .route(
             "/v1/yield-index",
             get(handlers::yield_index).layer(cache_control(YIELD_INDEX)),
+        )
+        .route(
+            "/v1/governance/proposals",
+            get(handlers::list_proposals).layer(cache_control(GOVERNANCE)),
+        )
+        .route(
+            "/v1/governance/proposals/{proposal_id}",
+            get(handlers::get_proposal).layer(cache_control(GOVERNANCE)),
+        )
+        .route(
+            "/v1/governance/proposals/{proposal_id}/votes",
+            get(handlers::list_votes).layer(cache_control(GOVERNANCE)),
         );
 
     // The catalog moves on a redeploy or an indexer write, while every wallet

@@ -31,7 +31,14 @@ const fn consumed(kind: EventKind) -> bool {
         | EventKind::NormalizedFeeSwept
         | EventKind::Rebalanced
         | EventKind::HaltedSet
-        | EventKind::EmergencyUnwound => false,
+        | EventKind::EmergencyUnwound
+        | EventKind::ProposalCreated
+        | EventKind::ProposalQuorumVoteDeadline
+        | EventKind::VoteCast
+        | EventKind::VoteCastWithParams
+        | EventKind::ProposalQueued
+        | EventKind::ProposalExecuted
+        | EventKind::ProposalCanceled => false,
     }
 }
 

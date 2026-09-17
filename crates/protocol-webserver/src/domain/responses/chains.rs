@@ -54,6 +54,17 @@ pub struct ChainOut {
     /// simply declines the swap, which is its own answer and not this one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swap_wrapper_address: Option<String>,
+    /// `LelantosGovernor`, when the deployment has one. Absent hides governance
+    /// on this chain. Proposals are listed by `/v1/governance/proposals`; state,
+    /// quorum and voting power are read from this contract on chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub governor_address: Option<String>,
+    /// The governance token voting power is delegated in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gov_token_address: Option<String>,
+    /// The timelock a passed proposal is queued in and executed by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timelock_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

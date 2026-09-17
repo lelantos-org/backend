@@ -6,8 +6,10 @@
 use crate::adapters::rpc::RpcConfig;
 use crate::domain::error::IngesterError;
 use crate::domain::models::parse_address;
+use alloy::primitives::Address;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +39,16 @@ pub struct ChainConfig {
     pub chain_id: i64,
     pub rpc_url: String,
     pub pool_address: String,
+    /// The `LelantosGovernor`, whose proposal and vote logs are fetched
+    /// alongside the pool's. Absent, or the zero address, fetches none: the
+    /// dev TOML declares zero so the env overlay has a key to rewrite.
+    #[serde(default)]
+    pub governor_address: Option<String>,
+    /// The governance token. Accepted for symmetry with the other services'
+    /// config, and added to the `eth_getLogs` address filter, but none of its
+    /// events are decoded yet, so it contributes no rows. Zero means absent.
+    #[serde(default)]
+    pub gov_token_address: Option<String>,
     pub start_block: i64,
     #[serde(default = "default_reorg_depth")]
     pub reorg_depth: u64,
@@ -148,6 +160,8 @@ impl IngesterConfig {
     /// INGESTER_CHAIN_<id>_POOL_ADDRESS=0x…
     /// INGESTER_CHAIN_<id>_RPC_URL=http://…
     /// INGESTER_CHAIN_<id>_START_BLOCK=12345
+    /// INGESTER_CHAIN_<id>_GOVERNOR_ADDRESS=0x…
+    /// INGESTER_CHAIN_<id>_GOV_TOKEN_ADDRESS=0x…
     /// ```
     ///
     /// A malformed `START_BLOCK` is an error rather than a fallback to the TOML
@@ -167,6 +181,14 @@ impl IngesterConfig {
             }
             if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "RPC_URL") {
                 c.rpc_url = v;
+            }
+            if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "GOVERNOR_ADDRESS")
+            {
+                c.governor_address = Some(v);
+            }
+            if let Some(v) = shared::config_env::lookup("INGESTER", c.chain_id, "GOV_TOKEN_ADDRESS")
+            {
+                c.gov_token_address = Some(v);
             }
             if let Some(v) = lookup_parse(c.chain_id, "START_BLOCK")? {
                 c.start_block = v;
@@ -222,6 +244,28 @@ impl From<&ChainConfig> for RpcConfig {
 }
 
 impl ChainConfig {
+    /// Every contract whose logs this chain fetches: the pool, then the
+    /// governance contracts that are configured.
+    ///
+    /// A zero governance address counts as absent — the TOML declares zero so
+    /// the env overlay has a key to rewrite — while a zero pool is kept, since
+    /// the pool is required and the validator is not where that is judged.
+    pub fn emitters(&self) -> Result<Vec<Address>, IngesterError> {
+        let mut out = vec![parse_address(&self.pool_address)?];
+        for (field, raw) in [
+            ("governor_address", &self.governor_address),
+            ("gov_token_address", &self.gov_token_address),
+        ] {
+            let Some(raw) = raw.as_deref() else { continue };
+            let addr = Address::from_str(raw)
+                .map_err(|e| IngesterError::Config(format!("{field}: {e}")))?;
+            if !addr.is_zero() && !out.contains(&addr) {
+                out.push(addr);
+            }
+        }
+        Ok(out)
+    }
+
     /// Per-chain checks. Returns a bare reason; the caller prefixes the id.
     fn validate(&self) -> Result<(), String> {
         // Each of these is a divisor, a loop bound or a concurrency limit, and a
@@ -260,7 +304,7 @@ impl ChainConfig {
                 self.backfill_threshold, self.reorg_depth
             ));
         }
-        parse_address(&self.pool_address).map_err(|e| e.to_string())?;
+        self.emitters().map_err(|e| e.to_string())?;
         url::Url::parse(&self.rpc_url).map_err(|e| format!("rpc_url: {}", e))?;
         Ok(())
     }
@@ -289,6 +333,8 @@ mod tests {
             chain_id: id,
             rpc_url: "https://rpc.example/v2/secret-key".into(),
             pool_address: "0x0000000000000000000000000000000000000abc".into(),
+            governor_address: None,
+            gov_token_address: None,
             start_block: 100,
             reorg_depth: default_reorg_depth(),
             block_poll_ms: default_block_poll_ms(),
@@ -369,6 +415,45 @@ mod tests {
         let mut c = chain(1);
         c.pool_address = "not-an-address".into();
         assert!(cfg(vec![c]).validate().is_err());
+    }
+
+    #[test]
+    fn emitters_are_the_pool_alone_without_governance() {
+        let got = chain(1).emitters().unwrap();
+        assert_eq!(got, vec![parse_address(&chain(1).pool_address).unwrap()]);
+    }
+
+    /// The dev TOML declares zero so the overlay has a key to rewrite; fetching
+    /// logs from the zero address would be a pointless filter entry.
+    #[test]
+    fn a_zero_governance_address_is_absent() {
+        let mut c = chain(1);
+        c.governor_address = Some(format!("{}", Address::ZERO));
+        c.gov_token_address = Some(format!("{}", Address::ZERO));
+        assert_eq!(c.emitters().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn configured_governance_contracts_join_the_filter_after_the_pool() {
+        let mut c = chain(1);
+        c.governor_address = Some("0x0000000000000000000000000000000000000def".into());
+        c.gov_token_address = Some("0x0000000000000000000000000000000000000fed".into());
+        let got = c.emitters().unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(
+            got[1],
+            "0x0000000000000000000000000000000000000def"
+                .parse::<Address>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_unparsable_governor_address() {
+        let mut c = chain(1);
+        c.governor_address = Some("nope".into());
+        let err = cfg(vec![c]).validate().unwrap_err();
+        assert!(err.to_string().contains("governor_address"), "{err}");
     }
 
     /// Provider API keys live in the URL path, so logging the raw URL would

@@ -43,7 +43,32 @@ fn to_out(c: &ChainCfg) -> Result<ChainOut> {
             "swap_wrapper_address",
             c.swap_wrapper_address.as_deref(),
         )?,
+        governor_address: nonzero(checksummed(
+            c.chain_id,
+            "governor_address",
+            c.governor_address.as_deref(),
+        )?),
+        gov_token_address: nonzero(checksummed(
+            c.chain_id,
+            "gov_token_address",
+            c.gov_token_address.as_deref(),
+        )?),
+        timelock_address: nonzero(checksummed(
+            c.chain_id,
+            "timelock_address",
+            c.timelock_address.as_deref(),
+        )?),
     })
+}
+
+/// Drop the zero address.
+///
+/// Governance is optional per chain, and the dev TOML declares these keys as
+/// zero so the env overlay has something to rewrite. Publishing zero would
+/// offer a wallet a governor that does not exist; absent tells it there is
+/// none.
+fn nonzero(addr: Option<String>) -> Option<String> {
+    addr.filter(|a| a.parse::<Address>().is_ok_and(|a| !a.is_zero()))
 }
 
 /// Parse an address and re-emit it EIP-55 checksummed.
@@ -80,8 +105,45 @@ mod tests {
             tree_depth: Some(11),
             native_adapter_address: None,
             swap_wrapper_address: None,
+            governor_address: None,
+            gov_token_address: None,
+            timelock_address: None,
             apy_rpc_url: None,
         }
+    }
+
+    /// Published checksummed like every other address, and a zero placeholder
+    /// is absent rather than a governor at `0x0`.
+    #[test]
+    fn test_governance_addresses_are_checksummed_and_zero_is_absent() {
+        let mut c = cfg(31337, None);
+        c.governor_address = Some("0x5fbdb2315678afecb367f032d93f642f64180aa3".into());
+        c.gov_token_address = Some("0x0000000000000000000000000000000000000000".into());
+        c.timelock_address = None;
+
+        let out = to_out(&c).unwrap();
+        assert_eq!(
+            out.governor_address.as_deref(),
+            Some("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+        );
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(
+            json["governorAddress"],
+            "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+        );
+        assert!(
+            json.get("govTokenAddress").is_none(),
+            "zero is absent: {json}"
+        );
+        assert!(json.get("timelockAddress").is_none(), "{json}");
+    }
+
+    #[test]
+    fn test_malformed_governor_is_rejected_at_build_time() {
+        let mut c = cfg(31337, None);
+        c.governor_address = Some("0xnope".into());
+        let msg = format!("{:#}", build(&[c]).expect_err("must reject"));
+        assert!(msg.contains("governor_address"), "{msg}");
     }
 
     /// The comparison a wallet makes is string equality against what a relayer

@@ -102,8 +102,11 @@ Under profile `all`, the one-shot `deploy` service runs before the backends:
    `BundlerFactory` and the relayer's `Bundler` (operator `BUNDLER_OPERATOR`)
 3. `forge script DeployTestYield.s.sol` — a `MockERC4626` vault and its
    `ERC4626Venue` per asset, registered as new yield ids
-4. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
-5. Writes `/addresses/addresses.env` to the shared `addresses` volume
+4. `forge script DeployTestGovernance.s.sol` — LNT, `TimelockController`,
+   `LelantosGovernor`, `FeeBurner`, `ProtocolAdmin` on dev timings; the whole LNT
+   supply goes to `FUND_RECIPIENT`. Ownership handover is not run.
+5. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
+6. Writes `/addresses/addresses.env` to the shared `addresses` volume
 
 Every backend's entrypoint sources that file before exec'ing its binary, which
 is how the freshly deployed addresses reach the per-chain overlay.

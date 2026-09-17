@@ -1,15 +1,26 @@
 //! Database I/O for the rows this service owns.
 //!
-//! Two tables' worth: the estimate columns on `asset_yield` and the whole of
-//! `asset_yield_sample`. Everything else the catalog serves is read through
-//! `asset-registry`, which owns that join.
+//! Writes to two tables' worth: the estimate columns on `asset_yield` and the
+//! whole of `asset_yield_sample`. Everything else the catalog serves is read
+//! through `asset-registry`, which owns that join. [`gov_proposals`] and
+//! [`gov_votes`] only read, from tables protocol-indexer writes.
 
 pub mod asset_yield;
+pub mod gov_proposals;
+pub mod gov_votes;
 pub mod yield_samples;
 
 use crate::domain::error::{AppError, AppResult};
 use database::{DbConn, DbPool};
 use std::fmt::Display;
+
+/// A position in a newest-first log: `(block_number, log_index)` of the last
+/// row a page returned.
+///
+/// The governance reads are keyset-paginated on it: both tables are
+/// append-mostly logs read from the head, and an offset would rescan every row
+/// a client has already paged past.
+pub type Position = (i64, i32);
 
 /// Check out a pooled connection, mapping exhaustion or a dead pool to
 /// [`AppError::Db`].

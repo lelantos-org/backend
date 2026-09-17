@@ -21,7 +21,7 @@ use ingester::adapters::rpc::{ChainRpc, DynRpc};
 use ingester::app::config::ChainConfig;
 use ingester::app::state::WorkerDeps;
 use ingester::domain::error::IngesterError;
-use ingester::domain::models::{BlockCursor, BlockMeta, RawEvent, TickOutcome, parse_address};
+use ingester::domain::models::{BlockCursor, BlockMeta, RawEvent, TickOutcome};
 use ingester::repositories::{
     AtomicWriteRepo, ChainStateRepo, PostgresAtomicWriteRepo, PostgresBlockHashRepo,
     PostgresChainStateRepo,
@@ -102,7 +102,7 @@ impl ChainRpc for MockRpc {
     }
     async fn fetch_logs(
         &self,
-        _addr: Address,
+        _addrs: &[Address],
         from: u64,
         to: u64,
     ) -> Result<Vec<Log>, IngesterError> {
@@ -190,6 +190,8 @@ fn cfg(chain_id: i64, start_block: i64) -> ChainConfig {
         chain_id,
         rpc_url: "mock".into(),
         pool_address: POOL_ADDR.into(),
+        governor_address: None,
+        gov_token_address: None,
         start_block,
         reorg_depth: 32,
         block_poll_ms: 10,
@@ -247,7 +249,7 @@ async fn live_ctx_counting(
     rpc: &Arc<MockRpc>,
     cfg: ChainConfig,
 ) -> (LiveServiceImpl, Arc<CountingChainState>) {
-    let pool_addr = parse_address(&cfg.pool_address).unwrap();
+    let emitters = cfg.emitters().unwrap();
     let writes = Arc::new(PostgresAtomicWriteRepo::new(pool.clone()));
     let raw_events = Arc::new(PostgresBlockHashRepo::new(pool.clone()));
     let chain_state = Arc::new(CountingChainState {
@@ -258,7 +260,7 @@ async fn live_ctx_counting(
     let reorg = Arc::new(ReorgService::new(writes, raw_events));
     let live = LiveServiceImpl::new(
         cfg,
-        pool_addr,
+        emitters,
         rpc.clone() as DynRpc,
         chain_state.clone(),
         ingest,
@@ -631,8 +633,8 @@ async fn advances_the_cursor_on_a_range_with_no_logs() {
     );
 }
 
-/// Postgres caps a statement at 65535 bind parameters and each row binds 10, so a
-/// single-statement insert tops out at 6553 rows, below what one backfill chunk
+/// Postgres caps a statement at 65535 bind parameters and each row binds 12, so a
+/// single-statement insert tops out at 5461 rows, below what one backfill chunk
 /// over the default 10k blocks can produce.
 #[tokio::test]
 async fn inserts_a_batch_larger_than_the_bind_parameter_limit() {
@@ -652,6 +654,7 @@ async fn inserts_a_batch_larger_than_the_bind_parameter_limit() {
             event_kind: 0,
             topics: vec![vec![0u8; 32]],
             data: vec![1, 2, 3],
+            address: vec![0xab; 20],
         })
         .collect();
 

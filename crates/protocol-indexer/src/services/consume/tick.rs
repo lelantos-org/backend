@@ -1,11 +1,13 @@
 //! One chain's consume tick: read a window of `raw_events`, project it, commit.
 
 use super::events::plan_event;
+use super::governance;
 use super::metadata;
 use super::plan::CommitPlan;
 use super::refresh::{RefreshGate, View};
 use crate::adapters::erc20::DynTokenMetadata;
 use crate::domain::error::Result;
+use alloy::primitives::Address;
 use chain_types::decode;
 use database::DbPool;
 use database::raw_events;
@@ -49,6 +51,10 @@ pub struct ConsumeCtx {
     /// Decides when this crate's materialized views are rebuilt. Shared across
     /// chains, since the views are not per-chain.
     pub refresh: Arc<RefreshGate>,
+    /// The governor per chain. Governance events are accepted only when
+    /// `raw_events.address` is this contract; a chain absent here indexes no
+    /// governance at all.
+    pub governors: Arc<HashMap<i64, Address>>,
 }
 
 pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<TickProgress> {
@@ -92,6 +98,20 @@ pub async fn tick_chain(ctx: &ConsumeCtx, chain_id: i64, batch: i64) -> Result<T
         let Some(kind) = EventKind::from_i16(row.event_kind) else {
             continue;
         };
+        // Checked before decoding: a governance signature from any contract but
+        // the configured governor is not a proposal on this deployment. The
+        // cursor still moves past it.
+        if !governance::accepts_emitter(kind, ctx.governors.get(&chain_id).copied(), row) {
+            warn!(
+                chain_id,
+                id = row.id,
+                emitter = ?row.address.as_deref().map(hex::encode),
+                "governance event not from the configured governor; skipped"
+            );
+            last_id = row.id;
+            last_block = row.block_number;
+            continue;
+        }
         match decode::decode(kind, &row.topics, &row.data) {
             Ok(events) => {
                 for event in events {

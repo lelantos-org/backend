@@ -25,15 +25,15 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 
 /// Rows per `INSERT` statement.
 ///
-/// Postgres caps a statement at 65535 bind parameters and each row binds 10, so
-/// the hard ceiling is 6553 rows. A single backfill chunk can exceed that on a
+/// Postgres caps a statement at 65535 bind parameters and each row binds 12, so
+/// the hard ceiling is 5461 rows. A single backfill chunk can exceed that on a
 /// busy pool.
 ///
 /// Sized just under the ceiling rather than comfortably below it: the chunking
 /// exists only to stay inside the bind limit, and every statement short of it is
 /// another round trip inside a transaction the rest of the pipeline is waiting
 /// on.
-const INSERT_CHUNK_ROWS: usize = 6_000;
+const INSERT_CHUNK_ROWS: usize = 5_000;
 
 #[async_trait]
 pub trait AtomicWriteRepo: Send + Sync {
@@ -75,6 +75,7 @@ struct RawEventRow<'a> {
     event_kind: i16,
     topics: &'a [Vec<u8>],
     data: &'a [u8],
+    address: Option<&'a [u8]>,
 }
 
 impl<'a> From<&'a RawEvent> for RawEventRow<'a> {
@@ -90,6 +91,7 @@ impl<'a> From<&'a RawEvent> for RawEventRow<'a> {
             event_kind: r.event_kind,
             topics: &r.topics,
             data: &r.data,
+            address: Some(&r.address),
         }
     }
 }

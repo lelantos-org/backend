@@ -28,6 +28,8 @@ const TABLES: &[&str] = &[
     "deposit_escrowed_events",
     "asset_flows",
     "yield_fee_events",
+    "gov_proposals",
+    "gov_votes",
 ];
 
 async fn fresh_pool() -> (database::DbPool, tokio::sync::OwnedMutexGuard<()>) {
@@ -189,6 +191,121 @@ async fn the_protocol_half_unmarks_flushes_and_cancels_inside_the_fork() {
             (Some(FORK_AT - 1), Some(0), None),
         ],
         "marks inside the fork are cleared; one before it stays"
+    );
+}
+
+/// Governance follows the deposit ledger: proposals and votes inside the fork
+/// go, and an older proposal's lifecycle marks inside the fork are undone —
+/// `eta` with its queue mark — so the replay re-marks only what the new chain
+/// still has. Nothing is touched for the explorer.
+#[tokio::test]
+async fn the_protocol_half_retracts_governance_inside_the_fork() {
+    let (pool, _guard) = fresh_pool().await;
+    let mut conn = pool.get().await.unwrap();
+    // (proposal id, created at, queued at, executed at, canceled at)
+    for (id, created, queued, executed, canceled) in [
+        (1i64, FORK_AT, None, None, None),
+        (2, FORK_AT - 10, Some(FORK_AT), Some(FORK_AT + 1), None),
+        (3, FORK_AT - 10, Some(FORK_AT - 5), Some(FORK_AT - 1), None),
+        (4, FORK_AT - 10, None, None, Some(FORK_AT + 2)),
+    ] {
+        diesel::sql_query(
+            "INSERT INTO gov_proposals (chain_id, proposal_id, proposer, targets, call_values, \
+               signatures, calldatas, description, vote_start, vote_end, quorum_vote_deadline, \
+               block_number, log_index, tx_hash, block_ts, queued_at_block, eta, \
+               executed_at_block, canceled_at_block) \
+             VALUES ($1, $2, '\\x00', '{}', '{}', '{}', '{}', '', 0, 0, 0, $3, 0, '\\x02', 0, \
+               $4, CASE WHEN $4 IS NULL THEN NULL ELSE 999 END, $5, $6)",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(CHAIN)
+        .bind::<diesel::sql_types::BigInt, _>(id)
+        .bind::<diesel::sql_types::BigInt, _>(created)
+        .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(queued)
+        .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(executed)
+        .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(canceled)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    }
+    for (voter, block) in [(1i32, FORK_AT - 1), (2, FORK_AT)] {
+        diesel::sql_query(
+            "INSERT INTO gov_votes (chain_id, proposal_id, voter, support, weight, reason, \
+               block_number, log_index, tx_hash, block_ts) \
+             VALUES ($1, 2, int4send($2), 1, 10, '', $3, 0, '\\x02', 0)",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(CHAIN)
+        .bind::<diesel::sql_types::Integer, _>(voter)
+        .bind::<diesel::sql_types::BigInt, _>(block)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    seed_derived(&pool).await;
+    record_reorg(&pool).await;
+
+    database::reorg::apply_pending(&pool, Owner::Protocol, CHAIN)
+        .await
+        .unwrap();
+
+    #[derive(QueryableByName)]
+    struct Marks {
+        #[diesel(sql_type = diesel::sql_types::Numeric)]
+        proposal_id: bigdecimal::BigDecimal,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        queued_at_block: Option<i64>,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        eta: Option<i64>,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        executed_at_block: Option<i64>,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        canceled_at_block: Option<i64>,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let marks: Vec<Marks> = diesel::sql_query(
+        "SELECT proposal_id, queued_at_block, eta, executed_at_block, canceled_at_block \
+         FROM gov_proposals ORDER BY proposal_id",
+    )
+    .load(&mut conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let marks: Vec<_> = marks
+        .iter()
+        .map(|m| {
+            (
+                m.proposal_id.to_string(),
+                m.queued_at_block,
+                m.eta,
+                m.executed_at_block,
+                m.canceled_at_block,
+            )
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("2".to_string(), None, None, None, None),
+            (
+                "3".to_string(),
+                Some(FORK_AT - 5),
+                Some(999),
+                Some(FORK_AT - 1),
+                None
+            ),
+            ("4".to_string(), None, None, None, None),
+        ],
+        "the proposal created in the fork is gone; marks inside it are cleared"
+    );
+    assert_eq!(
+        count(&pool, "gov_votes").await,
+        1,
+        "the vote inside the fork goes"
+    );
+    assert_eq!(
+        count(&pool, "asset_flows").await,
+        1,
+        "explorer rows untouched"
     );
 }
 

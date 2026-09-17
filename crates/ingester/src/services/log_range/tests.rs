@@ -35,7 +35,7 @@ impl ChainRpc for CappedRpc {
     }
     async fn fetch_logs(
         &self,
-        _address: Address,
+        _address: &[Address],
         from: u64,
         to: u64,
     ) -> Result<Vec<Log>, IngesterError> {
@@ -63,7 +63,7 @@ async fn narrows_until_the_provider_accepts_and_covers_the_whole_range() {
     let logs = fetch_adaptive(
         &(rpc.clone() as DynRpc),
         &LogWindow::new(8),
-        Address::ZERO,
+        &[Address::ZERO],
         0,
         99,
     )
@@ -80,7 +80,7 @@ async fn does_not_climb_back_into_the_cap() {
     fetch_adaptive(
         &(rpc.clone() as DynRpc),
         &LogWindow::new(8),
-        Address::ZERO,
+        &[Address::ZERO],
         0,
         255,
     )
@@ -98,9 +98,15 @@ async fn does_not_climb_back_into_the_cap() {
 #[tokio::test]
 async fn surfaces_a_cap_it_cannot_satisfy() {
     let rpc = CappedRpc::new(0);
-    let err = fetch_adaptive(&(rpc as DynRpc), &LogWindow::new(8), Address::ZERO, 0, 10)
-        .await
-        .expect_err("cannot shrink below one block");
+    let err = fetch_adaptive(
+        &(rpc as DynRpc),
+        &LogWindow::new(8),
+        &[Address::ZERO],
+        0,
+        10,
+    )
+    .await
+    .expect_err("cannot shrink below one block");
     assert!(matches!(err, IngesterError::Rpc(RpcError::RangeTooLarge)));
 }
 
@@ -116,7 +122,7 @@ async fn passes_non_range_errors_through() {
         }
         async fn fetch_logs(
             &self,
-            _a: Address,
+            _a: &[Address],
             _f: u64,
             _t: u64,
         ) -> Result<Vec<Log>, IngesterError> {
@@ -135,7 +141,7 @@ async fn passes_non_range_errors_through() {
     let err = fetch_adaptive(
         &(Arc::new(Limited) as DynRpc),
         &LogWindow::new(8),
-        Address::ZERO,
+        &[Address::ZERO],
         0,
         10,
     )
@@ -153,13 +159,13 @@ async fn the_learned_cap_survives_across_calls() {
     let learned = LogWindow::new(8);
     let dyn_rpc = rpc.clone() as DynRpc;
 
-    fetch_adaptive(&dyn_rpc, &learned, Address::ZERO, 0, 255)
+    fetch_adaptive(&dyn_rpc, &learned, &[Address::ZERO], 0, 255)
         .await
         .unwrap();
     let first = rpc.rejections.load(Ordering::SeqCst);
     assert!(first > 0, "the first call must pay the search");
 
-    fetch_adaptive(&dyn_rpc, &learned, Address::ZERO, 256, 511)
+    fetch_adaptive(&dyn_rpc, &learned, &[Address::ZERO], 256, 511)
         .await
         .unwrap();
 
@@ -177,12 +183,12 @@ async fn an_unshared_cap_re_probes_every_call() {
     let rpc = CappedRpc::new(8);
     let dyn_rpc = rpc.clone() as DynRpc;
 
-    fetch_adaptive(&dyn_rpc, &LogWindow::new(8), Address::ZERO, 0, 255)
+    fetch_adaptive(&dyn_rpc, &LogWindow::new(8), &[Address::ZERO], 0, 255)
         .await
         .unwrap();
     let first = rpc.rejections.load(Ordering::SeqCst);
 
-    fetch_adaptive(&dyn_rpc, &LogWindow::new(8), Address::ZERO, 256, 511)
+    fetch_adaptive(&dyn_rpc, &LogWindow::new(8), &[Address::ZERO], 256, 511)
         .await
         .unwrap();
 
@@ -217,7 +223,7 @@ impl ChainRpc for SlowRpc {
     }
     async fn fetch_logs(
         &self,
-        _address: Address,
+        _address: &[Address],
         from: u64,
         to: u64,
     ) -> Result<Vec<Log>, IngesterError> {
@@ -251,7 +257,7 @@ async fn a_known_cap_is_covered_by_concurrent_windows() {
     let dyn_rpc = rpc.clone() as DynRpc;
 
     // First call learns the cap on the serial path.
-    fetch_adaptive(&dyn_rpc, &learned, Address::ZERO, 0, 255)
+    fetch_adaptive(&dyn_rpc, &learned, &[Address::ZERO], 0, 255)
         .await
         .unwrap();
     assert_eq!(
@@ -261,7 +267,7 @@ async fn a_known_cap_is_covered_by_concurrent_windows() {
     );
     rpc.peak.store(0, Ordering::SeqCst);
 
-    let logs = fetch_adaptive(&dyn_rpc, &learned, Address::ZERO, 256, 511)
+    let logs = fetch_adaptive(&dyn_rpc, &learned, &[Address::ZERO], 256, 511)
         .await
         .unwrap();
 
@@ -282,7 +288,7 @@ async fn concurrent_calls_share_one_budget() {
     let learned = Arc::new(LogWindow::new(4));
     let dyn_rpc = rpc.clone() as DynRpc;
 
-    fetch_adaptive(&dyn_rpc, &learned, Address::ZERO, 0, 255)
+    fetch_adaptive(&dyn_rpc, &learned, &[Address::ZERO], 0, 255)
         .await
         .unwrap();
     rpc.peak.store(0, Ordering::SeqCst);
@@ -292,7 +298,7 @@ async fn concurrent_calls_share_one_budget() {
         let (rpc, learned) = (dyn_rpc.clone(), learned.clone());
         async move {
             let from = 1_000 + i * 256;
-            fetch_adaptive(&rpc, &learned, Address::ZERO, from, from + 255)
+            fetch_adaptive(&rpc, &learned, &[Address::ZERO], from, from + 255)
                 .await
                 .unwrap();
         }
@@ -316,7 +322,7 @@ async fn a_cap_recovers_after_enough_clean_windows() {
     let learned = LogWindow::new(8);
     let dyn_rpc = rpc.clone() as DynRpc;
 
-    fetch_adaptive(&dyn_rpc, &learned, Address::ZERO, 0, 255)
+    fetch_adaptive(&dyn_rpc, &learned, &[Address::ZERO], 0, 255)
         .await
         .unwrap();
     let after_search = learned.cap.limit();
@@ -324,7 +330,7 @@ async fn a_cap_recovers_after_enough_clean_windows() {
 
     // Well past the recovery threshold, all of it served cleanly.
     let span = CONFIRMATIONS_BEFORE_PROBE * after_search;
-    fetch_adaptive(&dyn_rpc, &learned, Address::ZERO, 256, 256 + span)
+    fetch_adaptive(&dyn_rpc, &learned, &[Address::ZERO], 256, 256 + span)
         .await
         .unwrap();
 

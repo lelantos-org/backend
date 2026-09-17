@@ -22,6 +22,9 @@ pub struct RawEvent {
     pub event_kind: i16,
     pub topics: Vec<Vec<u8>>,
     pub data: Vec<u8>,
+    /// The emitting contract. One `eth_getLogs` covers the pool and the
+    /// governor, and topic0 alone does not say which of them a log came from.
+    pub address: Vec<u8>,
 }
 
 /// Per-block facts the ingester needs beyond the log itself.

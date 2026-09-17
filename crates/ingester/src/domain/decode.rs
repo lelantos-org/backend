@@ -59,6 +59,7 @@ pub fn logs_to_rows(
             event_kind: kind.as_i16(),
             topics,
             data: log.data().data.to_vec(),
+            address: log.address().to_vec(),
         });
     }
     Ok(out)

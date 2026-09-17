@@ -29,9 +29,10 @@ use url::Url;
 #[async_trait]
 pub trait ChainRpc: Send + Sync {
     async fn tip(&self) -> Result<u64, IngesterError>;
+    /// Every known-signature log in `[from, to]` emitted by any of `addresses`.
     async fn fetch_logs(
         &self,
-        address: Address,
+        addresses: &[Address],
         from: u64,
         to: u64,
     ) -> Result<Vec<Log>, IngesterError>;
@@ -149,13 +150,16 @@ impl ChainRpc for HttpRpc {
 
     async fn fetch_logs(
         &self,
-        address: Address,
+        addresses: &[Address],
         from: u64,
         to: u64,
     ) -> Result<Vec<Log>, IngesterError> {
         let sigs = known_signatures();
+        // One query for every emitter rather than one per contract: the range
+        // cap is learned per provider, and splitting by address would double
+        // the calls against it for the same blocks.
         let filter = Filter::new()
-            .address(address)
+            .address(addresses.to_vec())
             .event_signature(sigs.to_vec())
             .from_block(from)
             .to_block(to);

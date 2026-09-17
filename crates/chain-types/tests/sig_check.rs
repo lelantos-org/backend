@@ -2,7 +2,9 @@ use alloy::sol_types::SolEvent;
 use chain_types::abi::{
     AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
     EmergencyUnwound, HaltedSet, NormalizedFeeSwept, NotePayload, NullifierConsumed,
-    PerfFeeAccrued, Rebalanced, RootAdvanced, YieldAssetAdded, YieldParamsSet,
+    PerfFeeAccrued, ProposalCanceled, ProposalCreated, ProposalExecuted, ProposalQueued,
+    ProposalQuorumVoteDeadline, Rebalanced, RootAdvanced, VoteCast, VoteCastWithParams,
+    YieldAssetAdded, YieldParamsSet,
 };
 
 /// Topic0 of every event this crate decodes, taken from the canonical Foundry
@@ -80,6 +82,37 @@ const EXPECTED: &[(&str, &str)] = &[
         "EmergencyUnwound",
         "4385959e0b5d182a2d8fb896697c2034d6e959bec6b97907a6846036cf4f10cf",
     ),
+    // `LelantosGovernor.json`. OpenZeppelin Governor v5 events.
+    (
+        "ProposalCreated",
+        "7d84a6263ae0d98d3329bd7b46bb4e8d6f98cd35a7adb45c274c8b7fd5ebd5e0",
+    ),
+    // Added to `LelantosGovernor` with the For/Abstain quorum-vote window; hashed
+    // from `ProposalQuorumVoteDeadline(uint256,uint256)`.
+    (
+        "ProposalQuorumVoteDeadline",
+        "1c3698da81b6b9eda05549447e7e4f56f0b7f47bf4f225975a6bbe452af2c8d3",
+    ),
+    (
+        "VoteCast",
+        "b8e138887d0aa13bab447e82de9d5c1777041ecd21ca36ba824ff1e6c07ddda4",
+    ),
+    (
+        "VoteCastWithParams",
+        "e2babfbac5889a709b63bb7f598b324e08bc5a4fb9ec647fb3cbc9ec07eb8712",
+    ),
+    (
+        "ProposalQueued",
+        "9a2e42fd6722813d69113e7d0079d3d940171428df7373df9c7f7617cfda2892",
+    ),
+    (
+        "ProposalExecuted",
+        "712ae1383f79ac853f8d882153778e0260ef8f03b504e2866e0593e04d2b291f",
+    ),
+    (
+        "ProposalCanceled",
+        "789cf55be980739dad1d0699b93b58e806b51c9d96619bfa8fe0a28abaa7b30c",
+    ),
 ];
 
 /// Only events are pinned here.
@@ -110,6 +143,16 @@ fn test_signature_hashes_match_the_deployed_contract_abi() {
         ("Rebalanced", Rebalanced::SIGNATURE_HASH),
         ("HaltedSet", HaltedSet::SIGNATURE_HASH),
         ("EmergencyUnwound", EmergencyUnwound::SIGNATURE_HASH),
+        ("ProposalCreated", ProposalCreated::SIGNATURE_HASH),
+        (
+            "ProposalQuorumVoteDeadline",
+            ProposalQuorumVoteDeadline::SIGNATURE_HASH,
+        ),
+        ("VoteCast", VoteCast::SIGNATURE_HASH),
+        ("VoteCastWithParams", VoteCastWithParams::SIGNATURE_HASH),
+        ("ProposalQueued", ProposalQueued::SIGNATURE_HASH),
+        ("ProposalExecuted", ProposalExecuted::SIGNATURE_HASH),
+        ("ProposalCanceled", ProposalCanceled::SIGNATURE_HASH),
     ];
 
     for (name, hash) in actual {

@@ -138,6 +138,7 @@ fn empty_ctx(pool: database::DbPool) -> ConsumeCtx {
         pool,
         token_meta: Arc::new(std::collections::HashMap::new()),
         refresh: Arc::new(RefreshGate::new()),
+        governors: Arc::new(std::collections::HashMap::new()),
     }
 }
 

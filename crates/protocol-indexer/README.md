@@ -40,8 +40,10 @@ rpc_url  = "http://anvil:8545"
 | `batch` | no | 500 | Max events per chain per tick |
 | `chains[].chain_id` | — | — | Chain to resolve metadata and poll yield state for |
 | `chains[].rpc_url` | — | — | HTTP RPC for `decimals()` / `symbol()` and `yieldState` |
+| `chains[].governor_address` | no | — | Governance events are accepted only from this emitter. Absent or zero indexes no governance |
 
-Per-chain env overlay: `PROTOCOL_INDEXER_CHAIN_<id>_RPC_URL`.
+Per-chain env overlay: `PROTOCOL_INDEXER_CHAIN_<id>_RPC_URL`,
+`PROTOCOL_INDEXER_CHAIN_<id>_GOVERNOR_ADDRESS`.
 
 ⚠️ The overlay only rewrites chains **already declared** in the TOML. A variable
 naming a chain with no `[[chains]]` block is silently discarded.

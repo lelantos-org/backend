@@ -7,7 +7,8 @@
 //! One exhaustive match with no wildcard arm, so a new `DecodedEvent` variant
 //! fails to compile until this crate says what to do with it. Each arm delegates
 //! to the concern that owns the projection — [`super::assets`],
-//! [`super::yields`], [`super::tree`], [`super::deposits`] — so this module is
+//! [`super::yields`], [`super::tree`], [`super::deposits`],
+//! [`super::governance`] — so this module is
 //! the routing table and nothing else.
 
 use super::deposits::encode_aux;
@@ -106,5 +107,66 @@ pub fn plan_event(plan: &mut CommitPlan, chain_id: i64, row: &RawEventRow, event
         // the poller picks the new split up on its next pass.
         DecodedEvent::Rebalanced { .. } => {}
         DecodedEvent::EmergencyUnwound { .. } => {}
+        DecodedEvent::ProposalCreated {
+            proposal_id,
+            proposer,
+            targets,
+            values,
+            signatures,
+            calldatas,
+            vote_start,
+            vote_end,
+            description,
+        } => plan.governance.push_created(
+            chain_id,
+            row,
+            proposal_id,
+            proposer,
+            targets,
+            values,
+            signatures,
+            calldatas,
+            vote_start,
+            vote_end,
+            description,
+        ),
+        DecodedEvent::ProposalQuorumVoteDeadline {
+            proposal_id,
+            quorum_vote_deadline,
+        } => plan.governance.push_quorum_vote_deadline(
+            chain_id,
+            row,
+            proposal_id,
+            quorum_vote_deadline,
+        ),
+        DecodedEvent::VoteCast {
+            voter,
+            proposal_id,
+            support,
+            weight,
+            reason,
+            params,
+        } => plan.governance.push_vote(
+            chain_id,
+            row,
+            voter,
+            proposal_id,
+            support,
+            weight,
+            reason,
+            params,
+        ),
+        DecodedEvent::ProposalQueued {
+            proposal_id,
+            eta_seconds,
+        } => plan
+            .governance
+            .push_queued(chain_id, row, proposal_id, eta_seconds),
+        DecodedEvent::ProposalExecuted { proposal_id } => {
+            plan.governance.push_executed(chain_id, row, proposal_id)
+        }
+        DecodedEvent::ProposalCanceled { proposal_id } => {
+            plan.governance.push_canceled(chain_id, row, proposal_id)
+        }
     }
 }

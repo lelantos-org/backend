@@ -35,7 +35,12 @@ impl ChainRpc for FakeChain {
     async fn tip(&self) -> Result<u64, IngesterError> {
         Ok(self.0.keys().copied().max().unwrap_or(0))
     }
-    async fn fetch_logs(&self, _a: Address, _f: u64, _t: u64) -> Result<Vec<Log>, IngesterError> {
+    async fn fetch_logs(
+        &self,
+        _a: &[Address],
+        _f: u64,
+        _t: u64,
+    ) -> Result<Vec<Log>, IngesterError> {
         Ok(Vec::new())
     }
     async fn fetch_block_meta(&self, _b: &[u64]) -> Result<HashMap<u64, BlockMeta>, IngesterError> {

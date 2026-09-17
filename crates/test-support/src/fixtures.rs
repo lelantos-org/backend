@@ -13,8 +13,9 @@ use shared::entities::EventKind;
 
 /// The MASP address every synthetic log is emitted from.
 ///
-/// Arbitrary, but fixed: a decoder keys on topic0 rather than the emitter, so
-/// the value only has to be stable across a test's logs.
+/// Arbitrary, but fixed: the pool's decoders key on topic0 rather than the
+/// emitter, so the value only has to be stable across a test's logs. Governance
+/// consumers do check the emitter; build those logs with [`build_log_from`].
 pub const POOL_ADDR: &str = "0x0000000000000000000000000000000000000abc";
 
 pub fn pool_addr() -> Address {
@@ -27,9 +28,21 @@ pub fn pool_addr() -> Address {
 /// metric and the reorg anchor both read it, so a test that cares about either
 /// needs to choose it.
 pub fn build_log(log_data: LogData, block_n: u64, block_ts: u64, tx_byte: u8, log_idx: u64) -> Log {
+    build_log_from(pool_addr(), log_data, block_n, block_ts, tx_byte, log_idx)
+}
+
+/// [`build_log`] for a log emitted by `address` rather than the pool.
+pub fn build_log_from(
+    address: Address,
+    log_data: LogData,
+    block_n: u64,
+    block_ts: u64,
+    tx_byte: u8,
+    log_idx: u64,
+) -> Log {
     Log {
         inner: alloy::primitives::Log {
-            address: pool_addr(),
+            address,
             data: log_data,
         },
         block_hash: Some(B256::repeat_byte(0xaa)),
@@ -73,6 +86,7 @@ struct InsertableRawEvent {
     event_kind: i16,
     topics: Vec<Vec<u8>>,
     data: Vec<u8>,
+    address: Vec<u8>,
 }
 
 /// Store `log` as the ingester would, under `kind`.
@@ -92,6 +106,7 @@ pub async fn insert_log(pool: &DbPool, chain_id: i64, log: &Log, kind: EventKind
         event_kind: kind.as_i16(),
         topics,
         data: log.data().data.to_vec(),
+        address: log.address().to_vec(),
     };
     let mut conn = pool.get().await.unwrap();
     diesel::insert_into(raw_events::table)

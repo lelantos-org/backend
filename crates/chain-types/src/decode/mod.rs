@@ -9,7 +9,9 @@ pub use signatures::{event_kind_from_topic0, known_signatures};
 use crate::abi::{
     AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
     EmergencyUnwound, HaltedSet, NormalizedFeeSwept, NotePayload, NullifierConsumed,
-    PerfFeeAccrued, Rebalanced, RootAdvanced, YieldAssetAdded, YieldParamsSet,
+    PerfFeeAccrued, ProposalCanceled, ProposalCreated, ProposalExecuted, ProposalQueued,
+    ProposalQuorumVoteDeadline, Rebalanced, RootAdvanced, VoteCast, VoteCastWithParams,
+    YieldAssetAdded, YieldParamsSet,
 };
 use alloy::primitives::{B256, LogData};
 use alloy::sol_types::SolEvent;
@@ -192,6 +194,68 @@ pub fn decode(
             DecodedEvent::EmergencyUnwound {
                 asset_id: ev.assetId,
                 recovered: ev.recovered,
+            }
+        }
+        EventKind::ProposalCreated => {
+            let ev: ProposalCreated = decode_log(&log)?;
+            DecodedEvent::ProposalCreated {
+                proposal_id: ev.proposalId,
+                proposer: ev.proposer,
+                targets: ev.targets,
+                values: ev.values,
+                signatures: ev.signatures,
+                calldatas: ev.calldatas.into_iter().map(|c| c.to_vec()).collect(),
+                vote_start: ev.voteStart,
+                vote_end: ev.voteEnd,
+                description: ev.description,
+            }
+        }
+        EventKind::ProposalQuorumVoteDeadline => {
+            let ev: ProposalQuorumVoteDeadline = decode_log(&log)?;
+            DecodedEvent::ProposalQuorumVoteDeadline {
+                proposal_id: ev.proposalId,
+                quorum_vote_deadline: ev.quorumVoteDeadline,
+            }
+        }
+        EventKind::VoteCast => {
+            let ev: VoteCast = decode_log(&log)?;
+            DecodedEvent::VoteCast {
+                voter: ev.voter,
+                proposal_id: ev.proposalId,
+                support: ev.support,
+                weight: ev.weight,
+                reason: ev.reason,
+                params: None,
+            }
+        }
+        EventKind::VoteCastWithParams => {
+            let ev: VoteCastWithParams = decode_log(&log)?;
+            DecodedEvent::VoteCast {
+                voter: ev.voter,
+                proposal_id: ev.proposalId,
+                support: ev.support,
+                weight: ev.weight,
+                reason: ev.reason,
+                params: Some(ev.params.to_vec()),
+            }
+        }
+        EventKind::ProposalQueued => {
+            let ev: ProposalQueued = decode_log(&log)?;
+            DecodedEvent::ProposalQueued {
+                proposal_id: ev.proposalId,
+                eta_seconds: ev.etaSeconds,
+            }
+        }
+        EventKind::ProposalExecuted => {
+            let ev: ProposalExecuted = decode_log(&log)?;
+            DecodedEvent::ProposalExecuted {
+                proposal_id: ev.proposalId,
+            }
+        }
+        EventKind::ProposalCanceled => {
+            let ev: ProposalCanceled = decode_log(&log)?;
+            DecodedEvent::ProposalCanceled {
+                proposal_id: ev.proposalId,
             }
         }
     };

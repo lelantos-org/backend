@@ -19,6 +19,13 @@ pub enum EventKind {
     Rebalanced = 14,
     HaltedSet = 15,
     EmergencyUnwound = 16,
+    ProposalCreated = 17,
+    ProposalQuorumVoteDeadline = 18,
+    VoteCast = 19,
+    VoteCastWithParams = 20,
+    ProposalQueued = 21,
+    ProposalExecuted = 22,
+    ProposalCanceled = 23,
 }
 
 impl EventKind {
@@ -51,6 +58,13 @@ impl EventKind {
         Self::Rebalanced,
         Self::HaltedSet,
         Self::EmergencyUnwound,
+        Self::ProposalCreated,
+        Self::ProposalQuorumVoteDeadline,
+        Self::VoteCast,
+        Self::VoteCastWithParams,
+        Self::ProposalQueued,
+        Self::ProposalExecuted,
+        Self::ProposalCanceled,
     ];
 
     /// Length of [`ALL`](Self::ALL), pinned to the highest discriminant.
@@ -58,7 +72,7 @@ impl EventKind {
     /// The discriminants are `1..=N` with no gaps, so the last variant's value
     /// *is* the count. Adding a variant without extending `ALL` then fails to
     /// compile on the array length rather than silently shortening the set.
-    pub const ALL_COUNT: usize = Self::EmergencyUnwound as usize;
+    pub const ALL_COUNT: usize = Self::ProposalCanceled as usize;
 
     pub fn from_i16(v: i16) -> Option<Self> {
         // Derived from `ALL` rather than a second 16-arm match: the two lists
@@ -98,6 +112,16 @@ impl EventKind {
             | Self::DepositEscrowed
             | Self::DepositFlushed
             | Self::DepositCanceled => Consumer::Protocol,
+
+            // The governor's proposal and vote ledger. Emitted by the governor
+            // rather than the pool, so protocol-indexer also checks the emitter.
+            Self::ProposalCreated
+            | Self::ProposalQuorumVoteDeadline
+            | Self::VoteCast
+            | Self::VoteCastWithParams
+            | Self::ProposalQueued
+            | Self::ProposalExecuted
+            | Self::ProposalCanceled => Consumer::Protocol,
 
             // Flow analytics and the fee ledger behind them.
             Self::AssetMoved | Self::PerfFeeAccrued | Self::NormalizedFeeSwept => {

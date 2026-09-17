@@ -10,6 +10,8 @@
 pub mod asset_yield;
 pub mod assets;
 pub mod deposit_escrowed_events;
+pub mod gov_proposals;
+pub mod gov_votes;
 pub mod tree_advances;
 
 use crate::domain::error::ProtocolIndexerError;

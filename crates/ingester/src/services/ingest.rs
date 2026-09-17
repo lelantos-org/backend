@@ -102,6 +102,7 @@ mod tests {
             event_kind: 0,
             topics: Vec::new(),
             data: Vec::new(),
+            address: Vec::new(),
         }
     }
 

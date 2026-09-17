@@ -55,7 +55,7 @@ impl BackfillService {
     pub async fn run(
         &self,
         cfg: &ChainConfig,
-        pool_addr: Address,
+        emitters: &[Address],
         from: u64,
         to: u64,
     ) -> Result<(), IngesterError> {
@@ -83,7 +83,7 @@ impl BackfillService {
         let log_window = &self.log_window;
         let mut prepared = stream::iter(chunks.into_iter().map(|chunk| async move {
             let rows =
-                fetch_rows(rpc, log_window, chain_id, pool_addr, chunk.from, chunk.to).await?;
+                fetch_rows(rpc, log_window, chain_id, emitters, chunk.from, chunk.to).await?;
             Ok::<_, IngesterError>((chunk, rows))
         }))
         .buffered(cfg.backfill_concurrency.max(1));

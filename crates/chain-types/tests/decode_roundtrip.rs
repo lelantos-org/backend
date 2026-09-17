@@ -2,7 +2,8 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::sol_types::SolEvent;
 use chain_types::abi::{
     AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
-    NotePayload, RootAdvanced,
+    NotePayload, ProposalCreated, ProposalQueued, ProposalQuorumVoteDeadline, RootAdvanced,
+    VoteCast, VoteCastWithParams,
 };
 use chain_types::decode::{DecodedEvent, decode, event_kind_from_topic0, known_signatures};
 use shared::entities::EventKind;
@@ -334,5 +335,115 @@ fn root_advanced_roundtrip() {
             assert_eq!(*n, new_root);
         }
         _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn proposal_created_roundtrip() {
+    let ev = ProposalCreated {
+        proposalId: U256::from(123u64),
+        proposer: Address::repeat_byte(0x01),
+        targets: vec![Address::repeat_byte(0x02), Address::repeat_byte(0x03)],
+        values: vec![U256::ZERO, U256::from(5u64)],
+        signatures: vec![String::new(), String::new()],
+        calldatas: vec![vec![0xde, 0xad].into(), vec![].into()],
+        voteStart: U256::from(1_000u64),
+        voteEnd: U256::from(1_300u64),
+        description: "# Title\n\nbody".into(),
+    };
+    match roundtrip(EventKind::ProposalCreated, &ev) {
+        DecodedEvent::ProposalCreated {
+            proposal_id,
+            proposer,
+            targets,
+            values,
+            signatures,
+            calldatas,
+            vote_start,
+            vote_end,
+            description,
+        } => {
+            assert_eq!(proposal_id, U256::from(123u64));
+            assert_eq!(proposer, Address::repeat_byte(0x01));
+            assert_eq!(targets.len(), 2);
+            assert_eq!(values[1], U256::from(5u64));
+            assert_eq!(signatures, vec![String::new(), String::new()]);
+            assert_eq!(calldatas, vec![vec![0xde, 0xad], vec![]]);
+            assert_eq!(vote_start, U256::from(1_000u64));
+            assert_eq!(vote_end, U256::from(1_300u64));
+            assert_eq!(description, "# Title\n\nbody");
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+/// Both vote events land on one variant; only `params` tells them apart.
+#[test]
+fn vote_cast_and_vote_cast_with_params_roundtrip() {
+    let voter = Address::repeat_byte(0x09);
+    let plain = VoteCast {
+        voter,
+        proposalId: U256::from(1u64),
+        support: 2,
+        weight: U256::from(10u64),
+        reason: "why".into(),
+    };
+    match roundtrip(EventKind::VoteCast, &plain) {
+        DecodedEvent::VoteCast {
+            voter: v,
+            support,
+            weight,
+            reason,
+            params,
+            ..
+        } => {
+            assert_eq!(v, voter, "the indexed voter is read from topics");
+            assert_eq!(support, 2);
+            assert_eq!(weight, U256::from(10u64));
+            assert_eq!(reason, "why");
+            assert_eq!(params, None);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    let with = VoteCastWithParams {
+        voter,
+        proposalId: U256::from(1u64),
+        support: 1,
+        weight: U256::from(10u64),
+        reason: String::new(),
+        params: vec![0x01].into(),
+    };
+    match roundtrip(EventKind::VoteCastWithParams, &with) {
+        DecodedEvent::VoteCast { params, .. } => assert_eq!(params, Some(vec![0x01])),
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn proposal_lifecycle_events_roundtrip() {
+    let ev = ProposalQuorumVoteDeadline {
+        proposalId: U256::from(7u64),
+        quorumVoteDeadline: U256::from(99u64),
+    };
+    match roundtrip(EventKind::ProposalQuorumVoteDeadline, &ev) {
+        DecodedEvent::ProposalQuorumVoteDeadline {
+            proposal_id,
+            quorum_vote_deadline,
+        } => {
+            assert_eq!(proposal_id, U256::from(7u64));
+            assert_eq!(quorum_vote_deadline, U256::from(99u64));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+    let ev = ProposalQueued {
+        proposalId: U256::from(7u64),
+        etaSeconds: U256::from(500u64),
+    };
+    match roundtrip(EventKind::ProposalQueued, &ev) {
+        DecodedEvent::ProposalQueued { eta_seconds, .. } => {
+            assert_eq!(eta_seconds, U256::from(500u64))
+        }
+        other => panic!("wrong variant: {other:?}"),
     }
 }

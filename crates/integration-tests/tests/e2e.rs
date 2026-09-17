@@ -106,6 +106,7 @@ async fn explorer_consume_writes_tree_advances() {
         pool: pool.clone(),
         token_meta: Arc::new(std::collections::HashMap::new()),
         refresh: Arc::new(protocol_indexer::services::consume::RefreshGate::new()),
+        governors: Arc::new(std::collections::HashMap::new()),
     };
     let _ = protocol_indexer::services::consume::tick_chain(&ctx, CHAIN_ID, 100)
         .await

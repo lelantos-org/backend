@@ -3,7 +3,9 @@
 use crate::abi::{
     AssetFeeSet, AssetMoved, AssetRegistered, DepositCanceled, DepositEscrowed, DepositFlushed,
     EmergencyUnwound, HaltedSet, NormalizedFeeSwept, NotePayload, NullifierConsumed,
-    PerfFeeAccrued, Rebalanced, RootAdvanced, YieldAssetAdded, YieldParamsSet,
+    PerfFeeAccrued, ProposalCanceled, ProposalCreated, ProposalExecuted, ProposalQueued,
+    ProposalQuorumVoteDeadline, Rebalanced, RootAdvanced, VoteCast, VoteCastWithParams,
+    YieldAssetAdded, YieldParamsSet,
 };
 use alloy::primitives::B256;
 use alloy::sol_types::SolEvent;
@@ -14,7 +16,7 @@ use shared::entities::EventKind;
 /// One table for both lookups below. The ingester filters logs by
 /// [`known_signatures`] and labels them with [`event_kind_from_topic0`]; two
 /// separate lists could let an event be fetched and then not recognised.
-const SIGNATURES: [(B256, EventKind); 16] = [
+const SIGNATURES: [(B256, EventKind); 23] = [
     (NotePayload::SIGNATURE_HASH, EventKind::NoteCreated),
     (AssetRegistered::SIGNATURE_HASH, EventKind::AssetRegistered),
     (AssetFeeSet::SIGNATURE_HASH, EventKind::AssetFeeSet),
@@ -40,6 +42,25 @@ const SIGNATURES: [(B256, EventKind); 16] = [
         EmergencyUnwound::SIGNATURE_HASH,
         EventKind::EmergencyUnwound,
     ),
+    (ProposalCreated::SIGNATURE_HASH, EventKind::ProposalCreated),
+    (
+        ProposalQuorumVoteDeadline::SIGNATURE_HASH,
+        EventKind::ProposalQuorumVoteDeadline,
+    ),
+    (VoteCast::SIGNATURE_HASH, EventKind::VoteCast),
+    (
+        VoteCastWithParams::SIGNATURE_HASH,
+        EventKind::VoteCastWithParams,
+    ),
+    (ProposalQueued::SIGNATURE_HASH, EventKind::ProposalQueued),
+    (
+        ProposalExecuted::SIGNATURE_HASH,
+        EventKind::ProposalExecuted,
+    ),
+    (
+        ProposalCanceled::SIGNATURE_HASH,
+        EventKind::ProposalCanceled,
+    ),
 ];
 
 pub fn event_kind_from_topic0(topic0: &B256) -> Option<EventKind> {
@@ -49,6 +70,6 @@ pub fn event_kind_from_topic0(topic0: &B256) -> Option<EventKind> {
         .map(|(_, kind)| *kind)
 }
 
-pub fn known_signatures() -> [B256; 16] {
+pub fn known_signatures() -> [B256; 23] {
     SIGNATURES.map(|(sig, _)| sig)
 }

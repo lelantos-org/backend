@@ -141,12 +141,30 @@ pub struct ChainCfg {
     /// the registry's `/v1/assets` at template time.
     #[serde(default)]
     pub venue_seed: Vec<Address>,
+    /// `LelantosGovernor`, whose views the governance UI reads. The zero
+    /// address counts as absent, so the dev TOML can declare the key for the
+    /// overlay to rewrite.
+    #[serde(default)]
+    pub governor_address: Option<Address>,
+    /// The governance token. Zero counts as absent.
+    #[serde(default)]
+    pub gov_token_address: Option<Address>,
 }
 
 impl ChainCfg {
     /// Whether any configured endpoint can answer a historical read.
     pub fn has_archive(&self) -> bool {
         self.upstream_archive || (self.fallback_url.is_some() && self.fallback_archive)
+    }
+
+    /// The governor, if one is configured and not the zero placeholder.
+    pub fn governor(&self) -> Option<Address> {
+        self.governor_address.filter(|a| !a.is_zero())
+    }
+
+    /// The governance token, if one is configured and not the zero placeholder.
+    pub fn gov_token(&self) -> Option<Address> {
+        self.gov_token_address.filter(|a| !a.is_zero())
     }
 }
 
@@ -236,6 +254,12 @@ impl RpcProxyConfig {
             overlay(id, "PERMIT2_ADDRESS", &mut c.permit2_address)?;
             overlay_list(id, "ERC20_SEED", &mut c.erc20_seed)?;
             overlay_list(id, "VENUE_SEED", &mut c.venue_seed)?;
+            if let Some(v) = config_env::lookup_parse::<Address>(PREFIX, id, "GOVERNOR_ADDRESS")? {
+                c.governor_address = Some(v);
+            }
+            if let Some(v) = config_env::lookup_parse::<Address>(PREFIX, id, "GOV_TOKEN_ADDRESS")? {
+                c.gov_token_address = Some(v);
+            }
         }
         Ok(())
     }

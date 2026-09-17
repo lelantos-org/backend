@@ -9,6 +9,11 @@ database_url = "postgres://postgres:postgres@postgres:5432/postgres"
 chain_id = 42161
 rpc_url = "https://arb1.arbitrum.io/rpc"
 pool_address = "0x2E77bAb062B0E551eDbB75597af2bd29268413F6"
+# Overridden by INGESTER_CHAIN_42161_{GOVERNOR,GOV_TOKEN}_ADDRESS. Zero means no
+# governance: only the pool's logs are fetched. The governor must have been
+# deployed at or above `start_block` for its proposals to be listed.
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"
 start_block = 465459960
 reorg_depth = 32
 # Arbitrum produces a block roughly every 250ms, so a 1s poll spent most of its

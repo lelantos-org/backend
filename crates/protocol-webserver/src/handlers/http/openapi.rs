@@ -1,6 +1,7 @@
 use crate::domain::responses::{
-    AssetOut, ChainOut, ChainsResponse, PriceOut, PricesResponse, YieldIndexAssetOut,
-    YieldIndexResponse, YieldOut, YieldSampleOut,
+    AssetOut, ChainOut, ChainsResponse, PriceOut, PricesResponse, ProposalActionOut,
+    ProposalDetailOut, ProposalSummaryOut, ProposalsPageOut, TalliesOut, VoteOut, VotesPageOut,
+    YieldIndexAssetOut, YieldIndexResponse, YieldOut, YieldSampleOut,
 };
 use crate::handlers::http as handlers;
 use crate::handlers::http::health::HealthOut;
@@ -10,7 +11,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "protocol-webserver",
-        description = "Deployment registry, asset catalog and spot prices"
+        description = "Deployment registry, asset catalog, spot prices and governance"
     ),
     paths(
         handlers::health::health,
@@ -18,6 +19,9 @@ use utoipa::OpenApi;
         handlers::assets::list_assets,
         handlers::prices::prices,
         handlers::yield_index::yield_index,
+        handlers::governance::list_proposals,
+        handlers::governance::get_proposal,
+        handlers::governance::list_votes,
     ),
     components(schemas(
         HealthOut,
@@ -29,7 +33,14 @@ use utoipa::OpenApi;
         PriceOut,
         YieldIndexResponse,
         YieldIndexAssetOut,
-        YieldSampleOut
+        YieldSampleOut,
+        ProposalsPageOut,
+        ProposalSummaryOut,
+        ProposalDetailOut,
+        ProposalActionOut,
+        TalliesOut,
+        VotesPageOut,
+        VoteOut
     ))
 )]
 pub struct ApiDoc;
@@ -50,6 +61,9 @@ mod tests {
             "/v1/assets",
             "/v1/prices",
             "/v1/yield-index",
+            "/v1/governance/proposals",
+            "/v1/governance/proposals/{proposalId}",
+            "/v1/governance/proposals/{proposalId}/votes",
         ] {
             assert!(
                 spec.paths.paths.contains_key(path),

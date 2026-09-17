@@ -67,3 +67,7 @@ permit2_address = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 # here because these addresses are deployment state, not config.
 erc20_seed = []
 venue_seed = []
+# The governance UI's reads, as RPC_PROXY_CHAIN_42161_{GOVERNOR,GOV_TOKEN}_ADDRESS.
+# Zero means absent.
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"

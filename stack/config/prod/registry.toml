@@ -32,6 +32,11 @@ permit2_address = "0x0000000000000000000000000000000000000000"
 # route entirely, rather than offering one that has no entry point on chain.
 native_adapter_address = "0x0000000000000000000000000000000000000000"
 swap_wrapper_address = "0x0000000000000000000000000000000000000000"
+# Governance, as REGISTRY_CHAIN_42161_{GOVERNOR,GOV_TOKEN,TIMELOCK}_ADDRESS. Zero
+# is published as absent, which hides governance on the chain.
+governor_address = "0x0000000000000000000000000000000000000000"
+gov_token_address = "0x0000000000000000000000000000000000000000"
+timelock_address = "0x0000000000000000000000000000000000000000"
 tree_depth = 11
 # Archive-capable endpoint for the rate measurement. Absent disables measurement
 # for this chain rather than failing the boot.

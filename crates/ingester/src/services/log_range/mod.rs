@@ -37,7 +37,7 @@ use window::Window;
 pub async fn fetch_adaptive(
     rpc: &DynRpc,
     learned: &LogWindow,
-    address: Address,
+    addresses: &[Address],
     from: u64,
     to: u64,
 ) -> Result<Vec<Log>, IngesterError> {
@@ -49,7 +49,7 @@ pub async fn fetch_adaptive(
     // previous response, so they can go out together instead of the range being
     // walked one round trip at a time. Only the search itself needs feedback.
     if limit < span {
-        match fetch_split(rpc, learned, address, from, to, limit).await {
+        match fetch_split(rpc, learned, addresses, from, to, limit).await {
             Ok(logs) => return Ok(logs),
             // The cap moved under us, or a probe overshot it. Fall through: the
             // serial walk re-reads the limit and re-learns it. Worth a line,
@@ -65,7 +65,7 @@ pub async fn fetch_adaptive(
         }
     }
 
-    fetch_probing(rpc, learned, address, from, to).await
+    fetch_probing(rpc, learned, addresses, from, to).await
 }
 
 /// Fetch `[from, to]` as concurrent windows of `size`, which the provider is
@@ -77,7 +77,7 @@ pub async fn fetch_adaptive(
 async fn fetch_split(
     rpc: &DynRpc,
     learned: &LogWindow,
-    address: Address,
+    addresses: &[Address],
     from: u64,
     to: u64,
     size: u64,
@@ -93,7 +93,7 @@ async fn fetch_split(
         let end = start.saturating_add(size - 1).min(to);
         async move {
             let _permit = learned.permit().await;
-            let logs = rpc.fetch_logs(address, start, end).await?;
+            let logs = rpc.fetch_logs(addresses, start, end).await?;
             learned.cap.confirm(end - start + 1);
             Ok::<_, IngesterError>(logs)
         }
@@ -131,7 +131,7 @@ fn absorb(acc: &mut Vec<Log>, mut logs: Vec<Log>) {
 async fn fetch_probing(
     rpc: &DynRpc,
     learned: &LogWindow,
-    address: Address,
+    addresses: &[Address],
     from: u64,
     to: u64,
 ) -> Result<Vec<Log>, IngesterError> {
@@ -144,7 +144,7 @@ async fn fetch_probing(
         let end = cursor.saturating_add(window.size - 1).min(to);
         let result = {
             let _permit = learned.permit().await;
-            rpc.fetch_logs(address, cursor, end).await
+            rpc.fetch_logs(addresses, cursor, end).await
         };
         match result {
             Ok(logs) => {
@@ -179,14 +179,14 @@ pub async fn fetch_rows(
     rpc: &DynRpc,
     learned: &LogWindow,
     chain_id: i64,
-    address: Address,
+    addresses: &[Address],
     from: u64,
     to: u64,
 ) -> Result<Vec<RawEvent>, IngesterError> {
     let logs = timed_ingest_stage(
         ingest_stage::GET_LOGS,
         chain_id,
-        fetch_adaptive(rpc, learned, address, from, to),
+        fetch_adaptive(rpc, learned, addresses, from, to),
     )
     .await?;
     if logs.is_empty() {
