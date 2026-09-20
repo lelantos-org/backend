@@ -103,7 +103,7 @@ Under profile `all`, the one-shot `deploy` service runs before the backends:
 3. `forge script DeployTestYield.s.sol` — a `MockERC4626` vault and its
    `ERC4626Venue` per asset, registered as new yield ids
 4. `forge script DeployTestGovernance.s.sol` — LNT, `TimelockController`,
-   `LelantosGovernor`, `FeeBurner`, `ProtocolAdmin` on dev timings; the whole LNT
+   `LelantosGovernor`, `FeeBurner` on dev timings; the whole LNT
    supply goes to `FUND_RECIPIENT`. Ownership handover is not run.
 5. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
 6. Writes `/addresses/addresses.env` to the shared `addresses` volume

@@ -7,7 +7,7 @@
 #                                           BundlerFactory + the relayer's Bundler
 #   3. forge script DeployTestYield.s.sol → MockERC4626 vaults, ERC4626Venues
 #   4. forge script DeployTestGovernance.s.sol → LNT, Timelock, Governor,
-#                                           FeeBurner, ProtocolAdmin
+#                                           FeeBurner
 #   5. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
 #   6. write addresses.env, sourced by every backend's entrypoint wrapper
 #
@@ -205,7 +205,7 @@ deploy_yield() {
     debug "YIELD_VAULT_4=${YIELD_VAULT_4} (empty; index starts at RAY)"
 }
 
-# LNT + TimelockController + LelantosGovernor (+ FeeBurner, ProtocolAdmin) on
+# LNT + TimelockController + LelantosGovernor (+ FeeBurner) on
 # dev timings: a proposal goes from `propose` to `execute` in minutes. The whole
 # LNT supply goes to FUND_RECIPIENT, the funded dev account, so it can delegate
 # to itself and propose. Ownership handover is not run, so MASP and SwapWrapper
