@@ -46,9 +46,9 @@ impl NotAField {
 
 /// Core field parse. Rejects anything at or above the BN254 scalar modulus: such
 /// a value is not a field element, `crypto`'s Poseidon refuses it, and the
-/// contract's coefficient range check reverts on it. Unchecked, a non-canonical
-/// `outCm` would reach [`crate::services::tree`] and fail between two speculative
-/// leaf inserts, permanently desyncing that chain's mirror.
+/// contract's coefficient range check reverts on it. Checked here, a
+/// non-canonical `outCm` is a 400 before anything is reserved;
+/// [`crate::services::tree`] refuses one as a leaf as well.
 fn field_bytes(s: &str) -> Result<FixedBytes<32>, NotAField> {
     let v = parse_u256(s).map_err(|_| NotAField::Malformed)?;
     if v >= *BN254_R {
@@ -68,7 +68,7 @@ pub enum FieldRef<'a> {
     Named(&'a str),
     /// One slot of a named array, e.g. `pubInputs.nullifier[2]`.
     Index(&'a str, usize),
-    /// One coordinate of a point in a named array, e.g. `pubInputs.inCv[1].y`.
+    /// One coordinate of a point in a named array, e.g. `aux.ephPub[1].y`.
     Coord(&'a str, usize, &'a str),
 }
 
@@ -169,10 +169,7 @@ mod tests {
                 FieldRef::Index("pubInputs.nullifier", 2),
                 "pubInputs.nullifier[2]",
             ),
-            (
-                FieldRef::Coord("pubInputs.inCv", 1, "y"),
-                "pubInputs.inCv[1].y",
-            ),
+            (FieldRef::Coord("aux.ephPub", 1, "y"), "aux.ephPub[1].y"),
         ] {
             let err = parse_field(&bad, at).unwrap_err();
             assert!(err.to_string().contains(expected), "got {err}");

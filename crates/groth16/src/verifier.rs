@@ -121,9 +121,8 @@ impl Groth16Verifier {
     ///
     /// `public` holds one big-endian 32-byte word per public signal, in the
     /// order the circuit declares them. Words are reduced modulo the scalar
-    /// field rather than refused for being oversized: they are the caller's own
-    /// derived signals, not attacker-chosen field elements, and every source of
-    /// them already works modulo `r`.
+    /// field rather than refused for being oversized, so a caller passing a word
+    /// it did not derive modulo `r` itself must range-check it first.
     pub fn verify(&self, proof: SnarkjsProof<'_>, public: &[[u8; 32]]) -> Groth16Result<()> {
         if public.len() != self.public_signals {
             return Err(Groth16Error::Verify(format!(
@@ -254,25 +253,6 @@ mod tests {
     use super::*;
     use ark_ec::AffineRepr;
 
-    /// The transact circuit publishes `(y, z)`: its output and the Fiat-Shamir
-    /// challenge. The relayer names the same number where it loads the key.
-    const TRANSACT_SIGNALS: usize = 2;
-
-    fn vkey_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../circuits/build/4x6_verification_key.json")
-    }
-
-    #[test]
-    fn the_published_transact_vkey_loads() {
-        let path = vkey_path();
-        if !path.exists() {
-            eprintln!("{} absent; skipping", path.display());
-            return;
-        }
-        Groth16Verifier::load(&path, TRANSACT_SIGNALS).expect("load published 4x6 vkey");
-    }
-
     #[test]
     fn a_vkey_with_the_wrong_arity_is_refused() {
         let json = serde_json::json!({
@@ -287,11 +267,11 @@ mod tests {
         });
         let f = std::env::temp_dir().join("groth16_bad_arity_vk.json");
         std::fs::write(&f, serde_json::to_vec(&json).unwrap()).unwrap();
-        let err = match Groth16Verifier::load(&f, TRANSACT_SIGNALS) {
+        let err = match Groth16Verifier::load(&f, 3) {
             Err(e) => e,
-            Ok(_) => panic!("a 5-signal key is not this circuit's"),
+            Ok(_) => panic!("a 5-signal key is not a 3-signal circuit's"),
         };
-        assert!(err.to_string().contains("2 public signals"), "got {err}");
+        assert!(err.to_string().contains("3 public signals"), "got {err}");
         // An operator problem rather than the caller's.
         assert!(matches!(err, Groth16Error::Key(_)), "got {err}");
     }

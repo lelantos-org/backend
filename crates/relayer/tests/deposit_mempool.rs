@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 
+use alloy::primitives::U256;
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
 use diesel::prelude::*;
@@ -46,18 +47,13 @@ struct NewDeposit {
     public_asset_id: i64,
     public_in: BigDecimal,
     fee_bps_at_submit: i32,
-    cm: Vec<u8>,
-    cv_dep_x: BigDecimal,
-    cv_dep_y: BigDecimal,
-    rcv: BigDecimal,
+    inner: Vec<u8>,
     aux: serde_json::Value,
     fee_asset_id: i64,
     fee_in: BigDecimal,
-    fee_cm: Vec<u8>,
-    fee_cv_dep_x: BigDecimal,
-    fee_cv_dep_y: BigDecimal,
-    fee_rcv: BigDecimal,
+    fee_inner: Vec<u8>,
     fee_aux: serde_json::Value,
+    pulled: BigDecimal,
     submitted_at_block: i64,
     tx_hash: Vec<u8>,
     block_ts: i64,
@@ -75,18 +71,13 @@ fn deposit(id: u64) -> NewDeposit {
         public_asset_id: 7,
         public_in: n(1_000),
         fee_bps_at_submit: 25,
-        cm: vec![0x33; 32],
-        cv_dep_x: n(3),
-        cv_dep_y: n(4),
-        rcv: n(5),
+        inner: vec![0x33; 32],
         aux: serde_json::json!({}),
         fee_asset_id: 9,
         fee_in: n(250),
-        fee_cm: vec![0x55; 32],
-        fee_cv_dep_x: n(6),
-        fee_cv_dep_y: n(7),
-        fee_rcv: n(8),
+        fee_inner: vec![0x55; 32],
         fee_aux: serde_json::json!({}),
+        pulled: n(0),
         submitted_at_block: id as i64,
         tx_hash: vec![0x44; 32],
         block_ts: 1_700_000_000,
@@ -199,6 +190,30 @@ async fn the_fee_asset_reads_back_independently_of_the_deposit_asset() {
     assert_eq!(
         assets,
         vec![(1, 7, 9, 250), (2, 7, 0, 0), (3, 7, u64::MAX, 250)]
+    );
+}
+
+/// The refund cap is digest preimage, so it must read back from its own column
+/// exactly: a plain escrow's 0 as 0, and a yield escrow's pull at the full
+/// width of the `uint256` the event logged.
+#[tokio::test]
+async fn the_refund_cap_reads_back_exactly() {
+    let (pool, _guard) = fresh_pool().await;
+    let mut rows: Vec<NewDeposit> = (1..=3).map(deposit).collect();
+    rows[1].pulled = BigDecimal::from(10_025_000_000_000_000u64);
+    rows[2].pulled = U256::MAX.to_string().parse().unwrap();
+    insert(&pool, rows).await;
+    let mempool = DepositMempool::new(pool, CHAIN);
+
+    let got = mempool.pop_pending(8, &excluding(&[]), SCAN).await.unwrap();
+    let caps: Vec<_> = got.iter().map(|d| (d.id, d.pulled)).collect();
+    assert_eq!(
+        caps,
+        vec![
+            (1, U256::ZERO),
+            (2, U256::from(10_025_000_000_000_000u64)),
+            (3, U256::MAX)
+        ]
     );
 }
 

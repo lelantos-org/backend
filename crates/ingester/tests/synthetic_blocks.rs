@@ -156,8 +156,6 @@ fn note_created_log(block_n: u64, block_hash: B256, tx_hash: B256, log_index: u6
         ephPubX: alloy::primitives::U256::from(0u64),
         ephPubY: alloy::primitives::U256::from(0u64),
         ciphertext: Bytes::from(vec![0x00, 0x00, 1u8, 2, 3, 4, 5, 6, 7, 8]),
-        cvDepX: alloy::primitives::U256::from(0u64),
-        cvDepY: alloy::primitives::U256::from(0u64),
     };
     let log_data: LogData = ev.encode_log_data();
     let inner = alloy::primitives::Log {

@@ -10,28 +10,22 @@
 //! established is that the note is ours and spendable, neither of which is
 //! visible on chain: a payer can escrow `feeIn = 10_000` against a note
 //! addressed to themselves, producing a deposit that looks funded and pays
-//! nobody. Three checks make the leaf actionable:
+//! nobody. Two checks make the leaf actionable:
 //!
-//! 1. The commitment is rebuilt against this relayer's own `pk`. `feeCm` is
+//! 1. The owner half is rebuilt against this relayer's own `pk`. `feeInner` is
 //!    escrow digest preimage, so it is the value the payer signed a Permit2
 //!    witness over and neither a relayer nor a flusher can vary it. Rebuilding
-//!    `Poseidon(asset·2^64 + value, pk, rho, rcm)` from the decrypted plaintext
-//!    fails for a note owned by someone else and for a plaintext that inflates
-//!    the value.
-//! 2. `rcv_dep` must equal the escrowed `feeRcv`. The batch circuit binds
-//!    `cv_dep[k]` to `leaf_public_in[k]` units under blinder `rcv[k]`, and the
-//!    relayer supplies that blinder as a witness. A note whose plaintext carries
-//!    a different `rcv_dep` decrypts and rebuilds correctly but has no witness,
-//!    so the whole batch fails in proving rather than at this deposit. This has
-//!    no spend-side analogue.
-//! 3. The plaintext must agree with the escrow: `value` with `feeIn`, and a
+//!    `Poseidon(TAG_INNER, pk, rho, rcm)` from the decrypted plaintext fails
+//!    for a note owned by someone else.
+//! 2. The plaintext must agree with the escrow: `value` with `feeIn`, and a
 //!    valued note's `asset_id` with the escrowed `feeAssetId`, which may differ
-//!    from the deposit's `publicAssetId`. The circuit binds `feeCvDep` to
-//!    `feeIn` units of `feeAssetId`, but nothing opens `cm`, so a `cm`
-//!    committing another asset still lands and leaves this relayer a note it
-//!    cannot spend. A worthless note is exempt from the asset check: wallets
-//!    pad it in the deposit's asset while escrowing `feeAssetId = 0`, and it
-//!    pays nothing in any asset.
+//!    from the deposit's `publicAssetId`. The batch circuit builds the leaf as
+//!    `Poseidon(TAG_CM, feeAssetId·2^64 + feeIn, feeInner)`, so the note is
+//!    worth the escrowed amount whatever the plaintext says; but a wallet
+//!    recognises a note by rebuilding its leaf from the plaintext, so one that
+//!    states another amount is a note this relayer's wallet never finds. A
+//!    worthless note is exempt from the asset check: it pays nothing in any
+//!    asset.
 //!
 //! Only `ivk` is required, so the spending key that could move collected fees
 //! never exists on this host, as on the spend path.
@@ -39,7 +33,6 @@
 use crate::domain::deposit::PendingDeposit;
 use crate::domain::error::{AppError, AppResult};
 use crate::services::fees::shielded::FeeRecipient;
-use alloy::primitives::U256;
 use crypto::note::{self, NotePlaintext};
 use serde::Deserialize;
 
@@ -90,17 +83,11 @@ pub fn assess(recipient: &FeeRecipient, d: &PendingDeposit) -> AppResult<FeeNote
         return Ok(FeeNote::NotOurs);
     };
 
-    // Rebuilt against this relayer's own `pk` and the plaintext's own asset and
-    // value, so a note merely encrypted to us does not pass.
-    let cm = note::commitment(
-        plain.asset_id,
-        plain.value,
-        recipient.pk(),
-        &plain.rho,
-        &plain.rcm,
-    )
-    .map_err(|e| AppError::Internal(format!("deposit {}: note commitment: {e}", d.id)))?;
-    if cm != d.fee_cm {
+    // Rebuilt against this relayer's own `pk`, so a note merely encrypted to us
+    // does not pass.
+    let inner = note::inner(recipient.pk(), &plain.rho, &plain.rcm)
+        .map_err(|e| AppError::Internal(format!("deposit {}: note inner: {e}", d.id)))?;
+    if inner != d.fee_inner {
         return Ok(FeeNote::NotOurs);
     }
 
@@ -113,14 +100,10 @@ pub fn assess(recipient: &FeeRecipient, d: &PendingDeposit) -> AppResult<FeeNote
     if plain.value != d.fee_in {
         return Ok(FeeNote::Malformed("fee note value disagrees with feeIn"));
     }
-    // The witness check. Without it the batch fails in proving rather than here.
-    if U256::from_be_bytes(plain.rcv_dep) != d.fee_rcv {
-        return Ok(FeeNote::Malformed(
-            "fee note rcv_dep is not the escrowed feeRcv",
-        ));
-    }
 
-    Ok(FeeNote::Paid { paid: plain.value })
+    // The leaf's value is the escrowed one: the batch circuit builds it from
+    // `(feeAssetId, feeIn, feeInner)`.
+    Ok(FeeNote::Paid { paid: d.fee_in })
 }
 
 fn decrypt(recipient: &FeeRecipient, aux: &FeeAux) -> AppResult<Option<NotePlaintext>> {
@@ -142,64 +125,17 @@ fn hex_bytes(s: &str) -> AppResult<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    //! The same vectors the spend path uses. The deposit path derives `rho`
+    //! freely rather than from a nullifier, so of a spend slot only the fields
+    //! unaffected by that difference are used: the plaintext, its `inner` and
+    //! the ephemeral key.
+
     use super::*;
     use crate::adapters::parse::{FieldRef, parse_field};
+    use crate::domain::dto::OutputAuxDto;
+    use crate::services::fees::shielded::fixture::{Fixture, fixture, recipient};
     use crypto::tree::Field;
-    use serde::Deserialize;
     use serde_json::json;
-
-    /// The same vectors the spend path uses: every ciphertext comes from the SDK's
-    /// own encrypt path for these keys, so a note here matches what a real wallet
-    /// would build.
-    ///
-    /// The deposit path derives `rho` freely rather than from a nullifier, so only
-    /// the fields unaffected by that difference are used: the plaintext, its
-    /// commitment and the ephemeral key.
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Fixture {
-        address: String,
-        ivk_hex: String,
-        asset_id: u64,
-        fee: Slot,
-        foreign_owner: Slot,
-        not_ours: Slot,
-    }
-
-    #[derive(Deserialize)]
-    struct Slot {
-        cm: String,
-        aux: Aux,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Aux {
-        clue_r: Point,
-        eph_pub: Point,
-        ciphertext: String,
-    }
-
-    #[derive(Deserialize)]
-    struct Point {
-        x: String,
-        y: String,
-    }
-
-    fn fixture() -> Fixture {
-        serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/vectors/shielded-fee.json"
-        )))
-        .expect("shielded-fee.json parses")
-    }
-
-    fn recipient(f: &Fixture) -> FeeRecipient {
-        let ivk = parse_field(&f.ivk_hex, FieldRef::Named("ivk"))
-            .expect("ivk parses")
-            .0;
-        FeeRecipient::new(f.address.clone(), ivk).expect("address and key agree")
-    }
 
     fn field(s: &str) -> Field {
         parse_field(s, FieldRef::Named("fixture field"))
@@ -207,7 +143,7 @@ mod tests {
             .0
     }
 
-    fn aux_json(a: &Aux) -> serde_json::Value {
+    fn aux_json(a: &OutputAuxDto) -> serde_json::Value {
         json!({
             "clueRx": a.clue_r.x,
             "clueRy": a.clue_r.y,
@@ -217,9 +153,9 @@ mod tests {
         })
     }
 
-    /// Decrypt independently of the module under test, so the expected `rcv_dep`
-    /// is not taken from the code being checked.
-    fn plaintext_of(r: &FeeRecipient, a: &Aux) -> NotePlaintext {
+    /// Decrypt independently of the module under test, so the expected value is
+    /// not taken from the code being checked.
+    fn plaintext_of(r: &FeeRecipient, a: &OutputAuxDto) -> NotePlaintext {
         let wire = hex::decode(a.ciphertext.trim_start_matches("0x")).expect("hex");
         let body = note::strip_clue_prefix(&wire).expect("clue prefix");
         let epk = r.pack_epk(&a.eph_pub.x, &a.eph_pub.y).expect("epk packs");
@@ -227,18 +163,36 @@ mod tests {
         NotePlaintext::decode(&raw).expect("plaintext decodes")
     }
 
-    /// A deposit whose fee leaf is the fixture's note, escrowed correctly.
+    /// A deposit whose fee leaf is the fixture's deposit note, escrowed correctly.
     fn deposit_paying(f: &Fixture, r: &FeeRecipient) -> PendingDeposit {
-        let plain = plaintext_of(r, &f.fee.aux);
+        let plain = plaintext_of(r, &f.deposit_fee.aux);
         PendingDeposit {
             public_asset_id: f.asset_id,
             fee_asset_id: f.asset_id,
             fee_in: plain.value,
-            fee_cm: field(&f.fee.cm),
-            fee_rcv: U256::from_be_bytes(plain.rcv_dep),
-            fee_aux: aux_json(&f.fee.aux),
+            fee_inner: field(&f.deposit_fee.inner),
+            fee_aux: aux_json(&f.deposit_fee.aux),
             ..PendingDeposit::fixture()
         }
+    }
+
+    /// The leaf a flush mints for the fixture's fee note is the commitment the
+    /// relayer's wallet rebuilds from the plaintext, so the note is spendable as
+    /// the escrowed amount. Read independently of `assess`.
+    #[test]
+    fn test_the_fixture_deposit_note_opens_the_leaf_the_batch_circuit_builds() {
+        let f = fixture();
+        let r = recipient(&f);
+        let plain = plaintext_of(&r, &f.deposit_fee.aux);
+        let d = deposit_paying(&f, &r);
+        let leaf = note::commitment_from_inner(d.fee_asset_id, d.fee_in, &d.fee_inner)
+            .expect("canonical inner");
+        assert_eq!(leaf, field(&f.deposit_fee.cm));
+        assert_eq!(
+            note::commitment(plain.asset_id, plain.value, r.pk(), &plain.rho, &plain.rcm)
+                .expect("commitment"),
+            leaf
+        );
     }
 
     #[test]
@@ -252,14 +206,14 @@ mod tests {
         );
     }
 
-    /// This note decrypts for us but its commitment was built against another
+    /// This note decrypts for us but its `inner` was built against another
     /// party's `pk`, so it is not ours to spend.
     #[test]
     fn test_assess_a_note_owned_by_another_key_is_not_ours() {
         let f = fixture();
         let r = recipient(&f);
         let mut d = deposit_paying(&f, &r);
-        d.fee_cm = field(&f.foreign_owner.cm);
+        d.fee_inner = field(&f.foreign_owner.inner);
         d.fee_aux = aux_json(&f.foreign_owner.aux);
         assert_eq!(assess(&r, &d).expect("readable"), FeeNote::NotOurs);
     }
@@ -271,28 +225,13 @@ mod tests {
         let f = fixture();
         let r = recipient(&f);
         let mut d = deposit_paying(&f, &r);
-        d.fee_cm = field(&f.not_ours.cm);
+        d.fee_inner = field(&f.not_ours.inner);
         d.fee_aux = aux_json(&f.not_ours.aux);
         assert_eq!(assess(&r, &d).expect("readable"), FeeNote::NotOurs);
     }
 
-    /// The check with no spend-side analogue. The note is ours and its commitment
-    /// rebuilds, so every spend-path check passes, yet the relayer cannot witness
-    /// the leaf, which would fail the whole batch in proving rather than here.
-    #[test]
-    fn test_assess_a_note_whose_rcv_dep_is_not_the_escrowed_fee_rcv_is_malformed() {
-        let f = fixture();
-        let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
-        d.fee_rcv += U256::from(1u8);
-        assert_eq!(
-            assess(&r, &d).expect("readable"),
-            FeeNote::Malformed("fee note rcv_dep is not the escrowed feeRcv")
-        );
-    }
-
-    /// Its `cm` commits another asset than the escrowed `feeAssetId`, so the leaf
-    /// lands but the relayer's note is unspendable.
+    /// Its plaintext names another asset than the escrowed `feeAssetId`, so the
+    /// leaf lands but does not open as the note the plaintext describes.
     #[test]
     fn test_assess_a_note_naming_another_asset_than_the_fee_asset_is_malformed() {
         let f = fixture();
@@ -320,9 +259,9 @@ mod tests {
         );
     }
 
-    /// A zero-fee escrow names fee asset 0 while the wallet pads in the deposit's
-    /// asset, so the asset check is skipped. The fixture's note is valued, so the
-    /// value check is what fails; an asset check would have failed first.
+    /// A zero-fee escrow names fee asset 0 and pays nothing in any asset, so the
+    /// asset check is skipped. The fixture's note is valued, so the value check
+    /// is what fails; an asset check would have failed first.
     #[test]
     fn test_assess_a_zero_fee_escrow_does_not_check_the_note_asset() {
         let f = fixture();
@@ -336,8 +275,8 @@ mod tests {
         );
     }
 
-    /// `feeIn` is what the contract escrowed and what `feeCvDep` is bound to,
-    /// so a plaintext that disagrees describes a leaf that cannot be committed.
+    /// `feeIn` is what the contract escrowed and what the batch circuit builds
+    /// the leaf from, so a plaintext that disagrees describes another leaf.
     #[test]
     fn test_assess_a_note_whose_value_disagrees_with_fee_in_is_malformed() {
         let f = fixture();

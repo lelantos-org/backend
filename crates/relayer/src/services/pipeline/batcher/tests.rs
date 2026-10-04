@@ -4,7 +4,7 @@ use super::bundle::{drop_stale_roots, fits, gas_shares, reserve_item, take_bundl
 use super::outcome::{classify, decode_execute, decode_logs, error_name, execute_calldata};
 use super::*;
 use crate::services::tree::ROOT_HISTORY;
-use alloy::primitives::{Bytes, keccak256};
+use alloy::primitives::{Bytes, U256, keccak256};
 use alloy::sol_types::SolCall;
 use alloy::sol_types::SolEvent;
 use std::collections::VecDeque;
@@ -16,11 +16,23 @@ fn encode_error(sig: &str, args: &[u8]) -> Vec<u8> {
 }
 
 /// An item that is only ever queued, reserved and ordered; nothing proves or
-/// encodes it. It inserts one leaf, keyed by its root, so reserving it advances
-/// the tree.
+/// encodes it. It inserts one non-zero leaf, keyed by its root, so reserving it
+/// advances the tree.
 struct Stub {
     entry: EntryPoint,
     root: Option<Field>,
+    batch: PaddedBatch,
+}
+
+impl Stub {
+    fn new(entry: EntryPoint, root: Option<Field>) -> Self {
+        let leaf = root.unwrap_or([1u8; 32]);
+        Self {
+            entry,
+            root,
+            batch: PaddedBatch::from_spend(&[leaf.into()]),
+        }
+    }
 }
 
 impl BundleItem for Stub {
@@ -28,25 +40,19 @@ impl BundleItem for Stub {
         self.entry
     }
 
-    fn leaves(&self) -> Vec<(Field, [U256; 2])> {
-        vec![(
-            self.root.unwrap_or_default(),
-            [U256::from(1u8), U256::from(2u8)],
-        )]
+    fn batch(&self) -> &PaddedBatch {
+        &self.batch
     }
 
     fn merkle_root(&self) -> Option<Field> {
         self.root
     }
 
-    fn witness(&self, _: &ReservedSlot, _: &AdvancedState) -> TreeUpdateBatchWitness {
-        unreachable!("stub items are never proved")
-    }
-
     fn encode(
         &self,
         _: &ReservedSlot,
         _: &AdvancedState,
+        _: U256,
         _: IMasp::Proof,
     ) -> AppResult<IBundler::Call> {
         unreachable!("stub items are never encoded")
@@ -67,7 +73,7 @@ fn job(
 ) -> (Job, oneshot::Receiver<AppResult<BundledReceipt>>) {
     let (reply, rx) = oneshot::channel();
     let job = Job {
-        item: Box::new(Stub { entry, root }),
+        item: Box::new(Stub::new(entry, root)),
         reply,
         guard: None,
         proof: None,
@@ -140,10 +146,11 @@ fn calls_past_the_cap_are_cut_and_an_oversized_first_call_fits_none() {
 }
 
 fn advance(m: &mut TreeMirror, n: u8) {
+    // Never zero: a zero leaf is the empty leaf and would not move the root.
     let mut cm = [0u8; 32];
+    cm[30] = 1;
     cm[31] = n;
-    m.reserve_and_advance_batch(&[(cm, [U256::from(1u8), U256::from(2u8)])])
-        .unwrap();
+    m.reserve_and_advance_batch(&[cm]).unwrap();
 }
 
 /// A bundle of `k` evicts `k` roots, so a root must be younger than
@@ -200,22 +207,10 @@ fn bundled_items_carry_the_anchor_slot_their_root_holds_on_chain() {
     assert_eq!(old_slot, (50 % ROOT_HISTORY) as u8);
 
     let items = [
-        Stub {
-            entry: EntryPoint::Flush,
-            root: None,
-        },
-        Stub {
-            entry: EntryPoint::Transfer,
-            root: Some(old),
-        },
-        Stub {
-            entry: EntryPoint::Withdraw,
-            root: Some(current),
-        },
-        Stub {
-            entry: EntryPoint::Swap,
-            root: Some(old),
-        },
+        Stub::new(EntryPoint::Flush, None),
+        Stub::new(EntryPoint::Transfer, Some(old)),
+        Stub::new(EntryPoint::Withdraw, Some(current)),
+        Stub::new(EntryPoint::Swap, Some(old)),
     ];
     m.begin_bundle().unwrap();
     let anchors: Vec<Option<u8>> = items
@@ -238,10 +233,7 @@ fn bundled_items_carry_the_anchor_slot_their_root_holds_on_chain() {
 
     // A root the mirror has never held is refused before anything is reserved.
     let leaves = m.committed_count();
-    let unknown = Stub {
-        entry: EntryPoint::Transfer,
-        root: Some([0xEE; 32]),
-    };
+    let unknown = Stub::new(EntryPoint::Transfer, Some([0xEE; 32]));
     assert!(matches!(
         reserve_item(&mut m, &unknown),
         Err(AppError::BadRequest(_))
@@ -315,10 +307,7 @@ fn the_mirror_finds_the_bundle_prefix_a_chain_root_marks() {
     let mut m = TreeMirror::new(1).unwrap();
     let base = m.current_root();
     m.begin_bundle().unwrap();
-    let flush = Stub {
-        entry: EntryPoint::Flush,
-        root: None,
-    };
+    let flush = Stub::new(EntryPoint::Flush, None);
     let (_, first) = reserve_item(&mut m, &flush).unwrap();
     let (_, second) = reserve_item(&mut m, &flush).unwrap();
     assert_eq!(m.bundle_prefix_reaching(&first.new_root), Some(1));

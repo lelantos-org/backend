@@ -20,7 +20,7 @@ use chain_types::abi::{
 const EXPECTED: &[(&str, &str)] = &[
     (
         "DepositEscrowed",
-        "e1912ec8afc449d7c588303113cd99feb5d4ccf5ac2206a931e4b78a2a008984",
+        "48786aa9d3678601a40c373a6118f7b062456414dee7cf289e46a81059fcbe57",
     ),
     (
         "DepositFlushed",
@@ -32,7 +32,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     (
         "NotePayload",
-        "08829d53b88cc31ed8597c58d2cc3202054ab57e9ab21b258aec2ae0974aa8d7",
+        "9c97c070d97621a8523b62e1c3d43be0cc098cde21767e1bd2da497cda692772",
     ),
     (
         "NullifierConsumed",

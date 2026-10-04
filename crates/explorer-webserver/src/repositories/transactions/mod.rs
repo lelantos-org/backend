@@ -5,9 +5,8 @@
 //!
 //! - `AssetMoved` is emitted from two sites only: `withdraw()` emits
 //!   `(0, outAmt)` and `_finalizeDeposit()` emits `(inAmt, 0)`. Both sides can
-//!   never be non-zero, since `withdraw` reverts on `publicIn != 0` and every
-//!   spend entry point forces `publicIn == 0`, so the sign of an `asset_flows`
-//!   row determines the label.
+//!   never be non-zero, since each site emits a literal zero for the other, so
+//!   the sign of an `asset_flows` row determines the label.
 //! - `RootAdvanced` is emitted from two sites only: `_finalize` (used by
 //!   `withdraw` and `transfer`) and `flushBatch`.
 //!

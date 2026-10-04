@@ -21,7 +21,7 @@ a new dependency edge has to be caught in review.
 |--------|----------|
 | `clue` | FMD scheme `lelantos.fmd.v1`: point coords, `pack`/`unpack`, `test_clue`, `test_clue_batch` |
 | `filter` | Detection-key parsing and the `fmd-indexer`-facing clue tests |
-| `poseidon` | circomlib-compatible Poseidon, arities 1–12 (state width 2–13), plus the sparse variant |
+| `poseidon` | circomlib-compatible Poseidon, arities 1–12 (state width 2–13), the sparse variant, and `coeff_digest`, the circuits' coefficient digest |
 | `babyjubjub` | Scalar mul, public key from secret key, byte conversions |
 | `note` | Note plaintext codec, `derive_pk`/`derive_rho`/`commitment`, and trial decryption |
 | `tree` | Quaternary sparse Merkle tree with Poseidon-arity-5 nodes |
@@ -64,7 +64,7 @@ let plaintext = note::try_decrypt(&ivk, &epk_packed, body)?;   // None ⇒ not o
 let plain = note::NotePlaintext::decode(&plaintext)?;
 
 // The check that makes `plain.value` worth acting on.
-let pk = note::derive_pk(&ivk)?;
+let pk = note::derive_pk(&ivk, &note::default_diversifier(&ivk))?;
 let cm = note::commitment(plain.asset_id, plain.value, &pk, &plain.rho, &plain.rcm)?;
 assert_eq!(cm, out_cm_from_the_proof);
 ```
@@ -101,10 +101,9 @@ somewhere else. `relayer`'s shielded fee check is built on exactly that.
 ## Merkle tree
 
 `tree::MerkleTree` is quaternary (arity 4) with nodes
-`Poseidon(TAG_MERKLE, c0, c1, c2, c3)`. It takes leaves already hashed; the
-`Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)` leaf hash itself is *not* here —
-`fmd-webserver` (`domain::poseidon`) and `relayer` (`services::tree`) each
-define `TAG_LEAF` locally, so a change to the tag has to be made in both.
+`Poseidon(TAG_MERKLE, c0, c1, c2, c3)`. A leaf is the note commitment `cm`. A
+spend publishes it; a deposit publishes `inner`, and the leaf is
+`note::commitment_from_inner(asset, value, inner)`.
 Levels are materialised, so
 `root()` is O(1) and an absent node is indistinguishable from a
 materialised all-zero subtree (`zeros[d+1] = hash(zeros[d] × 4)`).

@@ -8,7 +8,7 @@ use super::*;
 use crate::domain::dto::{
     DepositRequestDto, OutputAuxDto, PointDto, ProofDto, PubInputsDto, SwapBlob,
 };
-use alloy::primitives::FixedBytes;
+use alloy::primitives::{FixedBytes, U256};
 use std::array;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,26 +31,20 @@ fn one_aux() -> OutputAuxDto {
     };
     OutputAuxDto {
         clue_r: p.clone(),
+        clue_q: p.clone(),
         eph_pub: p,
         ciphertext: "0x".into(),
     }
 }
 
 fn fake_pub_inputs(recipient: &str, public_out: u64) -> PubInputsDto {
-    let p = PointDto {
-        x: "0".into(),
-        y: "0".into(),
-    };
     PubInputsDto {
         merkle_root: format!("0x{:0>64}", "0"),
         nullifier: array::from_fn(|i| format!("0x{:0>64}", i + 1)),
         out_cm: array::from_fn(|i| format!("0x{:0>64}", i + 10)),
         public_asset_id: 1,
-        public_in: 0,
         public_out,
-        in_cv: array::from_fn(|_| p.clone()),
-        out_cv: array::from_fn(|_| p.clone()),
-        out_cv_dep: array::from_fn(|_| p.clone()),
+        digest: "0".into(),
         recipient: recipient.to_string(),
         chain_id: 31337,
         payer: "0x0000000000000000000000000000000000000000".into(),
@@ -61,23 +55,18 @@ fn fake_pub_inputs(recipient: &str, public_out: u64) -> PubInputsDto {
 }
 
 fn fake_deposit(payer: &str, public_in: u64) -> DepositRequestDto {
-    let zero = format!("0x{:0>64}", "0");
     DepositRequestDto {
         chain_id: 31337,
         public_asset_id: 2,
         public_in,
         payer: payer.to_string(),
         recipient: "0x000000000000000000000000000000000000beef".into(),
-        out_cm: format!("0x{:0>64}", "5"),
-        cv_dep: [zero.clone(), zero.clone()],
-        rcv: zero.clone(),
+        inner: format!("0x{:0>64}", "5"),
         // The swap pays the relayer on its withdraw leg, so the B-note
         // deposit's fee leaf is a zero-value pad, which names no fee asset.
         fee_asset_id: 0,
         fee_in: 0,
-        fee_cm: format!("0x{:0>64}", "6"),
-        fee_cv_dep: [zero.clone(), zero.clone()],
-        fee_rcv: zero,
+        fee_inner: format!("0x{:0>64}", "6"),
     }
 }
 
@@ -100,7 +89,7 @@ fn fake_payload(wrapper: &str) -> SubmitSwapPayload {
             fee_aux_d: one_aux(),
             refund_d: DepositRequestDto {
                 public_asset_id: 1,
-                out_cm: format!("0x{:0>64}", "7"),
+                inner: format!("0x{:0>64}", "7"),
                 ..fake_deposit(wrapper, 995)
             },
             refund_aux_d: one_aux(),
@@ -149,10 +138,25 @@ fn validate_accepts_well_formed_payload() {
     checked(|_| {}).unwrap();
 }
 
+/// The flush that materialises the escrow reverts `CoefficientOutOfField` on
+/// either word, so the swap would leave a deposit nobody can flush.
 #[test]
-fn validate_rejects_public_in_nonzero() {
-    let err = checked(|p| p.pub_inputs.public_in = 1).unwrap_err();
-    assert!(matches!(err, AppError::BadRequest(_)));
+fn validate_rejects_a_deposit_inner_that_is_not_a_field_element() {
+    let modulus = crate::domain::field::BN254_R.to_string();
+    type Mutation = fn(&mut SubmitSwapPayload, String);
+    let cases: [(&str, Mutation); 4] = [
+        ("deposit_d.inner", |p, v| p.swap.deposit_d.inner = v),
+        ("deposit_d.feeInner", |p, v| p.swap.deposit_d.fee_inner = v),
+        ("refund_d.inner", |p, v| p.swap.refund_d.inner = v),
+        ("refund_d.feeInner", |p, v| p.swap.refund_d.fee_inner = v),
+    ];
+    for (field, mutate) in cases {
+        let err = checked(|p| mutate(p, modulus.clone())).unwrap_err();
+        assert!(
+            matches!(&err, AppError::BadRequest(m) if m.contains(field)),
+            "{field}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -190,15 +194,18 @@ fn validate_refund_to_refuses_zero_bundler_or_wrapper() {
     }
 }
 
-/// Pinned in `contracts/test` against `SwapWrapper._intentHash`, so the two
-/// encodings cannot drift apart unnoticed.
+/// `SwapWrapperBindingTest.INTENT_VECTOR`: pinned in `contracts/test` against
+/// `SwapWrapper._intentHash` and in the SDK against `swapIntentHash`, so the
+/// three encodings cannot drift apart unnoticed.
 #[test]
 fn intent_hash_matches_the_solidity_vector() {
     let a = |n: u64| Address::left_padding_from(&n.to_be_bytes());
     let u = U256::from;
-    let aux = |base: u64, ct: &[u8]| IMasp::OutputAux {
+    let aux = |base: u64, q: u64, ct: &[u8]| IMasp::OutputAux {
         clueRx: u(base),
         clueRy: u(base + 1),
+        clueQx: u(q),
+        clueQy: u(q + 1),
         ephPubX: u(base + 2),
         ephPubY: u(base + 3),
         ciphertext: ct.to_vec().into(),
@@ -217,39 +224,31 @@ fn intent_hash_matches_the_solidity_vector() {
             publicIn: 990,
             payer: a(0x5A5A),
             recipient: a(0xBEEF),
-            outCm: b32(1),
-            cvDep: [u(2u64), u(3u64)],
-            rcv: u(4u64),
+            inner: b32(1),
             feeAssetId: 2,
             feeIn: 5,
-            feeCm: b32(6),
-            feeCvDep: [u(7u64), u(8u64)],
-            feeRcv: u(9u64),
+            feeInner: b32(6),
         },
-        aux_d: aux(10, &[0x01, 0x02]),
-        fee_aux_d: aux(14, &[0x03, 0x04, 0x05]),
+        aux_d: aux(10, 40, &[0x01, 0x02]),
+        fee_aux_d: aux(14, 42, &[0x03, 0x04, 0x05]),
         refund_d: IMasp::DepositRequest {
             chainId: u(31337u64),
             publicAssetId: 1,
             publicIn: 995,
             payer: a(0x5A5A),
             recipient: a(0xBEEF),
-            outCm: b32(0x12),
-            cvDep: [u(19u64), u(20u64)],
-            rcv: u(21u64),
+            inner: b32(0x12),
             feeAssetId: 1,
             feeIn: 22,
-            feeCm: b32(0x17),
-            feeCvDep: [u(24u64), u(25u64)],
-            feeRcv: u(26u64),
+            feeInner: b32(0x17),
         },
-        refund_aux_d: aux(27, &[0x06]),
-        refund_fee_aux_d: aux(31, &[0x07, 0x08]),
+        refund_aux_d: aux(27, 44, &[0x06]),
+        refund_fee_aux_d: aux(31, 46, &[0x07, 0x08]),
         ..build_swap_args(&fake_payload(&wrapper().to_string())).unwrap()
     };
     assert_eq!(
         swap_intent_hash(&args).to_string(),
-        "17537988237215357429810858075676193989150518723851377084809783452071645726238"
+        "20568246496086653981650821090611381092259931261982909181487420188972474156030"
     );
 }
 

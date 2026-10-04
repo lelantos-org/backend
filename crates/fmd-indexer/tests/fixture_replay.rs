@@ -1,14 +1,16 @@
-//! Fixture-replay tests for fmd-indexer against the `RootAdvanced` and
-//! `NotePayload` ABI.
+//! Fixture-replay tests for fmd-indexer against the `RootAdvanced`,
+//! `NotePayload` and deposit ABI.
 
 use alloy::primitives::{B256, Bytes, LogData, U256};
 use alloy::rpc::types::eth::Log;
 use alloy::sol_types::SolEvent;
 use ark_ed_on_bn254::Fq;
 use ark_ff::{BigInteger, PrimeField};
-use chain_types::abi::{NotePayload, NullifierConsumed, RootAdvanced};
+use chain_types::abi::{
+    DepositEscrowed, DepositFlushed, NotePayload, NullifierConsumed, RootAdvanced,
+};
 use crypto::clue;
-use crypto::tree::{DEPTH, Field, MerkleTree, leaf_hash};
+use crypto::tree::{DEPTH, Field, MerkleTree};
 use database::advisory::ChainLock;
 use database::{CursorRepo, PostgresCursorRepo, UpsertCursor};
 use diesel::prelude::*;
@@ -154,8 +156,6 @@ fn note_payload_log_raw(
         ephPubX: U256::from(0u64),
         ephPubY: U256::from(0u64),
         ciphertext: Bytes::from(ciphertext),
-        cvDepX: U256::from(0u64),
-        cvDepY: U256::from(0u64),
     };
     build_log(ev.encode_log_data(), block_n, tx_byte, log_idx)
 }
@@ -775,16 +775,24 @@ async fn cursor_block_of(pool: &database::DbPool, name: &str, chain_id: i64) -> 
         .1
 }
 
-async fn leaf_indices(pool: &database::DbPool, chain_id: i64) -> Vec<i64> {
+async fn leaf_cms(pool: &database::DbPool, chain_id: i64) -> Vec<(i64, Vec<u8>)> {
     use database::schema::notes;
     let mut conn = pool.get().await.unwrap();
     notes::table
         .filter(notes::chain_id.eq(chain_id))
         .order(notes::leaf_index.asc())
-        .select(notes::leaf_index)
+        .select((notes::leaf_index, notes::cm))
         .load(&mut conn)
         .await
         .unwrap()
+}
+
+async fn leaf_indices(pool: &database::DbPool, chain_id: i64) -> Vec<i64> {
+    leaf_cms(pool, chain_id)
+        .await
+        .into_iter()
+        .map(|(leaf_index, _)| leaf_index)
+        .collect()
 }
 
 /// The chain's stored tree state, or `None` before any leaf lands.
@@ -793,12 +801,6 @@ async fn tree_state_of(pool: &database::DbPool, chain_id: i64) -> Option<TreeSta
     TreeStateRepo::load(&PostgresTreeStateRepo::new(pool.clone()), chain_id)
         .await
         .unwrap()
-}
-
-/// The leaf a `note_payload_log` with this `cm_byte` commits: the fixtures leave
-/// both `cvDep` coordinates zero.
-fn expected_leaf(cm_byte: u8) -> Field {
-    leaf_hash(&[cm_byte; 32], &[0u8; 32], &[0u8; 32]).unwrap()
 }
 
 async fn delete_tree_state(pool: &database::DbPool, chain_id: i64) {
@@ -842,10 +844,9 @@ async fn insert_tree_advance(
 ///
 /// An independent oracle: the indexer advances a `Frontier`, so a bug shared by
 /// both would have to be in code `crypto`'s differential test already covers.
-fn expected_root(cm_bytes: &[u8]) -> Vec<u8> {
+fn expected_root(leaves: impl IntoIterator<Item = Field>) -> Vec<u8> {
     let mut tree = MerkleTree::new(DEPTH).unwrap();
-    tree.extend(cm_bytes.iter().copied().map(expected_leaf))
-        .unwrap();
+    tree.extend(leaves).unwrap();
     tree.root().unwrap().to_vec()
 }
 
@@ -915,12 +916,12 @@ async fn an_unusable_leaf_leaves_a_hole_instead_of_wedging_the_chain() {
     assert_eq!(state.leaf_count, 4, "the hole still occupies a leaf");
     assert_eq!(
         state.root,
-        expected_root(&[0x60, 0x61, 0x70, 0x71]),
+        expected_root([0x60, 0x61, 0x70, 0x71].map(|cm| [cm; 32])),
         "root must commit to the unusable leaf, in its own position"
     );
     assert_ne!(
         state.root,
-        expected_root(&[0x60, 0x70, 0x71]),
+        expected_root([0x60, 0x70, 0x71].map(|cm| [cm; 32])),
         "skipping the hole would shift every later leaf"
     );
 }
@@ -949,7 +950,7 @@ async fn replaying_a_tick_leaves_the_tree_where_it_was() {
     let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
     let first = tree_state_of(&pool, CHAIN_A).await.expect("written");
     assert_eq!(first.leaf_count, 2);
-    assert_eq!(first.root, expected_root(&[0x60, 0x61]));
+    assert_eq!(first.root, expected_root([0x60, 0x61].map(|cm| [cm; 32])));
 
     // Rewind the cursor the way `reorg::apply_pending` does and replay. The notes
     // come back through ON CONFLICT DO NOTHING; the tree has to skip them itself.
@@ -1006,7 +1007,14 @@ async fn a_chain_with_no_stored_tree_backfills_from_notes() {
 
     // The backfill verifies itself against the chain's published root, so
     // `tree_advances` has to carry the real one for the first two leaves.
-    insert_tree_advance(&pool, CHAIN_A, 0, 2, &expected_root(&[0x60, 0x61])).await;
+    insert_tree_advance(
+        &pool,
+        CHAIN_A,
+        0,
+        2,
+        &expected_root([0x60, 0x61].map(|cm| [cm; 32])),
+    )
+    .await;
 
     insert_tx(
         &pool,
@@ -1026,7 +1034,10 @@ async fn a_chain_with_no_stored_tree_backfills_from_notes() {
         .await
         .expect("backfilled and advanced");
     assert_eq!(state.leaf_count, 4, "history plus this tick");
-    assert_eq!(state.root, expected_root(&[0x60, 0x61, 0x70, 0x71]));
+    assert_eq!(
+        state.root,
+        expected_root([0x60, 0x61, 0x70, 0x71].map(|cm| [cm; 32]))
+    );
 }
 
 /// A backfill that disagrees with the chain must not be stored. `notes` alone
@@ -1120,7 +1131,10 @@ async fn the_tree_advances_across_ticks() {
 
     let state = tree_state_of(&pool, CHAIN_A).await.expect("written");
     assert_eq!(state.leaf_count, 4);
-    assert_eq!(state.root, expected_root(&[0x60, 0x61, 0x70, 0x71]));
+    assert_eq!(
+        state.root,
+        expected_root([0x60, 0x61, 0x70, 0x71].map(|cm| [cm; 32]))
+    );
 }
 
 #[tokio::test]
@@ -1223,7 +1237,10 @@ async fn a_bundle_with_several_roots_commits_across_a_cut_window() {
         (0..6).collect::<Vec<_>>()
     );
     let state = tree_state_of(&pool, CHAIN_A).await.expect("prefix folded");
-    assert_eq!(state.root, expected_root(&cms[..6]));
+    assert_eq!(
+        state.root,
+        expected_root(cms[..6].iter().map(|&cm| [cm; 32]))
+    );
 
     // The rest arrives as a transaction of its own, numbered from its root.
     let _ = consume.tick_chain(CHAIN_A, 11).await.unwrap();
@@ -1234,7 +1251,209 @@ async fn a_bundle_with_several_roots_commits_across_a_cut_window() {
     assert_eq!(seqs(&pool, CHAIN_A).await, (0..8).collect::<Vec<_>>());
     let state = tree_state_of(&pool, CHAIN_A).await.expect("written");
     assert_eq!(state.leaf_count, 12);
-    assert_eq!(state.root, expected_root(&cms));
+    assert_eq!(state.root, expected_root(cms.iter().map(|&cm| [cm; 32])));
+}
+
+/// One deposit slot of `tests/vectors/tree_update_batch_8.json`, the vendored
+/// `circuits/vectors/tree-update-batch-8.json`: the `inner` its `cms` word
+/// carries, the public `(leafAsset, leafPublicIn)` beside it, and the leaf the
+/// circuit inserts.
+#[derive(Debug)]
+struct DepositLeaf {
+    asset: u64,
+    public_in: u64,
+    inner: B256,
+    leaf: B256,
+}
+
+/// The two deposit slots of vector `odd-three-leaf-batch`.
+fn vector_deposits() -> [DepositLeaf; 2] {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/vectors/tree_update_batch_8.json"
+    ))
+    .expect("read tests/vectors/tree_update_batch_8.json");
+    let file: serde_json::Value =
+        serde_json::from_str(&text).expect("parse tree_update_batch_8.json");
+    let vector = file["vectors"]
+        .as_array()
+        .and_then(|vectors| vectors.iter().find(|v| v["name"] == "odd-three-leaf-batch"))
+        .expect("vector odd-three-leaf-batch");
+    let deposits: Vec<DepositLeaf> = vector["intermediates"]["leaves"]
+        .as_array()
+        .expect("intermediates.leaves")
+        .iter()
+        .filter(|leaf| leaf["isDeposit"] == 1)
+        .map(|leaf| {
+            let dec = |key: &str| {
+                leaf[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{key}: decimal string"))
+            };
+            DepositLeaf {
+                asset: dec("leafAsset").parse().expect("leafAsset"),
+                public_in: dec("leafPublicIn").parse().expect("leafPublicIn"),
+                inner: word(dec("cms")),
+                leaf: word(dec("leaf")),
+            }
+        })
+        .collect();
+    deposits.try_into().expect("two deposit slots")
+}
+
+fn word(dec: &str) -> B256 {
+    B256::from(U256::from_str_radix(dec, 10).expect("decimal field element"))
+}
+
+/// The escrow that opens deposit `id`: `principal` is the depositor's note and
+/// `fee` the note paying whoever flushes it.
+fn deposit_escrowed_log(
+    id: u64,
+    principal: &DepositLeaf,
+    fee: &DepositLeaf,
+    block_n: u64,
+    tx_byte: u8,
+    log_idx: u64,
+) -> Log {
+    let (clue_rx, clue_ry) = gamma3_r();
+    let mut ciphertext = GAMMA3_BITS_LE.to_be_bytes().to_vec();
+    ciphertext.extend_from_slice(&[0u8; 8]);
+    let ev = DepositEscrowed {
+        id: U256::from(id),
+        payer: Default::default(),
+        recipient: Default::default(),
+        publicAssetId: principal.asset,
+        publicIn: principal.public_in,
+        feeBpsAtSubmit: 0,
+        inner: principal.inner,
+        clueRx: clue_rx,
+        clueRy: clue_ry,
+        ephPubX: U256::ZERO,
+        ephPubY: U256::ZERO,
+        ciphertext: Bytes::from(ciphertext.clone()),
+        feeAssetId: fee.asset,
+        feeIn: fee.public_in,
+        feeInner: fee.inner,
+        feeClueRx: clue_rx,
+        feeClueRy: clue_ry,
+        feeEphPubX: U256::ZERO,
+        feeEphPubY: U256::ZERO,
+        feeCiphertext: Bytes::from(ciphertext),
+        pulled: U256::ZERO,
+    };
+    build_log(ev.encode_log_data(), block_n, tx_byte, log_idx)
+}
+
+/// The flush of deposit `id`. The indexer matches it by `id` and does not read
+/// `inner`.
+fn deposit_flushed_log(id: u64, block_n: u64, tx_byte: u8, log_idx: u64) -> Log {
+    let ev = DepositFlushed {
+        id: U256::from(id),
+        inner: B256::repeat_byte(0x11),
+    };
+    build_log(ev.encode_log_data(), block_n, tx_byte, log_idx)
+}
+
+/// A deposit's events carry `inner`, never its leaf. What lands in `notes.cm`
+/// and in the tree must be the leaf the batch circuit builds from the escrow's
+/// public asset and amount.
+#[tokio::test]
+async fn a_flushed_deposit_stores_the_leaves_the_circuit_inserts() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let [principal, fee] = vector_deposits();
+
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_escrowed_log(7, &principal, &fee, 100, 0x58, 0),
+        EventKind::DepositEscrowed,
+    )
+    .await;
+    // `flushBatch` emits the deposit ahead of the root that numbers it.
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_flushed_log(7, 101, 0x59, 0),
+        EventKind::DepositFlushed,
+    )
+    .await;
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &root_advanced_log(0, 2, 101, 0x59, 1),
+        EventKind::RootAdvanced,
+    )
+    .await;
+
+    let consume = build_consume(&pool);
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+
+    let leaves = [principal.leaf.0, fee.leaf.0];
+    assert_eq!(
+        leaf_cms(&pool, CHAIN_A).await,
+        vec![(0, leaves[0].to_vec()), (1, leaves[1].to_vec())],
+        "principal then fee note, each under its published leaf"
+    );
+
+    let state = tree_state_of(&pool, CHAIN_A).await.expect("written");
+    assert_eq!(state.leaf_count, 2);
+    assert_eq!(state.root, expected_root(leaves));
+}
+
+/// The pool accepts a deposit repeating an earlier `(asset, value, inner)`, and
+/// its leaves repeat the earlier ones. Each is a row at its own position: a
+/// dropped one would leave a gap in `leaf_index`, which the commitment feed
+/// cannot serve.
+#[tokio::test]
+async fn a_repeated_deposit_stores_a_note_per_leaf() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+    let [principal, fee] = vector_deposits();
+
+    for (id, log_idx) in [(7, 0), (8, 1)] {
+        insert_log(
+            &pool,
+            CHAIN_A,
+            &deposit_escrowed_log(id, &principal, &fee, 100, 0x58, log_idx),
+            EventKind::DepositEscrowed,
+        )
+        .await;
+    }
+    for (id, log_idx) in [(7, 0), (8, 1)] {
+        insert_log(
+            &pool,
+            CHAIN_A,
+            &deposit_flushed_log(id, 101, 0x59, log_idx),
+            EventKind::DepositFlushed,
+        )
+        .await;
+    }
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &root_advanced_log(0, 4, 101, 0x59, 2),
+        EventKind::RootAdvanced,
+    )
+    .await;
+
+    let consume = build_consume(&pool);
+    let _ = consume.tick_chain(CHAIN_A, 100).await.unwrap();
+
+    let leaves = [principal.leaf.0, fee.leaf.0, principal.leaf.0, fee.leaf.0];
+    assert_eq!(
+        leaf_cms(&pool, CHAIN_A).await,
+        leaves
+            .iter()
+            .enumerate()
+            .map(|(i, leaf)| (i as i64, leaf.to_vec()))
+            .collect::<Vec<_>>(),
+        "four dense leaves, the second deposit's repeating the first's"
+    );
+
+    let state = tree_state_of(&pool, CHAIN_A).await.expect("written");
+    assert_eq!(state.leaf_count, 4);
+    assert_eq!(state.root, expected_root(leaves));
 }
 
 #[tokio::test]

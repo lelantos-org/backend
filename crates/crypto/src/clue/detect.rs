@@ -22,9 +22,9 @@ pub const TAG_FMD_BIT: u64 = 8;
 
 /// Compute the per-component `bit_i` for a given clue R + shared secret S_i.
 ///
-/// Inputs are circomlib Baby-Jubjub coordinates. The in-circuit `ClueCheck`
-/// template runs the same Poseidon over the same six field elements, so witness
-/// derivation matches receiver-side detection byte for byte.
+/// Inputs are circomlib Baby-Jubjub coordinates. The sender SDK runs the same
+/// Poseidon over the same six field elements off-circuit, so flagging matches
+/// detection bit for bit.
 fn shared_bit(r: &CircomPoint, i: u32, s: &CircomPoint) -> u8 {
     let inputs = [
         Fq::from(TAG_FMD_BIT),

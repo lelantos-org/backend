@@ -382,24 +382,6 @@ fn frontier_rejects_leaves_past_capacity() {
 }
 
 #[test]
-fn leaf_hash_matches_a_direct_poseidon_fold() {
-    use ark_ed_on_bn254::Fq;
-    let cm = leaf(0xc0ffee);
-    let x = leaf(7);
-    let y = leaf(9);
-    let expected = super::hash::fq_to_be(
-        crate::poseidon::hash(&[
-            Fq::from(TAG_LEAF),
-            super::hash::be_to_fq(&cm),
-            super::hash::be_to_fq(&x),
-            super::hash::be_to_fq(&y),
-        ])
-        .unwrap(),
-    );
-    assert_eq!(leaf_hash(&cm, &x, &y).unwrap(), expected);
-}
-
-#[test]
 fn frontier_codec_round_trips() {
     const DEPTH: usize = 4;
     let mut f = Frontier::new(DEPTH).expect("new");

@@ -101,8 +101,6 @@ fn note_payload_roundtrip() {
         ephPubX: U256::from(333u64),
         ephPubY: U256::from(444u64),
         ciphertext: ct.clone().into(),
-        cvDepX: U256::from(1001u64),
-        cvDepY: U256::from(1002u64),
     };
     match &roundtrip(EventKind::NoteCreated, &ev) {
         DecodedEvent::NoteCreated {
@@ -112,8 +110,6 @@ fn note_payload_roundtrip() {
             eph_pub_x,
             eph_pub_y,
             ciphertext,
-            cv_dep_x,
-            cv_dep_y,
         } => {
             assert_eq!(*c, cm);
             assert_eq!(*clue_rx, U256::from(111u64));
@@ -121,8 +117,6 @@ fn note_payload_roundtrip() {
             assert_eq!(*eph_pub_x, U256::from(333u64));
             assert_eq!(*eph_pub_y, U256::from(444u64));
             assert_eq!(*ciphertext, ct);
-            assert_eq!(*cv_dep_x, U256::from(1001u64));
-            assert_eq!(*cv_dep_y, U256::from(1002u64));
         }
         _ => panic!("wrong variant"),
     }
@@ -132,10 +126,13 @@ fn note_payload_roundtrip() {
 fn deposit_escrowed_roundtrip() {
     let payer = Address::repeat_byte(0x01);
     let recipient = Address::repeat_byte(0x02);
-    let cm = B256::repeat_byte(0xef);
+    let inner_v = B256::repeat_byte(0xef);
     let ct = vec![0x00, 0x09, 0x77, 0x88];
-    let fee_cm_v = B256::repeat_byte(0xab);
+    let fee_inner_v = B256::repeat_byte(0xab);
     let fee_ct = vec![0x11, 0x22, 0x33];
+    // A yield escrow's refund cap, in token base units: wider than `u128`, so a
+    // decoder that narrowed the word would not survive this.
+    let pulled_v = (U256::from(1u8) << 200) + U256::from(4001u64);
 
     let ev = DepositEscrowed {
         id: U256::from(9u64),
@@ -144,10 +141,7 @@ fn deposit_escrowed_roundtrip() {
         publicAssetId: 3,
         publicIn: 250_000,
         feeBpsAtSubmit: 30,
-        cm,
-        cvDepX: U256::from(2001u64),
-        cvDepY: U256::from(2002u64),
-        rcv: U256::from(2003u64),
+        inner: inner_v,
         clueRx: U256::from(11u64),
         clueRy: U256::from(12u64),
         ephPubX: U256::from(13u64),
@@ -155,65 +149,51 @@ fn deposit_escrowed_roundtrip() {
         ciphertext: ct.clone().into(),
         feeAssetId: 7,
         feeIn: 500,
-        feeCm: fee_cm_v,
-        feeCvDepX: U256::from(3001u64),
-        feeCvDepY: U256::from(3002u64),
-        feeRcv: U256::from(3003u64),
+        feeInner: fee_inner_v,
         feeClueRx: U256::from(21u64),
         feeClueRy: U256::from(22u64),
         feeEphPubX: U256::from(23u64),
         feeEphPubY: U256::from(24u64),
         feeCiphertext: fee_ct.clone().into(),
+        pulled: pulled_v,
     };
     match &roundtrip(EventKind::DepositEscrowed, &ev) {
         DecodedEvent::DepositEscrowed {
             id,
             payer: p,
             recipient: r,
-            public_asset_id,
-            public_in,
             fee_bps_at_submit,
-            cm: c,
-            cv_dep_x,
-            cv_dep_y,
-            rcv,
-            clue_rx,
-            clue_ry,
-            eph_pub_x,
-            eph_pub_y,
-            ciphertext,
+            note,
             fee,
+            pulled,
         } => {
             assert_eq!(*id, U256::from(9u64));
             assert_eq!(*p, payer);
             assert_eq!(*r, recipient);
-            assert_eq!(*public_asset_id, 3);
-            assert_eq!(*public_in, 250_000);
             assert_eq!(*fee_bps_at_submit, 30);
-            assert_eq!(*c, cm);
-            assert_eq!(*cv_dep_x, U256::from(2001u64));
-            assert_eq!(*cv_dep_y, U256::from(2002u64));
-            assert_eq!(*rcv, U256::from(2003u64));
-            assert_eq!(*clue_rx, U256::from(11u64));
-            assert_eq!(*clue_ry, U256::from(12u64));
-            assert_eq!(*eph_pub_x, U256::from(13u64));
-            assert_eq!(*eph_pub_y, U256::from(14u64));
-            assert_eq!(*ciphertext, ct);
+            assert_eq!(note.asset_id, 3);
+            assert_eq!(note.value, 250_000);
+            assert_eq!(note.inner, inner_v);
+            assert_eq!(note.clue_rx, U256::from(11u64));
+            assert_eq!(note.clue_ry, U256::from(12u64));
+            assert_eq!(note.eph_pub_x, U256::from(13u64));
+            assert_eq!(note.eph_pub_y, U256::from(14u64));
+            assert_eq!(note.ciphertext, ct);
             // The fee note must survive the round trip intact: it is digest
             // preimage, so one dropped field makes the deposit unflushable rather
             // than merely mispriced.
-            // Distinct from `public_asset_id` (3): a cross-asset fee note.
-            assert_eq!(fee.fee_asset_id, 7);
-            assert_eq!(fee.fee_in, 500);
-            assert_eq!(fee.cm, fee_cm_v);
-            assert_eq!(fee.cv_dep_x, U256::from(3001u64));
-            assert_eq!(fee.cv_dep_y, U256::from(3002u64));
-            assert_eq!(fee.rcv, U256::from(3003u64));
+            // Distinct from the depositor's asset (3): a cross-asset fee note.
+            assert_eq!(fee.asset_id, 7);
+            assert_eq!(fee.value, 500);
+            assert_eq!(fee.inner, fee_inner_v);
             assert_eq!(fee.clue_rx, U256::from(21u64));
             assert_eq!(fee.clue_ry, U256::from(22u64));
             assert_eq!(fee.eph_pub_x, U256::from(23u64));
             assert_eq!(fee.eph_pub_y, U256::from(24u64));
             assert_eq!(fee.ciphertext, fee_ct);
+            // The last head word, past both `bytes` offsets. Digest preimage
+            // too: a flush replaying any other value reverts `DigestMismatch`.
+            assert_eq!(*pulled, pulled_v);
         }
         _ => panic!("wrong variant"),
     }
@@ -251,15 +231,15 @@ fn deposit_canceled_roundtrip() {
 
 #[test]
 fn deposit_flushed_roundtrip() {
-    let cm = B256::repeat_byte(0x5a);
+    let inner_v = B256::repeat_byte(0x5a);
     let ev = DepositFlushed {
         id: U256::from(4u64),
-        cm,
+        inner: inner_v,
     };
     match &roundtrip(EventKind::DepositFlushed, &ev) {
-        DecodedEvent::DepositFlushed { id, cm: c } => {
+        DecodedEvent::DepositFlushed { id, inner } => {
             assert_eq!(*id, U256::from(4u64));
-            assert_eq!(*c, cm);
+            assert_eq!(*inner, inner_v);
         }
         _ => panic!("wrong variant"),
     }

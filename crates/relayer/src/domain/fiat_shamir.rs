@@ -1,9 +1,10 @@
-//! Fiat-Shamir challenge derivation for `tree_update_batch.circom`.
+//! Fiat-Shamir compression for `tree_update_batch.circom`.
 //!
-//! Mirrors `contracts/src/libs/PubInputs.sol :: compress(TreeUpdateBatch)` so the
-//! relayer feeds the prover the same `z` the contract derives from calldata.
-//! Every array is leaf-indexed. Coefficient layout, `4 + 6 * MAX_L_BATCH`
-//! entries:
+//! Mirrors `contracts/src/libs/PubInputs.sol :: compress(TreeUpdateBatch)`, and
+//! `compressSpend` for the batch a spend implies, so the relayer feeds the
+//! prover the `z` the contract derives from calldata and puts in calldata the
+//! `digest` the circuit outputs. Every array is leaf-indexed. Coefficient
+//! layout, `4 + 4 * MAX_L_BATCH` words:
 //!
 //! ```text
 //! [0]                            oldRoot
@@ -11,233 +12,132 @@
 //! [2]                            startIndex
 //! [3]                            actualCount
 //! [4 .. 3 + MAX_L]               cms[0 .. MAX_L-1]
-//! [4 + MAX_L .. 3 + 3*MAX_L]     cvDeps flattened (x0, y0, x1, y1, …)
-//! [4 + 3*MAX_L .. 3 + 4*MAX_L]   leafAsset[0 .. MAX_L-1]
-//! [4 + 4*MAX_L .. 3 + 5*MAX_L]   leafPublicIn[0 .. MAX_L-1]
-//! [4 + 5*MAX_L .. 3 + 6*MAX_L]   isDeposit[0 .. MAX_L-1]
+//! [4 + MAX_L .. 3 + 2*MAX_L]     leafAsset[0 .. MAX_L-1]
+//! [4 + 2*MAX_L .. 3 + 3*MAX_L]   leafPublicIn[0 .. MAX_L-1]
+//! [4 + 3*MAX_L .. 3 + 4*MAX_L]   isDeposit[0 .. MAX_L-1]
 //! ```
+//!
+//! `digest` is the circuit's `CoeffDigest` of those words
+//! (`crypto::poseidon::coeff_digest`), and
+//! `z = keccak256(abi.encode(coefficients ++ [digest])) mod r`.
 
 use crate::domain::batch::{MAX_L_BATCH, PaddedBatch};
+use crate::domain::error::{AppError, AppResult};
 use crate::domain::field::BN254_R;
 use alloy::primitives::{U256, keccak256};
 use alloy::sol_types::SolValue;
+use crypto::poseidon;
 use crypto::tree::Field;
 
-pub fn compute_z(
+/// Words the batch polynomial is evaluated over, `PubInputs.BATCH_COEFFS`.
+pub const BATCH_COEFFS: usize = 4 + 4 * MAX_L_BATCH;
+
+/// What the relayer derives from a batch's coefficients: the digest word that
+/// goes in calldata (`TreeUpdateBatch.digest`, `SpendTree.digest`) and the
+/// challenge the prover takes as `z`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchChallenge {
+    pub digest: U256,
+    pub z: U256,
+}
+
+impl BatchChallenge {
+    /// The digest and the challenge a batch proof publishes: its decimal public
+    /// signals are `[y, digest, z]`. `None` for any other shape.
+    pub fn from_public_signals(signals: &[String]) -> Option<Self> {
+        let [_y, digest, z] = signals else {
+            return None;
+        };
+        Some(Self {
+            digest: U256::from_str_radix(digest, 10).ok()?,
+            z: U256::from_str_radix(z, 10).ok()?,
+        })
+    }
+}
+
+/// The digest and the challenge of `batch` advancing the tree from `old_root`
+/// to `new_root` at `start_index`.
+///
+/// Fails on a coefficient at or above the field modulus, which has no digest.
+pub fn compress(
     old_root: &Field,
     new_root: &Field,
     start_index: u64,
     batch: &PaddedBatch,
-) -> String {
-    let mut coeffs: Vec<U256> = Vec::with_capacity(4 + 6 * MAX_L_BATCH);
+) -> AppResult<BatchChallenge> {
+    let mut words = coefficients(old_root, new_root, start_index, batch);
+    let bytes: Vec<Field> = words.iter().map(U256::to_be_bytes).collect();
+    let digest = poseidon::coeff_digest(&bytes)
+        .map(U256::from_be_bytes)
+        .map_err(|e| AppError::Internal(format!("coefficient digest: {e}")))?;
+    words.push(digest);
+    let z = U256::from_be_bytes(keccak256(words.abi_encode()).0) % *BN254_R;
+    Ok(BatchChallenge { digest, z })
+}
+
+/// The coefficient vector, in the order the module doc lays out.
+fn coefficients(
+    old_root: &Field,
+    new_root: &Field,
+    start_index: u64,
+    batch: &PaddedBatch,
+) -> Vec<U256> {
+    // One more than the coefficients: `compress` appends the digest word.
+    let mut coeffs: Vec<U256> = Vec::with_capacity(BATCH_COEFFS + 1);
     coeffs.push(U256::from_be_bytes(*old_root));
     coeffs.push(U256::from_be_bytes(*new_root));
     coeffs.push(U256::from(start_index));
     coeffs.push(U256::from(batch.actual_count));
     coeffs.extend(batch.cms.iter().map(|cm| U256::from_be_bytes(cm.0)));
-    coeffs.extend(batch.cv_deps.iter().flatten().copied());
     coeffs.extend(batch.leaf_asset.iter().copied().map(U256::from));
     coeffs.extend(batch.leaf_public_in.iter().copied().map(U256::from));
     coeffs.extend(batch.is_deposit.iter().copied().map(U256::from));
-    debug_assert_eq!(coeffs.len(), 4 + 6 * MAX_L_BATCH);
-
-    let z = U256::from_be_bytes(keccak256(coeffs.abi_encode()).0) % *BN254_R;
-    z.to_string()
+    debug_assert_eq!(coeffs.len(), BATCH_COEFFS);
+    coeffs
 }
 
 #[cfg(test)]
 mod tests {
-    //! Golden `z` vectors copied from
-    //! `circuits/vectors/tree-update-batch-4.json` (schema
-    //! `lelantos.circuits.vectors/1`, template `TreeUpdateBatch(10, 4)`).
-    //!
-    //! `compute_z` mirrors `PubInputs.compress(TreeUpdateBatch)`, and the circuit
-    //! Horner-evaluates the same coefficients at the same `z`. All three must
-    //! agree, so pinning the published vectors catches a layout drift that would
-    //! otherwise surface only on-chain: as `TreeUpdateRejected` on the flush path,
-    //! and as `ProofRejected` on a spend, whose two proofs the batched verifier
-    //! checks in one pairing and cannot attribute.
-    //!
-    //! Held as a table rather than one test per vector: the vectors are data
-    //! published by another repo, so re-syncing them is a diff of rows rather than
-    //! of code. `name` carries the identity into the failure message, and the
-    //! array's declared length makes a row dropped in a re-sync a compile error
-    //! rather than a shorter loop.
-
     use super::*;
-    use alloy::primitives::FixedBytes;
+    use crate::domain::batch_vectors;
 
-    /// One published vector, in the JSON's own decimal-string form so a row can be
-    /// copied across without reformatting.
-    struct Vector {
-        name: &'static str,
-        old_root: &'static str,
-        new_root: &'static str,
-        start_index: u64,
-        actual_count: u64,
-        cms: [&'static str; MAX_L_BATCH],
-        cv_deps: [[&'static str; 2]; MAX_L_BATCH],
-        leaf_asset: [u64; MAX_L_BATCH],
-        leaf_public_in: [u64; MAX_L_BATCH],
-        is_deposit: [u8; MAX_L_BATCH],
-        z: &'static str,
-    }
-
-    fn u256(dec: &str) -> U256 {
-        U256::from_str_radix(dec, 10).expect("decimal field element")
-    }
-
-    fn field(dec: &str) -> Field {
-        u256(dec).to_be_bytes()
-    }
-
-    impl Vector {
-        /// The batch the relayer would have built for this vector.
-        fn batch(&self) -> PaddedBatch {
-            PaddedBatch {
-                cms: self.cms.map(|d| FixedBytes::<32>::from(field(d))),
-                cv_deps: self.cv_deps.map(|p| [u256(p[0]), u256(p[1])]),
-                leaf_asset: self.leaf_asset,
-                leaf_public_in: self.leaf_public_in,
-                is_deposit: self.is_deposit,
-                // Private witness; the challenge never covers it.
-                rcv: [U256::ZERO; MAX_L_BATCH],
-                actual_count: self.actual_count,
-            }
-        }
-
-        fn check(&self) {
-            let z = compute_z(
-                &field(self.old_root),
-                &field(self.new_root),
-                self.start_index,
-                &self.batch(),
-            );
-            assert_eq!(z, self.z, "{}", self.name);
-        }
-    }
-
-    const VECTORS: [Vector; 3] = [
-        // One deposit leaf into an empty tree; per-leaf binding active.
-        Vector {
-            name: "single-deposit-empty-tree",
-            old_root: "13105024820937039918253549408468725512672689423801512358804472101234041165599",
-            new_root: "13145627263849471992863663744996991391005521891999992253737199727586609867422",
-            start_index: 0,
-            actual_count: 1,
-            cms: [
-                "1353326364211883747664361316770613763974263049855355126850897878619266451850",
-                "0",
-                "0",
-                "0",
-                "0",
-                "0",
-                "0",
-                "0",
-            ],
-            cv_deps: [
-                [
-                    "14319940179928203678511201376905677924523897915598426125606239687477518800244",
-                    "8047559278102977913200933481580879644121322180328429716633762344606343665242",
-                ],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-            ],
-            leaf_asset: [7, 0, 0, 0, 0, 0, 0, 0],
-            leaf_public_in: [1000, 0, 0, 0, 0, 0, 0, 0],
-            is_deposit: [1, 0, 0, 0, 0, 0, 0, 0],
-            z: "18741374304954610970662578905130852662904665073279473139894545206102618667545",
-        },
-        // Three leaves — the odd count a 3-output transact bundle produces.
-        Vector {
-            name: "odd-three-leaf-batch",
-            old_root: "13105024820937039918253549408468725512672689423801512358804472101234041165599",
-            new_root: "21293132336922364791482198806210404627412927005563458029331061771499123310339",
-            start_index: 0,
-            actual_count: 3,
-            cms: [
-                "1951742967319165803530964451547598624285840444203806646147021883492439581115",
-                "19012133309391560335674557331482321887540911804271599306674289147830016117931",
-                "21626009417826109968351082352763953063437352730508107439663320624509030242742",
-                "0",
-                "0",
-                "0",
-                "0",
-                "0",
-            ],
-            cv_deps: [
-                [
-                    "13441643379034571655297438153911968311912066450823199808881616742788634694445",
-                    "19857791822520468805879401469319430525694186493029692393325047521057511793125",
-                ],
-                [
-                    "172184820202288636796606109394753434844894931468978803359234470296489320519",
-                    "19929202248821796728182855623466572114254433864320370993374218539398216568798",
-                ],
-                [
-                    "3232673491275830172697526198179687447807386226683463004658599168867972738030",
-                    "21101527770759580632635866186811689111475176968401354171953005562139633329171",
-                ],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-            ],
-            leaf_asset: [7, 0, 9, 0, 0, 0, 0, 0],
-            leaf_public_in: [10, 0, 30, 0, 0, 0, 0, 0],
-            is_deposit: [1, 0, 1, 0, 0, 0, 0, 0],
-            z: "7268399132524396177994278685979975037287147852280684397803432795392724044128",
-        },
-        // Deposit and spend leaves in one batch at a non-zero start index.
-        Vector {
-            name: "mixed-batch-nonzero-start",
-            old_root: "4922016106583985452803270088436964452358441950162643548912630048541964107803",
-            new_root: "17944405124087016892804890906292595150291108817688750992184830956876903774173",
-            start_index: 5,
-            actual_count: 2,
-            cms: [
-                "10281311150437369658962254566811096262498888568221979102702155486735590083785",
-                "3156928210729585595544303566872776843119585788599500213068457138534823449031",
-                "0",
-                "0",
-                "0",
-                "0",
-                "0",
-                "0",
-            ],
-            cv_deps: [
-                [
-                    "11420273972908799614402126845268278990431721906512074430938874970301015055718",
-                    "10663703070210755634453872246035201458645451032689953160099224485747624683650",
-                ],
-                [
-                    "1197526153745630025589416977751190632562661088387468230272852477653671502235",
-                    "85499577431801573926957493556646934019004328713001728998230908293354264500",
-                ],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-                ["0", "0"],
-            ],
-            leaf_asset: [7, 0, 0, 0, 0, 0, 0, 0],
-            leaf_public_in: [42, 0, 0, 0, 0, 0, 0, 0],
-            is_deposit: [1, 0, 0, 0, 0, 0, 0, 0],
-            z: "4754706569880279961153418121811710515042195784050118243649949755624262394818",
-        },
-    ];
-
+    /// `compress` mirrors `PubInputs.compress(TreeUpdateBatch)`, and the circuit
+    /// commits to the same coefficients and Horner-evaluates them at the same
+    /// `z`. All three must agree, so pinning the published vectors catches a
+    /// layout drift that would otherwise surface only on-chain: as
+    /// `TreeUpdateRejected` on the flush path, and as `ProofRejected` on a spend,
+    /// whose two proofs the batched verifier checks in one pairing and cannot
+    /// attribute.
     #[test]
-    fn every_published_vector_matches_its_z() {
-        for v in &VECTORS {
-            v.check();
+    fn every_published_vector_matches_its_digest_and_z() {
+        for v in batch_vectors::load() {
+            let got = compress(&v.old_root, &v.new_root, v.start_index, &v.batch)
+                .unwrap_or_else(|e| panic!("{}: {e}", v.name));
+            assert_eq!(got.digest, v.digest, "{} digest", v.name);
+            assert_eq!(got.z, v.z, "{} z", v.name);
         }
+    }
+
+    /// A coefficient at or above the modulus has no digest: the contract reverts
+    /// `CoefficientOutOfField` on it, so nothing is derived from it here either.
+    #[test]
+    fn a_non_canonical_coefficient_has_no_challenge() {
+        let batch = PaddedBatch::from_spend(&[BN254_R.to_be_bytes().into()]);
+        assert!(compress(&[0u8; 32], &[0u8; 32], 0, &batch).is_err());
+    }
+
+    /// A proof's signals are read by position, and anything but `[y, digest, z]`
+    /// is not a batch proof's.
+    #[test]
+    fn a_challenge_is_read_from_the_signals_after_y() {
+        let signals = ["7", "11", "13"].map(String::from);
+        assert_eq!(
+            BatchChallenge::from_public_signals(&signals),
+            Some(BatchChallenge {
+                digest: U256::from(11),
+                z: U256::from(13),
+            })
+        );
+        assert_eq!(BatchChallenge::from_public_signals(&signals[..2]), None);
     }
 }

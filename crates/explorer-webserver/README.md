@@ -88,9 +88,9 @@ heuristic, because the contract emits from a bounded set of sites:
 | withdraw | `(0, out>0)` | yes | `withdraw` |
 | transfer | none | yes | `transfer` |
 
-Both sides of an `AssetMoved` can never be non-zero — `withdraw` reverts on
-`publicIn != 0` and every spend entry point forces `publicIn == 0` — so the sign
-of an `asset_flows` row *is* the label.
+Both sides of an `AssetMoved` can never be non-zero — `withdraw` emits
+`(0, outAmt)` and a deposit `(inAmt, 0)`, each with a literal zero for the other
+side — so the sign of an `asset_flows` row *is* the label.
 
 A deposit counts at flush time, because that is when its note enters the tree;
 until then it is `pending` at its escrow time. So a bucket's composition can

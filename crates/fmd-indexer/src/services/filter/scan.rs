@@ -157,8 +157,6 @@ mod tests {
             eph_pub_y: BigDecimal::from(0),
             ciphertext: Vec::new(),
             leaf_index: 0,
-            cv_dep_x: BigDecimal::from(0),
-            cv_dep_y: BigDecimal::from(0),
         }
     }
 

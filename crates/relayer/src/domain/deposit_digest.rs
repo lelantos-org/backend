@@ -16,28 +16,30 @@ use alloy::sol_types::SolValue;
 /// value both hashes differently and reverts `PublicInTooLarge` first.
 pub const MAX_PUBLIC_IN: u64 = (1u64 << 48) - 1;
 
-/// `keccak256(abi.encode(address(this), block.chainid, id, cm, cvDep,
-/// publicAssetId, publicIn, feeBpsAtSubmit, payer, submittedAt, feeIn,
-/// feeAssetId, feeCm, feeCvDep))`: 16 words.
+/// `keccak256(abi.encode(address(this), block.chainid, id, inner,
+/// publicAssetId, publicIn, feeBpsAtSubmit, payer, submittedAt, feeNote,
+/// pulled))`: 13 words. `feeNote` is the static struct `PubInputs.FeeNote`,
+/// which encodes in place as `feeIn`, `feeAssetId`, `feeInner`.
 ///
 /// `abi.encode` is not packed, so every static field occupies a full word and the
 /// declared Solidity widths (`uint64`, `uint48`, `uint16`, `uint32`) encode
 /// identically to `U256` provided the value fits, which [`MAX_PUBLIC_IN`] and the
-/// `PendingDeposit` field types guarantee. `cvDep` and `feeCvDep` are static
-/// `uint256[2]`, so each lands inline as two words.
+/// `PendingDeposit` field types guarantee.
 ///
-/// The trailing four fields bind the relayer's fee note, and are preimage for
-/// the same reason the depositor's leaf is: `flushBatch` supplies both leaves
+/// The three fields from `feeIn` bind the relayer's fee note, and are preimage
+/// for the same reason the depositor's leaf is: `flushBatch` supplies both leaves
 /// from calldata, so a flusher able to vary them could mint itself an arbitrary
 /// note. `feeAssetId` ties the fee leaf's `leafAsset` to the token pulled at
 /// submit, which need not be the deposit's.
+///
+/// The last word is the escrow's refund cap, bound so that a canceller cannot
+/// choose it; see [`PendingDeposit::pulled`].
 pub fn deposit_digest(masp: Address, chain_id: u64, d: &PendingDeposit) -> B256 {
     let preimage = (
         masp,
         U256::from(chain_id),
         U256::from(d.id),
-        B256::from(d.cm),
-        d.cv_dep,
+        B256::from(d.inner),
         U256::from(d.public_asset_id),
         U256::from(d.public_in),
         U256::from(d.fee_bps_at_submit),
@@ -45,8 +47,8 @@ pub fn deposit_digest(masp: Address, chain_id: u64, d: &PendingDeposit) -> B256 
         U256::from(d.submitted_at),
         U256::from(d.fee_in),
         U256::from(d.fee_asset_id),
-        B256::from(d.fee_cm),
-        d.fee_cv_dep,
+        B256::from(d.fee_inner),
+        d.pulled,
     );
     keccak256(preimage.abi_encode_params())
 }
@@ -61,20 +63,17 @@ mod tests {
     fn deposit() -> PendingDeposit {
         PendingDeposit {
             id: 1,
-            cm: [0xab; 32],
+            inner: [0xab; 32],
             public_asset_id: 2,
             public_in: 3,
             fee_bps_at_submit: 4,
             payer: [0xcd; 20],
             submitted_at: 5,
-            cv_dep: [U256::from(6), U256::from(7)],
-            rcv: U256::from(8),
             fee_asset_id: 13,
             fee_in: 9,
-            fee_cm: [0xef; 32],
-            fee_cv_dep: [U256::from(10), U256::from(11)],
-            fee_rcv: U256::from(12),
+            fee_inner: [0xef; 32],
             fee_aux: JsonValue::Null,
+            pulled: U256::from(14),
         }
     }
 
@@ -87,12 +86,12 @@ mod tests {
     ///
     /// ```sh
     /// cast keccak "$(cast abi-encode \
-    ///   'f(address,uint256,uint256,bytes32,uint256[2],uint64,uint48,uint16,address,uint32,\
-    ///      uint48,uint64,bytes32,uint256[2])' \
+    ///   'f(address,uint256,uint256,bytes32,uint64,uint48,uint16,address,uint32,\
+    ///      (uint48,uint64,bytes32),uint256)' \
     ///   0x1111111111111111111111111111111111111111 31337 42 \
     ///   0x2222222222222222222222222222222222222222222222222222222222222222 \
-    ///   '[3,4]' 7 1000000 25 0x3333333333333333333333333333333333333333 123456 \
-    ///   9 8 0x4444444444444444444444444444444444444444444444444444444444444444 '[5,6]')"
+    ///   7 1000000 25 0x3333333333333333333333333333333333333333 123456 \
+    ///   '(9,8,0x4444444444444444444444444444444444444444444444444444444444444444)' 10)"
     /// ```
     ///
     /// Drift here quarantines every deposit on every chain, so this and the test
@@ -101,25 +100,22 @@ mod tests {
     fn the_digest_matches_the_contract_encoding() {
         let d = PendingDeposit {
             id: 42,
-            cm: [0x22; 32],
+            inner: [0x22; 32],
             public_asset_id: 7,
             public_in: 1_000_000,
             fee_bps_at_submit: 25,
             payer: [0x33; 20],
             submitted_at: 123_456,
-            cv_dep: [U256::from(3), U256::from(4)],
-            rcv: U256::ZERO,
             // Distinct from `public_asset_id`: a cross-asset fee note.
             fee_asset_id: 8,
             fee_in: 9,
-            fee_cm: [0x44; 32],
-            fee_cv_dep: [U256::from(5), U256::from(6)],
-            fee_rcv: U256::ZERO,
+            fee_inner: [0x44; 32],
             fee_aux: JsonValue::Null,
+            pulled: U256::from(10),
         };
         assert_eq!(
             deposit_digest(Address::from([0x11; 20]), 31337, &d),
-            b256("0x0060d25f15a879077b0c7d6a01d4834145445891bc9324d37dcc266494f981f1")
+            b256("0xabae3c51156949b837ca004e7836a088f148e37ecc9520dfd46e813eb01669f2")
         );
     }
 
@@ -132,29 +128,27 @@ mod tests {
     /// column, which the encoder test cannot.
     ///
     /// The pool is behind a `DelayedUpgradeProxy`, so `address(this)` is the proxy
-    /// (`0xa0Cb…7598`), and the digest is `escrowed(0)` as read from the
-    /// `forge test -vvvvv` trace.
+    /// (`0xa0Cb…7598`), and the digest is what the deposit stored in
+    /// `escrowed[0]`, as read from the `forge test -vvvvv` trace.
     #[test]
     fn the_digest_matches_a_deposit_a_deployed_masp_escrowed() {
         let d = PendingDeposit {
             id: 0,
-            cm: U256::from(0x111).to_be_bytes(),
+            inner: U256::from(0x111).to_be_bytes(),
             public_asset_id: 1,
             public_in: 100,
             fee_bps_at_submit: 25,
             payer: address("0x000000000000000000000000000000000000Face").into(),
             submitted_at: 1,
-            cv_dep: [U256::from(0xaa1), U256::from(0xaa2)],
-            rcv: U256::from(0xccc),
             // The harness deposits with a zero-value fee note, a valid shape: a
             // subsidised chain sets `feeIn` to zero and the leaf is still minted
             // and spendable.
             fee_asset_id: 0,
             fee_in: 0,
-            fee_cm: U256::from(0xfee).to_be_bytes(),
-            fee_cv_dep: [U256::ZERO, U256::ZERO],
-            fee_rcv: U256::ZERO,
+            fee_inner: U256::from(0xfee).to_be_bytes(),
             fee_aux: JsonValue::Null,
+            // The asset is plain, so the log carries no refund cap.
+            pulled: U256::ZERO,
         };
         assert_eq!(
             deposit_digest(
@@ -162,34 +156,31 @@ mod tests {
                 31337,
                 &d
             ),
-            b256("0xb8bf1c53e800befe9fd8caa936b02ae8ec977a2f56a07c52d47f0b2b064b4861")
+            b256("0x66fbdace2fa43c7ebbf5d80a794383686b245600484d8421ec230c395b381c63")
         );
     }
 
     /// A deployed cross-asset deposit: the fee note is paid in asset 2 while the
     /// deposit is in asset 1, through the two-token Permit2 batch
     /// (`contracts/test/masp/MASP.depositFeeAsset.t.sol`,
-    /// `test_signature_crossAsset_pullsBothTokens`, which asserts this digest
-    /// against its own `abi.encode`). Values from the `DepositEscrowed` log and
-    /// `escrowed(0)` in that test's `-vvvvv` trace.
+    /// `test_signature_crossAsset_pullsBothTokensAndBindsFeeAsset`, which asserts
+    /// this digest against its own `abi.encode`). Values from the
+    /// `DepositEscrowed` log and `escrowed(0)` in that test's `-vvvvv` trace.
     #[test]
     fn the_digest_matches_a_cross_asset_deposit_a_deployed_masp_escrowed() {
         let d = PendingDeposit {
             id: 0,
-            cm: U256::from(0x100).to_be_bytes(),
+            inner: U256::from(0x100).to_be_bytes(),
             public_asset_id: 1,
             public_in: 1_000,
             fee_bps_at_submit: 25,
             payer: address("0x5F3cAc19f89bd2e972062Db0F287c525E1913341").into(),
             submitted_at: 1,
-            cv_dep: [U256::from(192), U256::from(193)],
-            rcv: U256::ZERO,
             fee_asset_id: 2,
             fee_in: 7,
-            fee_cm: U256::from(0x101).to_be_bytes(),
-            fee_cv_dep: [U256::from(240), U256::from(241)],
-            fee_rcv: U256::ZERO,
+            fee_inner: U256::from(0x101).to_be_bytes(),
             fee_aux: JsonValue::Null,
+            pulled: U256::ZERO,
         };
         assert_eq!(
             deposit_digest(
@@ -197,19 +188,45 @@ mod tests {
                 31337,
                 &d
             ),
-            b256("0x5be2e192b420bb2b1b2598ba2bc81b8e0daf1ab1769bb576d8824a6345f970f7")
+            b256("0x178a6da8c45747a816048ca5d234358899c19e550db7e854a19efaf145a91aab")
         );
     }
 
-    /// `rcv` and `fee_rcv` are private blinders and are not part of the escrow
-    /// preimage.
+    /// A deployed yield escrow: asset 9 is bound to a venue, so the pool logs
+    /// what it pulled at submit and binds it as the digest's last word
+    /// (`contracts/test/yield/YieldEscrow.t.sol`,
+    /// `test_revert_cap_isBoundByTheDigest`). Values from the `DepositEscrowed`
+    /// log and `escrowed(0)` in that test's `-vvvvv` trace.
+    ///
+    /// Nothing else in the row determines the cap: it is 1e6 units plus the 25 bps
+    /// fee, priced at the venue's index in the submit block. Replayed as a plain
+    /// asset's 0 the digest differs, which is the `DigestMismatch` that test
+    /// expects of a flush.
     #[test]
-    fn the_private_blinders_do_not_enter_the_digest() {
-        let mut d = deposit();
-        let without = deposit_digest(Address::ZERO, 1, &d);
-        d.rcv += U256::from(9999);
-        d.fee_rcv += U256::from(8888);
-        assert_eq!(without, deposit_digest(Address::ZERO, 1, &d));
+    fn the_digest_matches_a_yield_deposit_a_deployed_masp_escrowed() {
+        let d = PendingDeposit {
+            id: 0,
+            inner: U256::from(0x101).to_be_bytes(),
+            public_asset_id: 9,
+            public_in: 1_000_000,
+            fee_bps_at_submit: 25,
+            payer: address("0x00000000000000000000000000000000000A11cE").into(),
+            submitted_at: 1,
+            fee_asset_id: 0,
+            fee_in: 0,
+            fee_inner: U256::from(0x102).to_be_bytes(),
+            fee_aux: JsonValue::Null,
+            pulled: U256::from(10_025_000_000_000_000u64),
+        };
+        let masp = address("0xa0Cb889707d426A7A386870A03bc70d1b0697598");
+        let escrowed = b256("0xfba2693295504b3e98cdc1053ee8f38ac512811e52d6e102e942ee514bf23578");
+        assert_eq!(deposit_digest(masp, 31337, &d), escrowed);
+
+        let without_the_cap = PendingDeposit {
+            pulled: U256::ZERO,
+            ..d
+        };
+        assert_ne!(deposit_digest(masp, 31337, &without_the_cap), escrowed);
     }
 
     /// Every replayed field is bound, so a wrong one is caught before proving.
@@ -218,14 +235,12 @@ mod tests {
         type Mutation = (&'static str, fn(&mut PendingDeposit));
         const MUTATIONS: &[Mutation] = &[
             ("id", |d| d.id += 1),
-            ("cm", |d| d.cm[0] ^= 1),
+            ("inner", |d| d.inner[0] ^= 1),
             ("public_asset_id", |d| d.public_asset_id += 1),
             ("public_in", |d| d.public_in += 1),
             ("fee_bps_at_submit", |d| d.fee_bps_at_submit += 1),
             ("payer", |d| d.payer[0] ^= 1),
             ("submitted_at", |d| d.submitted_at += 1),
-            ("cv_dep.x", |d| d.cv_dep[0] += U256::from(1)),
-            ("cv_dep.y", |d| d.cv_dep[1] += U256::from(1)),
             // The fee leaf is bound for the same reason: `flushBatch` takes both
             // leaves from calldata, so a flusher able to vary these could mint
             // itself an arbitrary note.
@@ -234,9 +249,10 @@ mod tests {
             // deposit's, so a flusher able to vary it could claim a note in a
             // token that was never pulled.
             ("fee_asset_id", |d| d.fee_asset_id += 1),
-            ("fee_cm", |d| d.fee_cm[0] ^= 1),
-            ("fee_cv_dep.x", |d| d.fee_cv_dep[0] += U256::from(1)),
-            ("fee_cv_dep.y", |d| d.fee_cv_dep[1] += U256::from(1)),
+            ("fee_inner", |d| d.fee_inner[0] ^= 1),
+            // The refund cap: a canceller able to vary it could raise its own
+            // ceiling, and nothing but the digest holds it.
+            ("pulled", |d| d.pulled += U256::from(1)),
         ];
 
         let expected = deposit_digest(Address::ZERO, 1, &deposit());

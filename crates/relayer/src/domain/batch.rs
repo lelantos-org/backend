@@ -6,7 +6,9 @@
 //! `services::witness` turns all of them into the prover's signals.
 
 use crate::domain::deposit::EscrowLeaf;
-use alloy::primitives::{FixedBytes, U256};
+use crate::domain::error::AppResult;
+use alloy::primitives::FixedBytes;
+use crypto::tree::Field;
 
 /// Maximum leaves per `tree_update_batch` proof, mirroring
 /// `PubInputs.MAX_L_BATCH`. Counted in leaves rather than deposits: a deposit is
@@ -27,24 +29,17 @@ pub const MAX_DEPOSITS_PER_BATCH: usize = MAX_L_BATCH / LEAVES_PER_DEPOSIT;
 /// The batch circuit's leaf-indexed arrays, at full width.
 ///
 /// One entry per leaf slot: the first `actual_count` are real and the rest are
-/// zero padding that the circuit and the contract both enforce. Grouped into a
-/// struct rather than six same-shaped arrays, since every consumer needs them
-/// together and positional arguments of identical type transpose without a
-/// compiler error. Holding `actual_count` here keeps the count from drifting from
-/// the arrays it describes.
+/// zero padding that the circuit and the contract both enforce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaddedBatch {
+    /// The note commitment on a spend slot, which is the leaf; the depositor's
+    /// `inner` on a deposit slot.
     pub cms: [FixedBytes<32>; MAX_L_BATCH],
-    pub cv_deps: [[U256; 2]; MAX_L_BATCH],
     pub leaf_asset: [u64; MAX_L_BATCH],
     pub leaf_public_in: [u64; MAX_L_BATCH],
-    /// `1` marks a deposit leaf, whose value commitment the circuit pins to
-    /// its `(leaf_asset, leaf_public_in)`.
+    /// `1` marks a deposit leaf, which the circuit builds from `leaf_asset`,
+    /// `leaf_public_in` and `cms`; see [`Self::leaves`].
     pub is_deposit: [u8; MAX_L_BATCH],
-    /// Each deposit leaf's `rcv_dep`, the blinder its value commitment is bound
-    /// under. Private witness only: never in calldata or the challenge, and zero
-    /// for spend leaves.
-    pub rcv: [U256; MAX_L_BATCH],
     /// How many leading slots are real. A leaf count rather than a pair count, so
     /// an odd value is valid.
     pub actual_count: u64,
@@ -54,38 +49,33 @@ impl PaddedBatch {
     fn zeroed() -> Self {
         Self {
             cms: [FixedBytes::<32>::ZERO; MAX_L_BATCH],
-            cv_deps: [[U256::ZERO; 2]; MAX_L_BATCH],
             leaf_asset: [0; MAX_L_BATCH],
             leaf_public_in: [0; MAX_L_BATCH],
             is_deposit: [0; MAX_L_BATCH],
-            rcv: [U256::ZERO; MAX_L_BATCH],
             actual_count: 0,
         }
     }
 
-    /// Spend leaves. Every deposit-only field stays zero: the transact SNARK
-    /// already proves conservation, so the per-leaf deposit binding is skipped.
+    /// Spend leaves: each `cm` is inserted as the leaf it is, and every
+    /// deposit-only field stays zero.
     ///
     /// # Panics
     /// If more leaves are supplied than the circuit has slots. Callers are
     /// fixed-arity (`TRANSACT_OUT`) or clamped to `MAX_L_BATCH` at boot.
-    pub fn from_spend(cms: &[FixedBytes<32>], cv_deps: &[[U256; 2]]) -> Self {
-        assert_eq!(cms.len(), cv_deps.len(), "one cv_dep per commitment");
+    pub fn from_spend(cms: &[FixedBytes<32>]) -> Self {
         let mut batch = Self::zeroed();
         batch.cms[..cms.len()].copy_from_slice(cms);
-        batch.cv_deps[..cv_deps.len()].copy_from_slice(cv_deps);
         batch.actual_count = cms.len() as u64;
         batch
     }
 
-    /// Deposit leaves, two per escrowed deposit, each carrying the binding the
-    /// circuit checks against its value commitment and the blinder it is bound
-    /// under.
+    /// Deposit leaves, two per escrowed deposit, each carrying the `inner` and
+    /// the public amount the circuit builds its leaf from.
     ///
     /// The caller supplies them flattened and in tree order — the depositor's
     /// note at `2i`, the relayer's fee note at `2i + 1` — which is the order
     /// `_drainDeposit` reads them back in. Both leaves of a deposit carry
-    /// `is_deposit = 1` and share an asset.
+    /// `is_deposit = 1`.
     ///
     /// Unlike [`Self::from_spend`], a slice wider than the circuit would be
     /// truncated here while `actual_count` still counted every leaf, so the
@@ -99,33 +89,53 @@ impl PaddedBatch {
         );
         let mut batch = Self::zeroed();
         for (slot, d) in batch.slots_mut().zip(leaves) {
-            *slot.cm = d.cm.into();
-            *slot.cv_dep = d.cv_dep;
+            *slot.cm = d.inner.into();
             *slot.leaf_asset = d.asset_id;
             *slot.leaf_public_in = d.public_in;
             *slot.is_deposit = 1;
-            *slot.rcv = d.rcv;
         }
         batch.actual_count = leaves.len() as u64;
         batch
     }
 
+    /// The tree leaves this batch inserts, in order: the [`EscrowLeaf::leaf`] of
+    /// `(leaf_asset, leaf_public_in, cms)` on a deposit slot, and `cms` as it
+    /// stands on a spend slot. Padding slots insert nothing.
+    ///
+    /// Fails on a deposit slot whose `inner` has no leaf.
+    pub fn leaves(&self) -> AppResult<Vec<Field>> {
+        self.cms
+            .iter()
+            .zip(&self.leaf_asset)
+            .zip(&self.leaf_public_in)
+            .zip(&self.is_deposit)
+            .take(self.actual_count as usize)
+            .map(|(((cm, &asset_id), &public_in), &is_deposit)| {
+                if is_deposit == 0 {
+                    return Ok(cm.0);
+                }
+                EscrowLeaf {
+                    inner: cm.0,
+                    asset_id,
+                    public_in,
+                }
+                .leaf()
+            })
+            .collect()
+    }
+
     fn slots_mut(&mut self) -> impl Iterator<Item = BatchSlot<'_>> {
         self.cms
             .iter_mut()
-            .zip(self.cv_deps.iter_mut())
             .zip(self.leaf_asset.iter_mut())
             .zip(self.leaf_public_in.iter_mut())
             .zip(self.is_deposit.iter_mut())
-            .zip(self.rcv.iter_mut())
             .map(
-                |(((((cm, cv_dep), leaf_asset), leaf_public_in), is_deposit), rcv)| BatchSlot {
+                |(((cm, leaf_asset), leaf_public_in), is_deposit)| BatchSlot {
                     cm,
-                    cv_dep,
                     leaf_asset,
                     leaf_public_in,
                     is_deposit,
-                    rcv,
                 },
             )
     }
@@ -135,16 +145,24 @@ impl PaddedBatch {
 /// the wrong one.
 struct BatchSlot<'a> {
     cm: &'a mut FixedBytes<32>,
-    cv_dep: &'a mut [U256; 2],
     leaf_asset: &'a mut u64,
     leaf_public_in: &'a mut u64,
     is_deposit: &'a mut u8,
-    rcv: &'a mut U256,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::batch_vectors;
+
+    /// `intermediates.leaves` of the published vectors: the leaf the circuit
+    /// builds on every active slot, deposit and spend.
+    #[test]
+    fn test_leaves_match_the_published_batch_vectors() {
+        for v in batch_vectors::load() {
+            assert_eq!(v.batch.leaves().unwrap(), v.leaves, "{}", v.name);
+        }
+    }
 
     /// Mirrors the constructor guard in `MASP.sol`. These three constants describe
     /// one circuit shape, and `MAX_L_BATCH` cannot move without a new trusted
@@ -155,17 +173,15 @@ mod tests {
         assert_eq!(MAX_DEPOSITS_PER_BATCH * LEAVES_PER_DEPOSIT, MAX_L_BATCH);
     }
 
-    /// Both leaves of a deposit must be marked as deposit leaves: the circuit
-    /// gates its per-leaf value binding on `is_deposit`, so a fee leaf left at
-    /// zero would leave its `cv_dep` unconstrained.
+    /// Both leaves of a deposit must be marked as deposit leaves: with the flag
+    /// clear the circuit inserts `cms` as it stands, and `_drainDeposit` reverts
+    /// `BadDepositMode`.
     #[test]
     fn test_from_deposits_marks_every_supplied_leaf_as_a_deposit() {
-        let leaf = |cm: u8, public_in: u64| EscrowLeaf {
-            cm: [cm; 32],
-            cv_dep: [U256::from(1), U256::from(2)],
+        let leaf = |inner: u8, public_in: u64| EscrowLeaf {
+            inner: [inner; 32],
             asset_id: 7,
             public_in,
-            rcv: U256::from(u64::from(cm)),
         };
         let batch = PaddedBatch::from_deposits(&[leaf(0xaa, 1_000), leaf(0xbb, 250)]);
 
@@ -180,10 +196,11 @@ mod tests {
 
         assert_eq!(batch.actual_count, 2);
         assert_eq!(batch.is_deposit, want_deposit);
+        // A deposit slot carries `inner`.
+        assert_eq!(batch.cms[0], FixedBytes::<32>::from([0xaa; 32]));
+        assert_eq!(batch.cms[1], FixedBytes::<32>::from([0xbb; 32]));
         // Padding stays zero; the contract and the circuit both enforce it.
         assert_eq!(batch.cms[2], FixedBytes::<32>::ZERO);
         assert_eq!(batch.leaf_public_in, want_public_in);
-        assert_eq!(batch.rcv[1], U256::from(0xbbu64));
-        assert_eq!(batch.rcv[2], U256::ZERO);
     }
 }

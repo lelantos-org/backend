@@ -21,6 +21,7 @@ use std::str::FromStr;
 #[serde(rename_all = "camelCase")]
 struct Vector {
     ivk_le_hex: String,
+    d_dec: String,
     pk_dec: String,
     epk_le_hex: String,
     wire_ciphertext_hex: String,
@@ -31,7 +32,7 @@ struct Vector {
     out_index: u64,
     rho_dec: String,
     rcm_dec: String,
-    rcv_dep_dec: String,
+    inner_dec: String,
     cm_dec: String,
 }
 
@@ -74,16 +75,17 @@ fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
         });
         assert_eq!(hex::encode(&plaintext), v.plaintext_hex, "vector {i}");
 
-        let note = NotePlaintext::decode(&plaintext).expect("112-byte plaintext");
+        let note = NotePlaintext::decode(&plaintext).expect("80-byte plaintext");
         assert_eq!(note.asset_id.to_string(), v.asset_id, "vector {i}");
         assert_eq!(note.value.to_string(), v.value, "vector {i}");
         assert_eq!(note.rho, fq(&v.rho_dec), "vector {i}");
         assert_eq!(note.rcm, fq(&v.rcm_dec), "vector {i}");
-        assert_eq!(note.rcv_dep, fq(&v.rcv_dep_dec), "vector {i}");
 
-        // `ivk` alone recovers the owner key, letting a party without a spending
-        // key verify a payment to its own address.
-        let pk = derive_pk(&ivk).expect("poseidon");
+        // `ivk` alone recovers the owner key of its default address, letting a
+        // party without a spending key verify a payment to that address.
+        let d = default_diversifier(&ivk);
+        assert_eq!(d, fq(&v.d_dec), "vector {i}");
+        let pk = derive_pk(&ivk, &d).expect("poseidon");
         assert_eq!(pk, fq(&v.pk_dec), "vector {i}");
 
         // The circuit pins output rho, so it is recomputable from public inputs
@@ -94,6 +96,12 @@ fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
         let cm =
             commitment(note.asset_id, note.value, &pk, &note.rho, &note.rcm).expect("poseidon");
         assert_eq!(cm, fq(&v.cm_dec), "vector {i}");
+
+        // The deposit path: `inner` is published and the leaf built from it.
+        let inner = inner(&pk, &note.rho, &note.rcm).expect("poseidon");
+        assert_eq!(inner, fq(&v.inner_dec), "vector {i}");
+        let leaf = commitment_from_inner(note.asset_id, note.value, &inner).expect("poseidon");
+        assert_eq!(leaf, cm, "vector {i}");
     }
 }
 
@@ -158,12 +166,12 @@ fn a_crafted_epk_has_its_torsion_term_annihilated() {
     let body = seal(
         &epk_packed,
         &shared,
-        b"a 112-byte plaintext is not needed here",
+        b"an 80-byte plaintext is not needed here",
     );
 
     assert_eq!(
         try_decrypt(&ivk_be, &epk_packed, &body).as_deref(),
-        Some(&b"a 112-byte plaintext is not needed here"[..]),
+        Some(&b"an 80-byte plaintext is not needed here"[..]),
     );
 }
 

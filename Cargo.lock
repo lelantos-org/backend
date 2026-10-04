@@ -19,6 +19,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2047,6 +2058,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 name = "crypto"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "ark-ec 0.4.2",
  "ark-ed-on-bn254",
  "ark-ff 0.4.2",
@@ -2806,6 +2818,7 @@ dependencies = [
  "metrics",
  "rayon",
  "serde",
+ "serde_json",
  "shared",
  "test-support",
  "thiserror 1.0.69",
@@ -6011,7 +6024,6 @@ dependencies = [
  "groth16",
  "hex",
  "parking_lot",
- "rayon",
  "reqwest",
  "serde",
  "serde_json",

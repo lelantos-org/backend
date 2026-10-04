@@ -71,17 +71,6 @@ fn bench_tree(c: &mut Criterion) {
     group.sample_size(10);
 
     for leaves in [1_000usize, 10_000] {
-        let field = Fq::rand(&mut StdRng::seed_from_u64(3));
-        let leaf_inputs = [field; 4];
-
-        group.bench_function(format!("leaf_hash_x{leaves}"), |b| {
-            b.iter(|| {
-                for _ in 0..leaves {
-                    criterion::black_box(poseidon_hash(&leaf_inputs).unwrap());
-                }
-            });
-        });
-
         // Bootstrap: bulk fill, hashed level by level across rayon threads.
         group.bench_function(format!("extend_{leaves}"), |b| {
             b.iter(|| {

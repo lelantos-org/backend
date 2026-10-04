@@ -91,7 +91,16 @@ fn root_advanced_log(
     build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
 }
 
-fn deposit_escrowed_log(id: u64, block_n: u64, block_ts: u64, tx_byte: u8, log_idx: u64) -> Log {
+/// `pulled` is the escrow's refund cap: non-zero for a yield asset, 0 for a
+/// plain one.
+fn deposit_escrowed_log(
+    id: u64,
+    pulled: U256,
+    block_n: u64,
+    block_ts: u64,
+    tx_byte: u8,
+    log_idx: u64,
+) -> Log {
     let ev = DepositEscrowed {
         id: U256::from(id),
         payer: Address::repeat_byte(0x01),
@@ -99,10 +108,7 @@ fn deposit_escrowed_log(id: u64, block_n: u64, block_ts: u64, tx_byte: u8, log_i
         publicAssetId: ASSET_ID,
         publicIn: 100,
         feeBpsAtSubmit: 0,
-        cm: B256::repeat_byte(0x03),
-        cvDepX: U256::ZERO,
-        cvDepY: U256::ZERO,
-        rcv: U256::ZERO,
+        inner: B256::repeat_byte(0x03),
         clueRx: U256::ZERO,
         clueRy: U256::ZERO,
         ephPubX: U256::ZERO,
@@ -110,15 +116,13 @@ fn deposit_escrowed_log(id: u64, block_n: u64, block_ts: u64, tx_byte: u8, log_i
         ciphertext: vec![0u8; 2].into(),
         feeAssetId: FEE_ASSET_ID,
         feeIn: 3,
-        feeCm: B256::repeat_byte(0x04),
-        feeCvDepX: U256::ZERO,
-        feeCvDepY: U256::ZERO,
-        feeRcv: U256::ZERO,
+        feeInner: B256::repeat_byte(0x04),
         feeClueRx: U256::ZERO,
         feeClueRy: U256::ZERO,
         feeEphPubX: U256::ZERO,
         feeEphPubY: U256::ZERO,
         feeCiphertext: vec![0u8; 2].into(),
+        pulled,
     };
     build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
 }
@@ -126,7 +130,7 @@ fn deposit_escrowed_log(id: u64, block_n: u64, block_ts: u64, tx_byte: u8, log_i
 fn deposit_flushed_log(id: u64, block_n: u64, block_ts: u64, tx_byte: u8, log_idx: u64) -> Log {
     let ev = DepositFlushed {
         id: U256::from(id),
-        cm: B256::repeat_byte(0x03),
+        inner: B256::repeat_byte(0x03),
     };
     build_log(ev.encode_log_data(), block_n, block_ts, tx_byte, log_idx)
 }
@@ -373,7 +377,7 @@ async fn deposit_flushed_records_its_log_index() {
     insert_log(
         &pool,
         CHAIN_A,
-        &deposit_escrowed_log(1, 100, 1_700_000_000, 0x20, 0),
+        &deposit_escrowed_log(1, U256::ZERO, 100, 1_700_000_000, 0x20, 0),
         EventKind::DepositEscrowed,
     )
     .await;
@@ -413,7 +417,7 @@ async fn deposit_escrowed_persists_the_fee_asset() {
     insert_log(
         &pool,
         CHAIN_A,
-        &deposit_escrowed_log(1, 100, 1_700_000_000, 0x20, 0),
+        &deposit_escrowed_log(1, U256::ZERO, 100, 1_700_000_000, 0x20, 0),
         EventKind::DepositEscrowed,
     )
     .await;
@@ -432,5 +436,83 @@ async fn deposit_escrowed_persists_the_fee_asset() {
     assert_eq!(
         row,
         (ASSET_ID as i64, FEE_ASSET_ID as i64, BigDecimal::from(3))
+    );
+}
+
+/// `inner` and `feeInner` are digest preimage and the words the flush builds
+/// the deposit's two leaves from, so each lands in its own column as logged.
+#[tokio::test]
+async fn deposit_escrowed_persists_the_inner_hashes() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_escrowed_log(1, U256::ZERO, 100, 1_700_000_000, 0x20, 0),
+        EventKind::DepositEscrowed,
+    )
+    .await;
+
+    let ctx = empty_ctx(pool.clone());
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+
+    use database::schema::deposit_escrowed_events as d;
+    let mut conn = pool.get().await.unwrap();
+    let row: (Vec<u8>, Vec<u8>) = d::table
+        .filter(d::chain_id.eq(CHAIN_A))
+        .select((d::inner, d::fee_inner))
+        .first(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(row, (vec![0x03; 32], vec![0x04; 32]));
+}
+
+/// The refund cap is digest preimage and the pool keeps no copy of it, so the
+/// log is its only source: a yield escrow's lands in its own column exactly as
+/// logged, and a plain escrow's as the 0 the digest binds.
+#[tokio::test]
+async fn deposit_escrowed_persists_the_refund_cap() {
+    let (pool, _serial) = fresh_pool().await;
+    insert_chain_state(&pool, CHAIN_A).await;
+
+    // Wider than `u128`: the cap is a `uint256` in token base units.
+    let yield_pull = (U256::from(1u8) << 200) + U256::from(10_025u64);
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_escrowed_log(1, yield_pull, 100, 1_700_000_000, 0x20, 0),
+        EventKind::DepositEscrowed,
+    )
+    .await;
+    insert_log(
+        &pool,
+        CHAIN_A,
+        &deposit_escrowed_log(2, U256::ZERO, 100, 1_700_000_000, 0x20, 1),
+        EventKind::DepositEscrowed,
+    )
+    .await;
+
+    let ctx = empty_ctx(pool.clone());
+    let _ = tick_chain(&ctx, CHAIN_A, 100).await.unwrap();
+
+    use database::schema::deposit_escrowed_events as d;
+    let mut conn = pool.get().await.unwrap();
+    let rows: Vec<(BigDecimal, BigDecimal)> = d::table
+        .filter(d::chain_id.eq(CHAIN_A))
+        .order(d::deposit_id.asc())
+        .select((d::deposit_id, d::pulled))
+        .load(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                BigDecimal::from(1),
+                BigDecimal::from_str(&yield_pull.to_string()).unwrap()
+            ),
+            (BigDecimal::from(2), BigDecimal::from(0)),
+        ]
     );
 }

@@ -48,6 +48,20 @@ The backfill head is instead an id that was already visible `BACKFILL_LAG`
 uncommitted rather than by id ordering. The cost is that a new subscription's
 history walk starts one lag late; forward detection is not delayed.
 
+## Notes and leaves
+
+`notes.cm` is the tree leaf for every note:
+`cm = Poseidon(TAG_CM, asset * 2^64 + value, inner)`. The stored frontier and
+the commitment feed insert it as is.
+
+- A spend publishes `cm` in `NotePayload`, and it is stored as published.
+- A deposit publishes only `inner`. When `DepositFlushed` lands, `domain::escrow`
+  looks up the deposit's `DepositEscrowed` by id and computes both leaves with
+  `crypto::note::commitment_from_inner`: the depositor's note from
+  `(publicAssetId, publicIn, inner)`, then the fee note from
+  `(feeAssetId, feeIn, feeInner)`, which is `(0, 0, feeInner)` when no fee is
+  paid.
+
 ## Run
 
 ```bash

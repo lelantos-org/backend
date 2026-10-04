@@ -3,6 +3,7 @@
 use crate::adapters::abi::{IBundler, IMasp, INativeAdapter};
 use crate::adapters::calldata::{build_aux, build_proof, build_pub_inputs};
 use crate::adapters::parse::parse_address;
+use crate::domain::batch::PaddedBatch;
 use crate::domain::dto::{SpendKind, SubmitSpendPayload};
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::EstimateResponse;
@@ -12,8 +13,8 @@ use crate::services::fees::quote::FeeQuoter;
 use crate::services::fees::shielded::ShieldedFeeChecker;
 use crate::services::pipeline::batcher::{Batcher, BundleItem, QueuedItem};
 use crate::services::pipeline::transact::{
-    FeeContext, SpendInputs, TransactBinding, merkle_root_of, parse_spend_inputs, spend_tree_for,
-    spend_witness, verify_transact_proof,
+    FeeContext, TransactBinding, merkle_root_of, parse_spend_batch, spend_tree_for,
+    verify_transact_proof,
 };
 use crate::services::submitter::SubmissionReceipt;
 use crate::services::transact_verifier::TransactVerifier;
@@ -22,7 +23,6 @@ use ::asset_registry::AssetRegistry;
 use alloy::primitives::{Address, U256};
 use alloy::sol_types::SolCall;
 use crypto::tree::Field;
-use groth16::TreeUpdateBatchWitness;
 use std::sync::Arc;
 use tracing::{info, instrument};
 
@@ -78,7 +78,7 @@ impl SpendPipeline {
             &payload.pub_inputs,
             &payload.aux,
         )?;
-        let inputs = parse_spend_inputs(&payload.pub_inputs)?;
+        let batch = parse_spend_batch(&payload.pub_inputs)?;
         let merkle_root = merkle_root_of(&payload.pub_inputs)?;
         let entry = EntryPoint::from(payload.kind);
         let target = self.target_for(payload.kind)?;
@@ -93,7 +93,7 @@ impl SpendPipeline {
 
         let item = SpendItem {
             payload,
-            inputs,
+            batch,
             merkle_root,
             target,
         };
@@ -173,7 +173,7 @@ impl SpendPipeline {
 /// A transfer, withdraw or native unshield, as the batcher bundles it.
 struct SpendItem {
     payload: SubmitSpendPayload,
-    inputs: SpendInputs,
+    batch: PaddedBatch,
     merkle_root: Field,
     target: Address,
 }
@@ -183,27 +183,24 @@ impl BundleItem for SpendItem {
         EntryPoint::from(self.payload.kind)
     }
 
-    fn leaves(&self) -> Vec<(Field, [U256; 2])> {
-        self.inputs.leaves()
+    fn batch(&self) -> &PaddedBatch {
+        &self.batch
     }
 
     fn merkle_root(&self) -> Option<Field> {
         Some(self.merkle_root)
     }
 
-    fn witness(&self, slot: &ReservedSlot, advanced: &AdvancedState) -> TreeUpdateBatchWitness {
-        spend_witness(slot, advanced, &self.inputs)
-    }
-
     fn encode(
         &self,
         slot: &ReservedSlot,
         advanced: &AdvancedState,
+        digest: U256,
         tp: IMasp::Proof,
     ) -> AppResult<IBundler::Call> {
         Ok(IBundler::Call {
             target: self.target,
-            data: encode_spend_calldata(&self.payload, slot, advanced, tp)?.into(),
+            data: encode_spend_calldata(&self.payload, slot, advanced, digest, tp)?.into(),
         })
     }
 
@@ -220,11 +217,12 @@ fn encode_spend_calldata(
     payload: &SubmitSpendPayload,
     slot: &ReservedSlot,
     advanced: &AdvancedState,
+    digest: U256,
     tp: IMasp::Proof,
 ) -> AppResult<Vec<u8>> {
     let p = build_proof(&payload.proof)?;
     let pi = build_pub_inputs(&payload.pub_inputs)?;
-    let tpi = spend_tree_for(slot, advanced)?;
+    let tpi = spend_tree_for(slot, advanced, digest)?;
     let aux = build_aux(&payload.aux)?;
     let out = match payload.kind {
         SpendKind::Transfer => IMasp::transferCall {
@@ -263,16 +261,18 @@ fn validate_spend_shape(
     native_adapter: Option<Address>,
 ) -> AppResult<()> {
     binding.check(&payload.pub_inputs)?;
-    if payload.pub_inputs.public_in != 0 {
-        return Err(AppError::BadRequest(
-            "spend payload must have publicIn == 0".into(),
-        ));
-    }
     match payload.kind {
         SpendKind::Transfer => {
             if payload.pub_inputs.public_out != 0 {
                 return Err(AppError::BadRequest(
                     "transfer requires publicOut == 0".into(),
+                ));
+            }
+            // The pool reverts `MustNotNameAsset`: a transfer withdraws nothing,
+            // so it names no asset.
+            if payload.pub_inputs.public_asset_id != 0 {
+                return Err(AppError::BadRequest(
+                    "transfer requires publicAssetId == 0".into(),
                 ));
             }
         }

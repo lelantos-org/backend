@@ -38,22 +38,17 @@ const SCAN_PAGE_ROWS: usize = 64;
 #[diesel(table_name = deposit_escrowed_events)]
 struct DepositRow {
     deposit_id: BigDecimal,
-    cm: Vec<u8>,
+    inner: Vec<u8>,
     public_asset_id: i64,
     public_in: BigDecimal,
     fee_bps_at_submit: i32,
     payer: Vec<u8>,
     submitted_at_block: i64,
-    cv_dep_x: BigDecimal,
-    cv_dep_y: BigDecimal,
-    rcv: BigDecimal,
     fee_asset_id: i64,
     fee_in: BigDecimal,
-    fee_cm: Vec<u8>,
-    fee_cv_dep_x: BigDecimal,
-    fee_cv_dep_y: BigDecimal,
-    fee_rcv: BigDecimal,
+    fee_inner: Vec<u8>,
     fee_aux: JsonValue,
+    pulled: BigDecimal,
 }
 
 impl TryFrom<DepositRow> for PendingDeposit {
@@ -63,7 +58,7 @@ impl TryFrom<DepositRow> for PendingDeposit {
         let id = bigdecimal_to_u64(&r.deposit_id)?;
         Ok(PendingDeposit {
             id,
-            cm: fixed_bytes(&r.cm, "cm")?,
+            inner: fixed_bytes(&r.inner, "inner")?,
             public_asset_id: r.public_asset_id as u64,
             public_in: bigdecimal_to_u64(&r.public_in)?,
             fee_bps_at_submit: u16::try_from(r.fee_bps_at_submit).map_err(|_| {
@@ -81,24 +76,15 @@ impl TryFrom<DepositRow> for PendingDeposit {
                     r.submitted_at_block
                 ))
             })?,
-            cv_dep: [
-                bigdecimal_to_u256(&r.cv_dep_x)?,
-                bigdecimal_to_u256(&r.cv_dep_y)?,
-            ],
-            rcv: bigdecimal_to_u256(&r.rcv)?,
             // Like `public_asset_id`, a `uint64` the indexer stores bit-for-bit in
             // a `BIGINT`, so an id at or above 2^63 reads back negative.
             fee_asset_id: r.fee_asset_id as u64,
             // The contract narrows `feeIn` to `uint48` before hashing it, so a
             // wider value could not have been escrowed.
             fee_in: bigdecimal_to_u64(&r.fee_in)?,
-            fee_cm: fixed_bytes(&r.fee_cm, "fee_cm")?,
-            fee_cv_dep: [
-                bigdecimal_to_u256(&r.fee_cv_dep_x)?,
-                bigdecimal_to_u256(&r.fee_cv_dep_y)?,
-            ],
-            fee_rcv: bigdecimal_to_u256(&r.fee_rcv)?,
+            fee_inner: fixed_bytes(&r.fee_inner, "fee_inner")?,
             fee_aux: r.fee_aux,
+            pulled: bigdecimal_to_u256(&r.pulled)?,
         })
     }
 }

@@ -22,10 +22,9 @@ mod snapshot;
 pub use snapshot::MirrorSnapshot;
 
 use crate::domain::error::{AppError, AppResult};
-use alloy::primitives::U256;
 use bundle::{Bundle, BundleEntry};
 use crypto::tree::{Field, Frontier};
-use leaf::leaf_hash;
+use leaf::check_canonical;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::error;
@@ -237,39 +236,32 @@ impl TreeMirror {
         self.tree.root()
     }
 
-    /// Insert `(cm, cv_dep)` pairs. The mirror hashes each pair into a leaf before
-    /// insertion to stay in sync with the on-chain tree, which advances through
-    /// SNARK-verified leaf roots.
+    /// Insert `leaves`, the note commitments the batch circuit appends; see
+    /// `PaddedBatch::leaves`.
     pub fn reserve_and_advance_batch(
         &mut self,
-        cms: &[(Field, [U256; 2])],
+        leaves: &[Field],
     ) -> AppResult<(ReservedSlot, AdvancedState)> {
         self.check_usable()?;
         let start_index = self.tree.leaf_count();
 
         // Capacity first: a length check, so an oversized batch is refused without
-        // computing a single Poseidon. Widened to `u64` rather than narrowing the
-        // leaf count to `usize`, so the comparison cannot truncate.
-        if start_index + cms.len() as u64 > MAX_LEAVES as u64 {
+        // reading a single leaf. Widened to `u64` rather than narrowing the leaf
+        // count to `usize`, so the comparison cannot truncate.
+        if start_index + leaves.len() as u64 > MAX_LEAVES as u64 {
             return Err(AppError::BadRequest(format!(
                 "chain {}: tree is full ({} leaves, {} more requested, capacity {})",
                 self.chain_id,
                 start_index,
-                cms.len(),
+                leaves.len(),
                 MAX_LEAVES
             )));
         }
 
-        // Then hash every leaf up front. `leaf_hash` is Poseidon, which rejects a
-        // non-canonical input, and `cm` and `cv_dep` are wallet-supplied on the
-        // spend and swap paths. Hashing inside the insert loop would fail after
-        // earlier leaves had gone in, leaving the mirror one leaf ahead of the
-        // chain with no rollback and no park. Nothing mutates until every leaf is
-        // known good.
-        let leaves = cms
-            .iter()
-            .map(|(cm, cv_dep)| leaf_hash(cm, cv_dep))
-            .collect::<AppResult<Vec<Field>>>()?;
+        // Then check every leaf up front: `out_cm` is wallet-supplied on the spend
+        // and swap paths, and a leaf at or above the modulus is one the pool
+        // cannot insert. Nothing mutates until every leaf is known good.
+        leaves.iter().try_for_each(check_canonical)?;
 
         let old_root = self.tree.root();
         let old_frontier = self.tree.slots();
@@ -281,8 +273,7 @@ impl TreeMirror {
 
         // Past this point the tree is mutated, so any failure must be unwound
         // rather than propagated directly; see `insert_all`.
-        let inserted = self.insert_all(leaves)?;
-        debug_assert_eq!(inserted, cms.len());
+        self.insert_all(leaves)?;
 
         let new_root = self.tree.root();
         if let Some(bundle) = self.bundle.as_mut() {
@@ -303,14 +294,14 @@ impl TreeMirror {
         ))
     }
 
-    /// Insert pre-hashed leaves, leaving the tree untouched if any insert fails.
+    /// Insert leaves, leaving the tree untouched if any insert fails.
     /// `Frontier::push` should not fail once capacity is checked, but a partial
     /// batch is the state that desyncs a mirror permanently, so it is undone here
     /// and the mirror parked if that also fails.
-    fn insert_all(&mut self, leaves: Vec<Field>) -> AppResult<usize> {
+    fn insert_all(&mut self, leaves: &[Field]) -> AppResult<()> {
         let n = leaves.len();
-        for (i, leaf) in leaves.into_iter().enumerate() {
-            if let Err(e) = self.tree.push(leaf) {
+        for (i, leaf) in leaves.iter().enumerate() {
+            if let Err(e) = self.tree.push(*leaf) {
                 let cause = AppError::Internal(format!(
                     "chain {}: leaf {} of {} failed to insert: {}",
                     self.chain_id, i, n, e
@@ -322,7 +313,7 @@ impl TreeMirror {
                 return Err(cause);
             }
         }
-        Ok(n)
+        Ok(())
     }
 }
 

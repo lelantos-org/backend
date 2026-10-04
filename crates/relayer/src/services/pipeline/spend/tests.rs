@@ -4,6 +4,7 @@ use super::*;
 use crate::domain::dto::{
     OutputAuxDto, PointDto, ProofDto, PubInputsDto, TRANSACT_IN, TRANSACT_OUT,
 };
+use alloy::primitives::U256;
 use std::array;
 
 const CHAIN_ID: i64 = 31337;
@@ -23,7 +24,8 @@ fn payload(kind: SpendKind, public_out: u64) -> SubmitSpendPayload {
     };
     let aux = OutputAuxDto {
         clue_r: p.clone(),
-        eph_pub: p.clone(),
+        clue_q: p.clone(),
+        eph_pub: p,
         ciphertext: "0x".into(),
     };
     let recipient = match kind {
@@ -50,12 +52,10 @@ fn payload(kind: SpendKind, public_out: u64) -> SubmitSpendPayload {
             merkle_root: format!("0x{:0>64}", "0"),
             nullifier: array::from_fn(|i| format!("0x{:0>64}", i + 1)),
             out_cm: array::from_fn(|i| format!("0x{:0>64}", i + 10)),
-            public_asset_id: 1,
-            public_in: 0,
+            // A transfer names no asset.
+            public_asset_id: u64::from(public_out != 0),
             public_out,
-            in_cv: array::from_fn(|_| p.clone()),
-            out_cv: array::from_fn(|_| p.clone()),
-            out_cv_dep: array::from_fn(|_| p.clone()),
+            digest: "0".into(),
             recipient,
             chain_id: CHAIN_ID as u64,
             payer: "0x0000000000000000000000000000000000000000".into(),
@@ -133,9 +133,25 @@ fn rejects_withdraw_without_public_out() {
     assert!(checked(SpendKind::Withdraw, 0, |_| {}).is_err());
 }
 
+/// The pool reverts `MustNotNameAsset`.
 #[test]
-fn rejects_public_in_nonzero() {
-    assert!(checked(SpendKind::Transfer, 0, |p| p.pub_inputs.public_in = 1).is_err());
+fn rejects_a_transfer_naming_an_asset() {
+    assert!(checked(SpendKind::Transfer, 0, |p| p.pub_inputs.public_asset_id = 1).is_err());
+}
+
+/// The verifiers reject a public signal outside the field, while the local proof
+/// check reduces its words, so such a digest is refused up front.
+#[test]
+fn rejects_a_digest_that_is_not_a_field_element() {
+    let modulus = crate::domain::field::BN254_R.to_string();
+    let err = checked(SpendKind::Withdraw, 1_000, |p| {
+        p.pub_inputs.digest = modulus
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&err, AppError::BadRequest(m) if m.contains("pubInputs.digest")),
+        "{err}"
+    );
 }
 
 /// The pipeline is selected by the envelope's chain id while the SNARK is bound

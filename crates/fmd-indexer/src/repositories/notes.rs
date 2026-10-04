@@ -1,15 +1,19 @@
-use super::log_unique_violation;
 use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
 use database::listen::{self, CHANNEL_NOTES_APPENDED};
-pub use database::models::{LeafInputsRow, NewNote, NoteRow};
+pub use database::models::{LeafRow, NewNote, NoteRow};
 use database::schema::notes;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
 #[async_trait]
 pub trait NotesRepo: Send + Sync {
+    /// Insert notes, skipping any whose `(chain_id, leaf_index)` is already
+    /// stored, and return how many were written.
+    ///
+    /// A note is identified by its leaf position, not its commitment: two
+    /// leaves may hold the same `cm`, and both are rows.
     async fn insert_batch(&self, rows: &[NewNote]) -> Result<usize>;
     async fn delete_from_block(&self, chain_id: i64, from_block: i64) -> Result<usize>;
     async fn fetch_after(&self, chain_id: i64, after_id: i64, limit: i64) -> Result<Vec<NoteRow>>;
@@ -21,12 +25,12 @@ pub trait NotesRepo: Send + Sync {
     /// Highest ingested `notes.id` across all chains, or 0 when empty.
     async fn max_id(&self) -> Result<i64>;
 
-    /// Leaf inputs for `chain_id` in `[from, to)`, ordered by `leaf_index`.
+    /// Leaves of `chain_id` in `[from, to)`, ordered by `leaf_index`.
     ///
     /// Only the one-shot tree backfill reads this, so it is paged rather than
     /// streamed: a chain with millions of notes would otherwise materialise every
     /// leaf at once.
-    async fn leaf_inputs(&self, chain_id: i64, from: i64, to: i64) -> Result<Vec<LeafInputsRow>>;
+    async fn leaves(&self, chain_id: i64, from: i64, to: i64) -> Result<Vec<LeafRow>>;
 
     /// Wake the filter loop after a commit.
     ///
@@ -37,7 +41,7 @@ pub trait NotesRepo: Send + Sync {
 }
 
 /// Rows per INSERT. Postgres caps a statement at 65535 bind parameters and
-/// `NewNote` binds 13 columns, so chunking keeps a large `filter_batch` from
+/// `NewNote` binds 11 columns, so chunking keeps a large `filter_batch` from
 /// failing every tick.
 const INSERT_CHUNK: usize = 2000;
 
@@ -62,11 +66,10 @@ impl NotesRepo for PostgresNotesRepo {
         for chunk in rows.chunks(INSERT_CHUNK) {
             n += diesel::insert_into(notes::table)
                 .values(chunk)
-                .on_conflict((notes::chain_id, notes::cm))
+                .on_conflict((notes::chain_id, notes::leaf_index))
                 .do_nothing()
                 .execute(&mut conn)
-                .await
-                .inspect_err(|e| log_unique_violation("notes", e))?;
+                .await?;
         }
         Ok(n)
     }
@@ -117,14 +120,14 @@ impl NotesRepo for PostgresNotesRepo {
         Ok(max.unwrap_or(0))
     }
 
-    async fn leaf_inputs(&self, chain_id: i64, from: i64, to: i64) -> Result<Vec<LeafInputsRow>> {
+    async fn leaves(&self, chain_id: i64, from: i64, to: i64) -> Result<Vec<LeafRow>> {
         let mut conn = super::conn(&self.pool).await?;
         Ok(notes::table
             .filter(notes::chain_id.eq(chain_id))
             .filter(notes::leaf_index.ge(from))
             .filter(notes::leaf_index.lt(to))
             .order(notes::leaf_index.asc())
-            .select(LeafInputsRow::as_select())
+            .select(LeafRow::as_select())
             .load(&mut conn)
             .await?)
     }

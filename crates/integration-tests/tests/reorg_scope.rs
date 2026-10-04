@@ -136,13 +136,12 @@ async fn the_protocol_half_unmarks_flushes_and_cancels_inside_the_fork() {
     ] {
         diesel::sql_query(
             "INSERT INTO deposit_escrowed_events (chain_id, block_number, log_index, deposit_id, \
-               payer, recipient, public_asset_id, public_in, fee_bps_at_submit, cm, cv_dep_x, \
-               cv_dep_y, rcv, aux, fee_asset_id, fee_in, fee_cm, fee_cv_dep_x, fee_cv_dep_y, \
-               fee_rcv, fee_aux, submitted_at_block, flushed_at_block, flushed_at_ts, \
-               flushed_tx_hash, \
+               payer, recipient, public_asset_id, public_in, fee_bps_at_submit, \"inner\", aux, \
+               fee_asset_id, fee_in, fee_inner, fee_aux, pulled, submitted_at_block, \
+               flushed_at_block, flushed_at_ts, flushed_tx_hash, \
                flushed_log_index, canceled_at_block, tx_hash, block_ts) \
-             VALUES ($1, $2, $3, $3, '\\x00', '\\x00', 1, 0, 0, '\\x00', 0, 0, 0, '{}', 0, 0, '\\x00', \
-               0, 0, 0, '{}', $2, $4, $4, CASE WHEN $4 IS NULL THEN NULL ELSE '\\x02'::bytea END, \
+             VALUES ($1, $2, $3, $3, '\\x00', '\\x00', 1, 0, 0, '\\x00', '{}', 0, 0, '\\x00', \
+               '{}', 0, $2, $4, $4, CASE WHEN $4 IS NULL THEN NULL ELSE '\\x02'::bytea END, \
                CASE WHEN $4 IS NULL THEN NULL ELSE 0 END, $5, '\\x02', 0)",
         )
         .bind::<diesel::sql_types::BigInt, _>(CHAIN)

@@ -3,6 +3,8 @@
 //! No IO and no database.
 
 pub mod batch;
+#[cfg(test)]
+pub(crate) mod batch_vectors;
 pub mod deposit;
 pub mod deposit_digest;
 pub mod dto;

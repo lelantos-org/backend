@@ -116,6 +116,7 @@ pub(super) fn build_swap_args(payload: &SubmitSwapPayload) -> AppResult<ISwapWra
             newRoot: FixedBytes::ZERO,
             startIndex: 0,
             anchorIndex: 0,
+            digest: U256::ZERO,
         },
         aux_w: build_aux(&payload.aux)?,
         deposit_d: build_deposit_request(&payload.swap.deposit_d)?,
@@ -128,8 +129,8 @@ pub(super) fn build_swap_args(payload: &SubmitSwapPayload) -> AppResult<ISwapWra
 }
 
 /// The shape checks leg 2's deposit and the refund deposit share: each is
-/// chain-bound on its own, paid for by the wrapper, and hashed into the tree by
-/// the flush that materialises it.
+/// chain-bound on its own, paid for by the wrapper, and built into two leaves
+/// by the flush that materialises it.
 fn check_swap_deposit(
     d: &DepositRequestDto,
     name: &'static str,
@@ -153,14 +154,12 @@ fn check_swap_deposit(
     if d.public_in == 0 {
         return Err(AppError::BadRequest(format!("{name}.publicIn must be > 0")));
     }
-    // Its leaf is hashed into the tree by the flush that materialises it, so its
-    // field elements must be canonical for the same reason leg 1's are.
+    // The flush that materialises it takes `inner` and `feeInner` as batch
+    // coefficients and reverts `CoefficientOutOfField` on a non-canonical one,
+    // which would leave the escrow unflushable.
     let field = |suffix: &str| format!("{name}.{suffix}");
-    parse_field(&d.out_cm, FieldRef::Named(&field("outCm")))?;
-    for (i, v) in d.cv_dep.iter().enumerate() {
-        parse_field(v, FieldRef::Index(&field("cvDep"), i))?;
-    }
-    parse_field(&d.rcv, FieldRef::Named(&field("rcv")))?;
+    parse_field(&d.inner, FieldRef::Named(&field("inner")))?;
+    parse_field(&d.fee_inner, FieldRef::Named(&field("feeInner")))?;
     Ok(())
 }
 
@@ -171,13 +170,8 @@ pub(super) fn validate_swap_shape(
 ) -> AppResult<ISwapWrapper::SwapArgs> {
     binding.check(&p.pub_inputs)?;
     // Leg 1 is structurally a withdraw: shielded notes to a public token held by
-    // the wrapper. The transact SNARK enforces conservation, so these checks only
-    // reject clearly wrong shapes early.
-    if p.pub_inputs.public_in != 0 {
-        return Err(AppError::BadRequest(
-            "swap payload must have publicIn == 0".into(),
-        ));
-    }
+    // the wrapper. The transact SNARK enforces conservation, so this check only
+    // rejects a clearly wrong shape early.
     if p.pub_inputs.public_out == 0 {
         return Err(AppError::BadRequest(
             "swap payload must have publicOut > 0".into(),

@@ -86,6 +86,36 @@ pub fn hash_bytes_be(inputs: &[&[u8]]) -> Result<[u8; 32], PoseidonError> {
     Ok(buf)
 }
 
+/// Domain-separation tag of [`coeff_digest`]'s first block, mirroring
+/// `TAG_DIGEST` in `circuits/src/lib/tags.circom`.
+pub const TAG_DIGEST: u64 = 15;
+
+/// Words one Poseidon(5) block of [`coeff_digest`] absorbs.
+const DIGEST_BLOCK: usize = 4;
+
+/// `CoeffDigest` of `circuits/src/lib/poly_eval.circom`: a Poseidon(5) fold
+/// over big-endian words, four per block, the last block zero-padded.
+///
+/// ```text
+/// h_0     = Poseidon(TAG_DIGEST, w[0..3])
+/// h_{b+1} = Poseidon(h_b,        w[4b+4 .. 4b+7])
+/// ```
+///
+/// Fails on a word that is not smaller than the field modulus, which is not a
+/// coefficient the circuit can hold.
+pub fn coeff_digest(words: &[[u8; 32]]) -> Result<[u8; 32], PoseidonError> {
+    let mut state = [0u8; 32];
+    state[24..].copy_from_slice(&TAG_DIGEST.to_be_bytes());
+    for block in words.chunks(DIGEST_BLOCK) {
+        let mut inputs = [[0u8; 32]; 1 + DIGEST_BLOCK];
+        inputs[0] = state;
+        inputs[1..=block.len()].copy_from_slice(block);
+        let refs: [&[u8]; 1 + DIGEST_BLOCK] = std::array::from_fn(|i| inputs[i].as_slice());
+        state = hash_bytes_be(&refs)?;
+    }
+    Ok(state)
+}
+
 fn fq_from_be_canonical(bytes: &[u8]) -> Result<Fq, PoseidonError> {
     let n = num_bigint::BigUint::from_bytes_be(bytes);
     let bigint = <Fq as PrimeField>::BigInt::try_from(n)

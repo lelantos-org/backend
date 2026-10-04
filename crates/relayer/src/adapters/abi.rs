@@ -25,15 +25,14 @@ sol! {
             bytes32 merkleRoot;
             bytes32[4] nullifier;
             bytes32[6] outCm;
+            /// Zero unless `publicOut != 0`: a transfer names no asset.
             uint64 publicAssetId;
-            uint64 publicIn;
             uint64 publicOut;
-            uint256[2][4] inCv;
-            uint256[2][6] outCv;
-            uint256[2][6] outCvDep;
-            /// Challenge-only: hashed into `z`, never evaluated into `y`. They
-            /// follow every pinned member, as in `PubInputs.Transact`, so the
-            /// coefficients are the calldata block's leading words.
+            /// The circuit's Poseidon commitment to the thirteen words above,
+            /// which are the coefficients. Hashed into `z`, not evaluated into
+            /// `y`, and handed to the verifier as given.
+            uint256 digest;
+            /// Challenge-only: hashed into `z`, never evaluated into `y`.
             address recipient;
             uint256 chainId;
             address payer;
@@ -48,16 +47,20 @@ sol! {
         /// than by pair: `actualCount` is a leaf count in `[1, MAX_L_BATCH]`, so
         /// a batch may commit an odd number of leaves. Slots beyond
         /// `actualCount` must be zero, both in-circuit and on-chain.
+        ///
+        /// `cms[k]` is the note commitment on a spend leaf and the depositor's
+        /// `inner` on a deposit leaf; see `PaddedBatch::leaves`.
         struct TreeUpdateBatch {
             bytes32 oldRoot;
             bytes32 newRoot;
             uint64 startIndex;
             uint64 actualCount;
             bytes32[8] cms;
-            uint256[2][8] cvDeps;
             uint64[8] leafAsset;
             uint64[8] leafPublicIn;
             uint8[8] isDeposit;
+            /// The batch circuit's Poseidon commitment to the 36 words above.
+            uint256 digest;
         }
         /// `PubInputs.SpendTree`: the part of a spend's tree update the relayer
         /// supplies. The pool rebuilds the rest of the `TreeUpdateBatch` image
@@ -69,29 +72,28 @@ sol! {
             /// Ring slot of `Transact.merkleRoot`: the pool checks
             /// `roots[anchorIndex] == merkleRoot`. Not a public input.
             uint8 anchorIndex;
+            /// The batch circuit's digest over the 36 coefficients of the batch
+            /// this spend implies.
+            uint256 digest;
         }
         /// `PubInputs.DepositRequest`. A deposit occupies two leaves: the
-        /// depositor's, whose `cvDep` the batch circuit pins to `publicIn` units
-        /// of `publicAssetId` under blinder `rcv`, and the fee note, pinned to
-        /// `feeIn` units of `feeAssetId` under `feeRcv`.
+        /// depositor's, which the batch circuit builds from `publicIn` units of
+        /// `publicAssetId` and `inner`, and the fee note, built from `feeIn`
+        /// units of `feeAssetId` and `feeInner`.
         struct DepositRequest {
             uint256 chainId;
             uint64 publicAssetId;
             uint64 publicIn;
             address payer;
             address recipient;
-            bytes32 outCm;
-            uint256[2] cvDep;
-            uint256 rcv;
+            /// `Poseidon(TAG_INNER, pk, rho, rcm)` of the depositor's note.
+            bytes32 inner;
             // The relayer's fee note, the second leaf every deposit mints.
-            // Appended so the existing prefix keeps its ABI offsets.
             // `feeAssetId` may differ from `publicAssetId`; it is 0 exactly
             // when `feeIn` is 0.
             uint64 feeAssetId;
             uint64 feeIn;
-            bytes32 feeCm;
-            uint256[2] feeCvDep;
-            uint256 feeRcv;
+            bytes32 feeInner;
         }
         /// Digest fields the contract does not store, replayed at flush time and
         /// verified against `escrowed[id]`. Sourced from the deposit's
@@ -100,10 +102,16 @@ sol! {
             address payer;
             uint32 submittedAt;
             uint16 fbps;
+            /// `DepositEscrowed.pulled`; see `PendingDeposit::pulled`.
+            uint256 pulled;
         }
+        /// `AuxValidation.Output`. `clueQ` is the subgroup witness for the
+        /// clue: the pool checks `[8]·Q == R`.
         struct OutputAux {
             uint256 clueRx;
             uint256 clueRy;
+            uint256 clueQx;
+            uint256 clueQy;
             uint256 ephPubX;
             uint256 ephPubY;
             bytes ciphertext;
@@ -122,8 +130,7 @@ sol! {
         struct FeeNote {
             uint48 feeIn;
             uint64 feeAssetId;
-            bytes32 feeCm;
-            uint256[2] feeCvDep;
+            bytes32 feeInner;
         }
 
         function currentRoot() external view returns (bytes32);
@@ -163,13 +170,13 @@ sol! {
         function cancelDeposit(
             uint256 id,
             uint48 publicIn,
-            bytes32 cm,
-            uint256[2] calldata cvDep,
+            bytes32 inner,
             uint64 publicAssetId,
             uint16 fbps,
             address payer,
             uint32 submittedAt,
-            FeeNote calldata fee
+            FeeNote calldata fee,
+            uint256 pulled
         ) external returns (uint256 total, uint256 feeRefunded);
 
         function transfer(
@@ -277,12 +284,12 @@ mod tests {
     #[test]
     fn call_selectors_match_the_contracts() {
         for (name, selector, expected) in [
-            ("MASP.transfer", IMasp::transferCall::SELECTOR, "ccef4c72"),
-            ("MASP.withdraw", IMasp::withdrawCall::SELECTOR, "5df701cb"),
+            ("MASP.transfer", IMasp::transferCall::SELECTOR, "fb6accd7"),
+            ("MASP.withdraw", IMasp::withdrawCall::SELECTOR, "6199cd11"),
             (
                 "MASP.flushBatch",
                 IMasp::flushBatchCall::SELECTOR,
-                "2bd77bd8",
+                "f5ab0489",
             ),
             ("MASP.rootIndex", IMasp::rootIndexCall::SELECTOR, "529dd5ea"),
             ("MASP.roots", IMasp::rootsCall::SELECTOR, "c2b40ae4"),
@@ -292,26 +299,26 @@ mod tests {
                 "fdab463d",
             ),
             ("MASP.escrowed", IMasp::escrowedCall::SELECTOR, "34918bde"),
-            ("MASP.deposit", IMasp::depositCall::SELECTOR, "fee3714c"),
+            ("MASP.deposit", IMasp::depositCall::SELECTOR, "8969b932"),
             (
                 "MASP.depositAuthorized",
                 IMasp::depositAuthorizedCall::SELECTOR,
-                "df1daf3b",
+                "4778b347",
             ),
             (
                 "MASP.cancelDeposit",
                 IMasp::cancelDepositCall::SELECTOR,
-                "5a0083a7",
+                "c4e85ddc",
             ),
             (
                 "NativeAdapter.withdrawNative",
                 INativeAdapter::withdrawNativeCall::SELECTOR,
-                "dc30d670",
+                "20f6a331",
             ),
             (
                 "SwapWrapper.swap",
                 ISwapWrapper::swapCall::SELECTOR,
-                "942bc9b9",
+                "2037231e",
             ),
             (
                 "Bundler.execute",

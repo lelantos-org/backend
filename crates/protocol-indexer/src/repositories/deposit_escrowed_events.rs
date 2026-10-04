@@ -18,10 +18,7 @@ pub struct NewDepositEscrowed {
     pub public_asset_id: i64,
     pub public_in: BigDecimal,
     pub fee_bps_at_submit: i32,
-    pub cm: Vec<u8>,
-    pub cv_dep_x: BigDecimal,
-    pub cv_dep_y: BigDecimal,
-    pub rcv: BigDecimal,
+    pub inner: Vec<u8>,
     pub aux: JsonValue,
     /// The relayer's fee note, the deposit's second leaf. Part of the digest
     /// preimage: the relayer rebuilds `MASP._depositDigest` from these, so they
@@ -30,11 +27,10 @@ pub struct NewDepositEscrowed {
     /// fee.
     pub fee_asset_id: i64,
     pub fee_in: BigDecimal,
-    pub fee_cm: Vec<u8>,
-    pub fee_cv_dep_x: BigDecimal,
-    pub fee_cv_dep_y: BigDecimal,
-    pub fee_rcv: BigDecimal,
+    pub fee_inner: Vec<u8>,
     pub fee_aux: JsonValue,
+    /// `DepositEscrowed.pulled` as logged; digest preimage.
+    pub pulled: BigDecimal,
     pub submitted_at_block: i64,
     pub tx_hash: Vec<u8>,
     pub block_ts: i64,

@@ -30,21 +30,17 @@ pub struct TreeUpdateBatchWitness {
     pub new_root: String,
     pub start_index: String,
     pub actual_count: String,
-    /// `MAX_L_BATCH` leaf-indexed entries. Padding, where `i >= actual_count`,
-    /// must be "0".
+    /// `MAX_L_BATCH` leaf-indexed entries: the note commitment on a spend leaf,
+    /// the depositor's `inner` on a deposit leaf. Padding, where
+    /// `i >= actual_count`, must be "0".
     pub cms: Vec<String>,
-    /// `MAX_L_BATCH` Baby-Jubjub points, the depositor-anchored value
-    /// commitments. Padding entries must be "0".
-    pub cv_dep: Vec<[String; 2]>,
     /// `MAX_L_BATCH` per-leaf `publicAssetId`. Padding is "0".
     pub leaf_asset: Vec<String>,
     /// `MAX_L_BATCH` per-leaf `publicIn`. Padding is "0".
     pub leaf_public_in: Vec<String>,
-    /// `MAX_L_BATCH` 0/1 flags, where 1 marks a deposit leaf whose binding the
-    /// circuit enforces.
+    /// `MAX_L_BATCH` 0/1 flags, where 1 marks a deposit leaf, which the circuit
+    /// builds from `leaf_asset`, `leaf_public_in` and `cms`.
     pub is_deposit: Vec<String>,
-    /// `MAX_L_BATCH` private per-leaf `rcv_dep`. Padding is "0".
-    pub rcv: Vec<String>,
     pub frontier_in: Vec<[String; 3]>,
 }
 
@@ -325,8 +321,8 @@ impl TreeUpdateBatchWitness {
     /// Borrows: this is a view, for inspection and for the prover's own parse
     /// into field elements, and both are done with it before the witness is.
     pub fn signals(&self) -> Vec<(&'static str, Vec<&str>)> {
-        /// Flattening a point or a frontier row is what turns it into the width
-        /// circom expects.
+        /// Flattening a frontier row is what turns it into the width circom
+        /// expects.
         fn flat<const N: usize>(rows: &[[String; N]]) -> Vec<&str> {
             rows.iter().flatten().map(String::as_str).collect()
         }
@@ -344,11 +340,9 @@ impl TreeUpdateBatchWitness {
             ("start_index", one(&self.start_index)),
             ("actual_count", one(&self.actual_count)),
             ("cms", each(&self.cms)),
-            ("cv_dep", flat(&self.cv_dep)),
             ("leaf_asset", each(&self.leaf_asset)),
             ("leaf_public_in", each(&self.leaf_public_in)),
             ("is_deposit", each(&self.is_deposit)),
-            ("rcv", each(&self.rcv)),
             ("frontier_in", flat(&self.frontier_in)),
         ]
     }
@@ -427,11 +421,9 @@ mod tests {
             start_index: "4".into(),
             actual_count: "1".into(),
             cms: vec!["5".into(); n],
-            cv_dep: vec![["6".into(), "7".into()]; n],
             leaf_asset: vec!["0".into(); n],
             leaf_public_in: vec!["0".into(); n],
             is_deposit: vec!["0".into(); n],
-            rcv: vec!["0".into(); n],
             frontier_in: vec![["8".into(), "9".into(), "10".into()]; n],
         }
     }
@@ -449,14 +441,12 @@ mod tests {
             [
                 "actual_count",
                 "cms",
-                "cv_dep",
                 "frontier_in",
                 "is_deposit",
                 "leaf_asset",
                 "leaf_public_in",
                 "new_root",
                 "old_root",
-                "rcv",
                 "start_index",
                 "z",
             ]
@@ -475,8 +465,8 @@ mod tests {
         assert_eq!(unique.len(), names.len(), "duplicate signal in the table");
     }
 
-    /// Points and frontier rows flatten; scalars stay single. A signal that
-    /// arrived nested would be the wrong width for the circuit's declaration.
+    /// Frontier rows flatten; scalars stay single. A signal that arrived nested
+    /// would be the wrong width for the circuit's declaration.
     #[test]
     fn array_signals_flatten_and_scalars_do_not() {
         let w = witness(2);
@@ -493,7 +483,6 @@ mod tests {
             assert_eq!(width(scalar), 1, "{scalar}");
         }
         assert_eq!(width("cms"), 2);
-        assert_eq!(width("cv_dep"), 4, "flattened BJJ points");
         assert_eq!(
             width("frontier_in"),
             6,
@@ -507,7 +496,7 @@ mod tests {
     fn values_are_parsed_as_decimal_in_order() {
         let inputs = circom_inputs(&witness(1)).unwrap();
         assert_eq!(inputs["z"], vec![BigInt::from(1u8)]);
-        assert_eq!(inputs["cv_dep"], vec![BigInt::from(6u8), BigInt::from(7u8)]);
+        assert_eq!(inputs["cms"], vec![BigInt::from(5u8)]);
         assert_eq!(
             inputs["frontier_in"],
             vec![BigInt::from(8u8), BigInt::from(9u8), BigInt::from(10u8)]
@@ -565,11 +554,9 @@ mod tests {
             start_index: "0".into(),
             actual_count: "0".into(),
             cms: vec!["0".into(); 8],
-            cv_dep: vec![["0".into(), "0".into()]; 8],
             leaf_asset: vec!["0".into(); 8],
             leaf_public_in: vec!["0".into(); 8],
             is_deposit: vec!["0".into(); 8],
-            rcv: vec!["0".into(); 8],
             frontier_in: vec![["0".into(), "0".into(), "0".into()]; 11],
         };
 

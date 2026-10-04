@@ -1,6 +1,6 @@
 use crate::domain::error::AppResult;
 use database::DbPool;
-pub use database::models::{LeafInputsRow, NoteRow};
+pub use database::models::{LeafRow, NoteRow};
 use database::schema::notes;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -82,23 +82,21 @@ pub async fn list(
         .map_err(super::db_err)
 }
 
-/// `(leaf_index, cm, cv_dep)` for a chain, ordered by `leaf_index`, from `from`
-/// up to but excluding `to`. Source for the commitment-chunk endpoint, which is
-/// now the only caller: the tree mirror that also read this is gone, and with it
-/// the unbounded `to`.
-pub async fn list_leaf_inputs(
+/// `(leaf_index, cm)` for a chain, ordered by `leaf_index`, from `from`
+/// up to but excluding `to`. Source for the commitment-chunk endpoint.
+pub async fn list_leaves(
     pool: &DbPool,
     chain_id: i64,
     from: i64,
     to: i64,
-) -> AppResult<Vec<LeafInputsRow>> {
+) -> AppResult<Vec<LeafRow>> {
     let mut conn = super::conn(pool).await?;
     notes::table
         .filter(notes::chain_id.eq(chain_id))
         .filter(notes::leaf_index.ge(from))
         .filter(notes::leaf_index.lt(to))
         .order(notes::leaf_index.asc())
-        .select(LeafInputsRow::as_select())
+        .select(LeafRow::as_select())
         .load(&mut conn)
         .await
         .map_err(super::db_err)

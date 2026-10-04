@@ -95,12 +95,11 @@ async fn flushed_deposit(
     diesel::sql_query(
         "INSERT INTO deposit_escrowed_events \
            (chain_id, block_number, log_index, deposit_id, payer, recipient, public_asset_id, \
-            public_in, fee_bps_at_submit, cm, cv_dep_x, cv_dep_y, rcv, aux, fee_asset_id, fee_in, \
-            fee_cm, fee_cv_dep_x, fee_cv_dep_y, fee_rcv, fee_aux, submitted_at_block, tx_hash, \
-            block_ts, \
+            public_in, fee_bps_at_submit, \"inner\", aux, fee_asset_id, fee_in, fee_inner, fee_aux, \
+            pulled, submitted_at_block, tx_hash, block_ts, \
             flushed_at_block, flushed_at_ts, flushed_tx_hash, flushed_log_index) \
-         VALUES ($1, 90, $2, $2, '\\x01', '\\x02', $3, 10, 0, '\\x03', 0, 0, 0, '{}', 0, 0, '\\x04', \
-                 0, 0, 0, '{}', 90, '\\x90', $4, $5, $6, $7, $8)",
+         VALUES ($1, 90, $2, $2, '\\x01', '\\x02', $3, 10, 0, '\\x03', '{}', 0, 0, '\\x04', '{}', \
+                 0, 90, '\\x90', $4, $5, $6, $7, $8)",
     )
     .bind::<BigInt, _>(CHAIN)
     .bind::<BigInt, _>(deposit_id)

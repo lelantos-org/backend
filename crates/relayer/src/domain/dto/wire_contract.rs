@@ -14,16 +14,10 @@ fn point() -> serde_json::Value {
 fn aux() -> serde_json::Value {
     serde_json::json!({
         "clueR": point(),
+        "clueQ": point(),
         "ephPub": point(),
         "ciphertext": "0xdead",
     })
-}
-
-/// `n` copies of `point()`, sized from the arity constants rather than
-/// written out: `TRANSACT_IN` and `TRANSACT_OUT` stopped being the same
-/// number at 4x6, and a literal list here would go stale on the next move.
-fn points(n: usize) -> serde_json::Value {
-    serde_json::Value::Array((0..n).map(|_| point()).collect())
 }
 
 /// `n` distinct decimal strings starting at `from`.
@@ -42,11 +36,8 @@ fn pub_inputs() -> serde_json::Value {
         "nullifier": decimals(1, TRANSACT_IN),
         "outCm": decimals(1 + TRANSACT_IN, TRANSACT_OUT),
         "publicAssetId": 1,
-        "publicIn": 0,
         "publicOut": 500,
-        "inCv": points(TRANSACT_IN),
-        "outCv": points(TRANSACT_OUT),
-        "outCvDep": points(TRANSACT_OUT),
+        "digest": "12",
         "recipient": "0x000000000000000000000000000000000000beef",
         "chainId": 31337,
         "payer": "0x0000000000000000000000000000000000000001",
@@ -70,9 +61,7 @@ fn deposit_request() -> serde_json::Value {
         "publicIn": 990,
         "payer": "0x0000000000000000000000000000000000000077",
         "recipient": "0x000000000000000000000000000000000000beef",
-        "outCm": "0x05",
-        "cvDep": ["23", "24"],
-        "rcv": "27",
+        "inner": "0x05",
         // The asset the fee note is minted in, a JSON number like
         // `publicAssetId`.
         "feeAssetId": 2,
@@ -80,9 +69,7 @@ fn deposit_request() -> serde_json::Value {
         // decimal string on `/v1/deposit`: the two DTOs declare it
         // differently and `codec.ts` encodes each accordingly.
         "feeIn": 5,
-        "feeCm": "0x06",
-        "feeCvDep": ["25", "26"],
-        "feeRcv": "28",
+        "feeInner": "0x06",
     })
 }
 
@@ -97,6 +84,7 @@ fn spend_payload_matches_the_sdk_encoding() {
     });
     let p: SubmitSpendPayload = serde_json::from_value(raw).expect("spend payload");
     assert_eq!(p.kind, SpendKind::Withdraw);
+    assert_eq!(p.pub_inputs.digest, "12");
     assert_eq!(p.pub_inputs.intent_hash, "3");
     assert_eq!(p.pub_inputs.nullifier.len(), TRANSACT_IN);
     assert_eq!(p.aux.len(), TRANSACT_OUT);
@@ -161,10 +149,10 @@ fn swap_payload_matches_the_sdk_encoding() {
     });
     let p: SubmitSwapPayload = serde_json::from_value(raw).expect("swap payload");
     assert_eq!(p.swap.deposit_d.public_in, 990);
-    assert_eq!(p.swap.deposit_d.rcv, "27");
+    assert_eq!(p.swap.deposit_d.inner, "0x05");
+    assert_eq!(p.swap.deposit_d.fee_inner, "0x06");
     assert_eq!(p.swap.deposit_d.fee_asset_id, 2);
     assert_eq!(p.swap.deposit_d.fee_in, 5);
-    assert_eq!(p.swap.deposit_d.fee_rcv, "28");
     assert_eq!(p.swap.refund_d.public_in, 990);
     assert_eq!(p.swap.deadline, "1900000000");
     assert_eq!(

@@ -220,3 +220,47 @@ fn every_supported_arity_still_builds() {
         with_hasher(arity, |_| Ok(())).unwrap_or_else(|e| panic!("arity {arity}: {e}"));
     }
 }
+
+/// A big-endian word holding `n`.
+fn word(n: u64) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[24..].copy_from_slice(&n.to_be_bytes());
+    w
+}
+
+/// The fold's shape: the tag opens the first block, each later block chains on
+/// the state before it, and a short last block is zero-padded.
+#[test]
+fn coeff_digest_folds_four_words_per_block_from_the_tag() {
+    let w: Vec<[u8; 32]> = (1..=5).map(word).collect();
+    let zero = [0u8; 32];
+
+    let first = hash_bytes_be(&[&word(TAG_DIGEST), &w[0], &w[1], &w[2], &w[3]]).unwrap();
+    assert_eq!(coeff_digest(&w[..4]).unwrap(), first);
+    assert_eq!(
+        coeff_digest(&w).unwrap(),
+        hash_bytes_be(&[&first, &w[4], &zero, &zero, &zero]).unwrap()
+    );
+    assert_eq!(
+        coeff_digest(&w[..1]).unwrap(),
+        hash_bytes_be(&[&word(TAG_DIGEST), &w[0], &zero, &zero, &zero]).unwrap()
+    );
+}
+
+/// A coefficient at or above the modulus has no digest: the contract reverts
+/// `CoefficientOutOfField` on it, so nothing is derived from it here either.
+#[test]
+fn coeff_digest_rejects_a_non_canonical_word() {
+    let modulus = Fq::MODULUS.to_bytes_be();
+    let mut r = [0u8; 32];
+    r[32 - modulus.len()..].copy_from_slice(&modulus);
+    assert!(matches!(
+        coeff_digest(&[r]),
+        Err(PoseidonError::InputLargerThanModulus)
+    ));
+
+    let below = (-Fq::ONE).into_bigint().to_bytes_be();
+    let mut max = [0u8; 32];
+    max[32 - below.len()..].copy_from_slice(&below);
+    assert!(coeff_digest(&[max]).is_ok());
+}

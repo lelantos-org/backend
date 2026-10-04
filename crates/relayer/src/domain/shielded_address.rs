@@ -118,7 +118,7 @@ mod tests {
             hex::encode(a.pk),
             // pk for seed 7777, big-endian; matches `pkDec` in
             // `crates/crypto/tests/vectors/note-parity.json`.
-            "0c70606823cfb3c8f358f6c1b7faf360ee0fddd827b4493f83b530ee8e41c053"
+            "14126bf4ddca945ee6a4345054e0d4c60a99e2b82daeefbb71e769d0e6adca92"
         );
     }
 

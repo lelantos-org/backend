@@ -231,22 +231,18 @@ impl PendingTx {
                 eph_pub_x,
                 eph_pub_y,
                 ciphertext,
-                cv_dep_x,
-                cv_dep_y,
             } => self.push_leaf(
                 cx,
                 LeafPayload {
-                    cm: cm.0.to_vec(),
+                    cm: cm.0,
                     clue_rx,
                     clue_ry,
                     eph_pub_x,
                     eph_pub_y,
                     ciphertext,
-                    cv_dep_x,
-                    cv_dep_y,
                 },
                 LeafOrder::RootLeads,
-            )?,
+            ),
 
             DecodedEvent::NullifierConsumed { nf } => self.spent_nfs.push(NewSpentNullifier {
                 chain_id: cx.chain_id,
@@ -278,8 +274,8 @@ impl PendingTx {
                 // fee leaf has no event of its own and would otherwise leave the
                 // transaction's leaf count short of `inserted`.
                 let leaves = payload.clone();
-                self.push_leaf(cx, leaves.principal, LeafOrder::LeafLeads)?;
-                self.push_leaf(cx, leaves.fee, LeafOrder::LeafLeads)?;
+                self.push_leaf(cx, leaves.principal, LeafOrder::LeafLeads);
+                self.push_leaf(cx, leaves.fee, LeafOrder::LeafLeads);
             }
 
             _ => {}
@@ -301,15 +297,10 @@ impl PendingTx {
     /// Claim a leaf ordinal and store the note, or account for the leaf as a
     /// hole. Either way the ordinal is consumed, so the transaction's leaf count
     /// stays reconcilable against `inserted`.
-    pub(super) fn push_leaf(
-        &mut self,
-        cx: &RowCtx<'_>,
-        payload: LeafPayload,
-        order: LeafOrder,
-    ) -> Result<(), FmdIndexerError> {
+    pub(super) fn push_leaf(&mut self, cx: &RowCtx<'_>, payload: LeafPayload, order: LeafOrder) {
         let Some(ordinal) = self.claim_leaf(order) else {
             cx.warn_leaf_surplus();
-            return Ok(());
+            return;
         };
 
         let leaf_index = self.leaf_index(ordinal);
@@ -318,7 +309,7 @@ impl PendingTx {
         // it or every later leaf lands one position early.
         self.leaves.push(TreeLeaf {
             leaf_index,
-            hash: payload.tree_hash()?,
+            cm: payload.cm,
         });
 
         // A `NoteCreated` with no root to number it was refused by `claim_leaf`
@@ -326,11 +317,10 @@ impl PendingTx {
         if !payload.has_clue_bits() {
             self.skipped += 1;
             cx.warn_leaf_dropped("ciphertext too short for clueBits prefix");
-            return Ok(());
+            return;
         }
 
         self.notes
             .push(payload.into_note(cx.chain_id, cx.row, leaf_index));
-        Ok(())
     }
 }

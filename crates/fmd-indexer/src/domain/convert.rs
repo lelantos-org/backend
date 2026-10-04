@@ -1,8 +1,7 @@
 use ark_ed_on_bn254::Fq;
-use ark_ff::{BigInteger, PrimeField};
+use ark_ff::PrimeField;
 use bigdecimal::BigDecimal;
 use bigdecimal::num_bigint::Sign;
-use crypto::tree::Field;
 
 /// Reinterpret a `NUMERIC(78, 0)` column as a field element.
 ///
@@ -17,15 +16,6 @@ pub fn bigdec_to_fq(v: &BigDecimal) -> Fq {
         adjusted = -adjusted;
     }
     adjusted
-}
-
-/// The same column as a big-endian 32-byte field element, which is the form the
-/// Merkle leaf hash takes its inputs in.
-pub fn bigdec_to_field(v: &BigDecimal) -> Field {
-    let bytes = bigdec_to_fq(v).into_bigint().to_bytes_be();
-    let mut out = [0u8; 32];
-    out[32 - bytes.len()..].copy_from_slice(&bytes);
-    out
 }
 
 /// Read the packed FMD clue bits from a ciphertext's 2-byte prefix.

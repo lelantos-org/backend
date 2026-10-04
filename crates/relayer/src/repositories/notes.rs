@@ -7,12 +7,12 @@
 
 use crate::domain::error::{AppError, AppResult};
 use database::DbPool;
-use database::models::LeafInputsRow;
+use database::models::LeafRow;
 use database::schema::notes;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
-/// The leaf inputs for `chain_id` with `leaf_index` in `[from, from + len)`,
+/// The leaves of `chain_id` with `leaf_index` in `[from, from + len)`,
 /// in leaf order. The caller checks contiguity: a gap is a desync, not an
 /// empty page.
 pub async fn leaf_page(
@@ -20,14 +20,14 @@ pub async fn leaf_page(
     chain_id: i64,
     from: i64,
     len: i64,
-) -> AppResult<Vec<LeafInputsRow>> {
+) -> AppResult<Vec<LeafRow>> {
     let mut conn = super::conn(pool).await?;
     notes::table
         .filter(notes::chain_id.eq(chain_id))
         .filter(notes::leaf_index.ge(from))
         .filter(notes::leaf_index.lt(from + len))
         .order(notes::leaf_index.asc())
-        .select(LeafInputsRow::as_select())
+        .select(LeafRow::as_select())
         .load(&mut conn)
         .await
         .map_err(|e| AppError::Db(e.to_string()))

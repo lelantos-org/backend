@@ -6,6 +6,7 @@ pub use validate::refund_address_error;
 
 use crate::adapters::abi::{IBundler, IMasp, ISwapWrapper};
 use crate::adapters::parse::parse_address;
+use crate::domain::batch::PaddedBatch;
 use crate::domain::dto::SubmitSwapPayload;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::EstimateResponse;
@@ -15,8 +16,8 @@ use crate::services::fees::quote::FeeQuoter;
 use crate::services::fees::shielded::ShieldedFeeChecker;
 use crate::services::pipeline::batcher::{Batcher, BundleItem, QueuedItem};
 use crate::services::pipeline::transact::{
-    FeeContext, SpendInputs, TransactBinding, merkle_root_of, parse_spend_inputs, spend_tree_for,
-    spend_witness, verify_transact_proof,
+    FeeContext, TransactBinding, merkle_root_of, parse_spend_batch, spend_tree_for,
+    verify_transact_proof,
 };
 use crate::services::submitter::SubmissionReceipt;
 use crate::services::transact_verifier::TransactVerifier;
@@ -25,7 +26,6 @@ use ::asset_registry::AssetRegistry;
 use alloy::primitives::{Address, U256};
 use alloy::sol_types::SolCall;
 use crypto::tree::Field;
-use groth16::TreeUpdateBatchWitness;
 use std::sync::Arc;
 use tracing::{info, instrument};
 use validate::{validate_refund_to, validate_swap_shape};
@@ -85,7 +85,7 @@ impl SwapPipeline {
             &payload.pub_inputs,
             &payload.aux,
         )?;
-        let inputs = parse_spend_inputs(&payload.pub_inputs)?;
+        let batch = parse_spend_batch(&payload.pub_inputs)?;
         let merkle_root = merkle_root_of(&payload.pub_inputs)?;
         self.fees()
             .charge(
@@ -97,7 +97,7 @@ impl SwapPipeline {
 
         let item = SwapItem {
             payload,
-            inputs,
+            batch,
             merkle_root,
             wrapper: self.wrapper_address,
             args,
@@ -162,7 +162,7 @@ impl SwapPipeline {
 /// A shielded swap, as the batcher bundles it.
 struct SwapItem {
     payload: SubmitSwapPayload,
-    inputs: SpendInputs,
+    batch: PaddedBatch,
     merkle_root: Field,
     wrapper: Address,
     /// Everything but `tp_w` and `tpi_w`, which depend on the reserved slot.
@@ -174,28 +174,25 @@ impl BundleItem for SwapItem {
         EntryPoint::Swap
     }
 
-    fn leaves(&self) -> Vec<(Field, [U256; 2])> {
-        self.inputs.leaves()
+    fn batch(&self) -> &PaddedBatch {
+        &self.batch
     }
 
     fn merkle_root(&self) -> Option<Field> {
         Some(self.merkle_root)
     }
 
-    fn witness(&self, slot: &ReservedSlot, advanced: &AdvancedState) -> TreeUpdateBatchWitness {
-        spend_witness(slot, advanced, &self.inputs)
-    }
-
     fn encode(
         &self,
         slot: &ReservedSlot,
         advanced: &AdvancedState,
+        digest: U256,
         tp: IMasp::Proof,
     ) -> AppResult<IBundler::Call> {
         let data = ISwapWrapper::swapCall {
             a: ISwapWrapper::SwapArgs {
                 tp_w: tp,
-                tpi_w: spend_tree_for(slot, advanced)?,
+                tpi_w: spend_tree_for(slot, advanced, digest)?,
                 ..self.args.clone()
             },
         }

@@ -46,7 +46,9 @@ pub(crate) use outcome::zero_proof;
 
 use crate::adapters::abi::{IBundler, IMasp};
 use crate::adapters::masp::MaspReader;
+use crate::domain::batch::PaddedBatch;
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::fiat_shamir::BatchChallenge;
 use crate::services::admission::nullifier_guard::PendingGuard;
 use crate::services::fees::gas_witness::{EntryPoint, GasWitness};
 use crate::services::submitter::{SubmissionReceipt, Submitter};
@@ -54,7 +56,7 @@ use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
 use alloy::primitives::{Address, U256};
 use crypto::tree::Field;
 use database::DbPool;
-use groth16::{TreeUpdateBatchProver, TreeUpdateBatchWitness};
+use groth16::TreeUpdateBatchProver;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -69,18 +71,17 @@ use worker::Worker;
 pub trait BundleItem: Send + Sync {
     fn entry(&self) -> EntryPoint;
 
-    /// `(cm, cv_dep)` leaves in insertion order, as `TreeMirror` wants them.
-    fn leaves(&self) -> Vec<(Field, [U256; 2])>;
+    /// The leaves this item inserts, at the batch circuit's full width. The
+    /// batcher derives the tree leaves, the challenge and the witness from it.
+    fn batch(&self) -> &PaddedBatch;
 
     /// The root the wallet proved membership against; `None` for a flush, which
     /// proves none.
     fn merkle_root(&self) -> Option<Field>;
 
-    /// The tree-update witness for this item at its reserved position.
-    fn witness(&self, slot: &ReservedSlot, advanced: &AdvancedState) -> TreeUpdateBatchWitness;
-
     /// This item's `Bundler.Call` against tree-update proof `tp`, which is the
-    /// real proof or a placeholder for the dry run.
+    /// real proof or a placeholder for the dry run. `digest` is the batch
+    /// circuit's digest of [`Self::batch`] at `slot`.
     ///
     /// Everything it parses must already have been parsed by the pipeline, before
     /// the item was queued: a failure here would cost the bundle's reservations.
@@ -88,6 +89,7 @@ pub trait BundleItem: Send + Sync {
         &self,
         slot: &ReservedSlot,
         advanced: &AdvancedState,
+        digest: U256,
         tp: IMasp::Proof,
     ) -> AppResult<IBundler::Call>;
 
@@ -136,12 +138,23 @@ struct CachedProof {
     start_index: u64,
     old_root: Field,
     new_root: Field,
+    /// The challenge the proof was made under.
+    challenge: BatchChallenge,
     proof: IMasp::Proof,
 }
 
 impl Job {
     fn fail(self, e: AppError) {
         let _ = self.reply.send(Err(e));
+    }
+
+    /// The cached proof, if it was made at this very reservation.
+    fn proof_at(&self, slot: &ReservedSlot, advanced: &AdvancedState) -> Option<&CachedProof> {
+        self.proof.as_ref().filter(|p| {
+            p.start_index == slot.start_index
+                && p.old_root == slot.old_root
+                && p.new_root == advanced.new_root
+        })
     }
 }
 

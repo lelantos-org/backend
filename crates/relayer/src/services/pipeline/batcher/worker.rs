@@ -2,8 +2,8 @@
 //! send it, and act on what the chain kept.
 
 use super::bundle::{
-    abandon_all, drop_stale_roots, encode_calls, fail_all, fail_one, fits, gas_shares,
-    reserve_item, take_bundle,
+    Reserved, abandon_all, drop_stale_roots, encode_calls, fail_all, fail_one, fits, gas_shares,
+    reserve_item, take_bundle, with_challenges,
 };
 use super::dry_run::accept_all_at;
 use super::outcome::{
@@ -15,7 +15,8 @@ use crate::adapters::calldata::build_tu_proof;
 use crate::domain::error::{AppError, AppResult, revert_reason};
 use crate::services::fees::gas_witness::{EntryPoint, GasWitness};
 use crate::services::submitter::{SubmissionReceipt, Submitter};
-use crate::services::tree::{AdvancedState, ReservedSlot, TreeMirror};
+use crate::services::tree::TreeMirror;
+use crate::services::witness;
 use alloy::primitives::Bytes;
 use alloy::rpc::types::state::StateOverride;
 use crypto::tree::Field;
@@ -227,13 +228,14 @@ impl Worker {
         }
     }
 
-    /// Open a bundle and reserve every job in it, in order. A reservation that
-    /// fails changes nothing, so its job is answered and the rest carry on.
+    /// Open a bundle and reserve every job in it, in order, then derive each
+    /// reservation's challenge. A reservation that fails changes nothing, so its
+    /// job is answered and the rest carry on.
     async fn reserve(
         &mut self,
         mirror: &mut TreeMirror,
         jobs: &mut Vec<Job>,
-    ) -> Phase<Vec<(ReservedSlot, AdvancedState)>> {
+    ) -> Phase<Vec<Reserved>> {
         drop_stale_roots(mirror, jobs);
         if jobs.is_empty() {
             return ControlFlow::Break(Pass::Done);
@@ -264,7 +266,7 @@ impl Worker {
             let _ = mirror.rollback_bundle();
             return ControlFlow::Break(Pass::Done);
         }
-        ControlFlow::Continue(slots)
+        with_challenges(mirror, jobs, slots)
     }
 
     /// Send back the jobs that take the bundle past `max_tx_bytes`, and answer a
@@ -300,7 +302,7 @@ impl Worker {
         &mut self,
         mirror: &mut TreeMirror,
         jobs: &mut Vec<Job>,
-        slots: &[(ReservedSlot, AdvancedState)],
+        slots: &[Reserved],
         dummy: Vec<IBundler::Call>,
     ) -> Phase {
         let mut dry_run = self.start_dry_run(dummy);
@@ -325,21 +327,22 @@ impl Worker {
         }
     }
 
-    async fn prove(&self, job: &mut Job, slot: &(ReservedSlot, AdvancedState)) -> AppResult<()> {
-        let (slot, advanced) = slot;
-        if let Some(p) = job.proof.as_ref()
-            && p.start_index == slot.start_index
-            && p.old_root == slot.old_root
-            && p.new_root == advanced.new_root
-        {
+    async fn prove(&self, job: &mut Job, at: &Reserved) -> AppResult<()> {
+        let Reserved {
+            slot,
+            advanced,
+            challenge,
+        } = at;
+        if job.proof_at(slot, advanced).is_some() {
             return Ok(());
         }
-        let witness = job.item.witness(slot, advanced);
+        let witness = witness::build(slot, advanced, job.item.batch(), challenge.z);
         let proof = self.prover.prove(witness, Priority::Spend).await?;
         job.proof = Some(CachedProof {
             start_index: slot.start_index,
             old_root: slot.old_root,
             new_root: advanced.new_root,
+            challenge: *challenge,
             proof: build_tu_proof(&proof)?,
         });
         Ok(())

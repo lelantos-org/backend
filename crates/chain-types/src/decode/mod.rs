@@ -3,7 +3,7 @@
 mod event;
 mod signatures;
 
-pub use event::{DecodedEvent, DepositFeeNote};
+pub use event::{DecodedEvent, DepositNote};
 pub use signatures::{event_kind_from_topic0, known_signatures};
 
 use crate::abi::{
@@ -48,8 +48,6 @@ pub fn decode(
                 eph_pub_x: ev.ephPubX,
                 eph_pub_y: ev.ephPubY,
                 ciphertext: ev.ciphertext.to_vec(),
-                cv_dep_x: ev.cvDepX,
-                cv_dep_y: ev.cvDepY,
             }
         }
         EventKind::AssetRegistered => {
@@ -98,38 +96,35 @@ pub fn decode(
                 id: ev.id,
                 payer: ev.payer,
                 recipient: ev.recipient,
-                public_asset_id: ev.publicAssetId,
-                public_in: ev.publicIn,
                 fee_bps_at_submit: ev.feeBpsAtSubmit,
-                cm: ev.cm,
-                cv_dep_x: ev.cvDepX,
-                cv_dep_y: ev.cvDepY,
-                rcv: ev.rcv,
-                clue_rx: ev.clueRx,
-                clue_ry: ev.clueRy,
-                eph_pub_x: ev.ephPubX,
-                eph_pub_y: ev.ephPubY,
-                ciphertext: ev.ciphertext.to_vec(),
-                fee: DepositFeeNote {
-                    fee_asset_id: ev.feeAssetId,
-                    fee_in: ev.feeIn,
-                    cm: ev.feeCm,
-                    cv_dep_x: ev.feeCvDepX,
-                    cv_dep_y: ev.feeCvDepY,
-                    rcv: ev.feeRcv,
+                note: DepositNote {
+                    asset_id: ev.publicAssetId,
+                    value: ev.publicIn,
+                    inner: ev.inner,
+                    clue_rx: ev.clueRx,
+                    clue_ry: ev.clueRy,
+                    eph_pub_x: ev.ephPubX,
+                    eph_pub_y: ev.ephPubY,
+                    ciphertext: ev.ciphertext.to_vec(),
+                },
+                fee: DepositNote {
+                    asset_id: ev.feeAssetId,
+                    value: ev.feeIn,
+                    inner: ev.feeInner,
                     clue_rx: ev.feeClueRx,
                     clue_ry: ev.feeClueRy,
                     eph_pub_x: ev.feeEphPubX,
                     eph_pub_y: ev.feeEphPubY,
                     ciphertext: ev.feeCiphertext.to_vec(),
                 },
+                pulled: ev.pulled,
             }
         }
         EventKind::DepositFlushed => {
             let ev: DepositFlushed = decode_log(&log)?;
             DecodedEvent::DepositFlushed {
                 id: ev.id,
-                cm: ev.cm,
+                inner: ev.inner,
             }
         }
         EventKind::DepositCanceled => {

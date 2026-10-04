@@ -1,13 +1,15 @@
 //! The `DepositEscrowed` side lookup a `DepositFlushed` needs.
 //!
-//! A flush event carries only the deposit id; the FMD payloads of the two leaves
-//! it mints were published earlier, by the escrow event that opened the deposit.
-//! Everything here is pure decode over rows the caller has already fetched, so
-//! the consume service keeps only the lookup.
+//! A flush event carries only the deposit id and its `inner`; the FMD payloads
+//! of the two leaves it mints were published earlier, by the escrow event that
+//! opened the deposit, and so were the public `(asset, value)` each leaf is
+//! built from. Everything here is pure decode over rows the caller has already
+//! fetched, so the consume service keeps only the lookup.
 
 use crate::domain::pending::LeafPayload;
 use alloy::primitives::U256;
-use chain_types::decode::{self, DecodedEvent};
+use chain_types::decode::{self, DecodedEvent, DepositNote};
+use crypto::note::commitment_from_inner;
 use database::models::RawEventRow;
 use shared::entities::EventKind;
 use std::collections::HashMap;
@@ -47,20 +49,7 @@ pub fn flushed_deposit_ids(rows: &[RawEventRow]) -> Vec<Vec<u8>> {
 /// or `None` when the row does not decode as one.
 pub fn decode_escrowed(row: &RawEventRow) -> Option<(U256, EscrowedLeaves)> {
     let decoded = decode::decode(EventKind::DepositEscrowed, &row.topics, &row.data).ok()?;
-    let DecodedEvent::DepositEscrowed {
-        id,
-        cm,
-        clue_rx,
-        clue_ry,
-        eph_pub_x,
-        eph_pub_y,
-        ciphertext,
-        cv_dep_x,
-        cv_dep_y,
-        fee,
-        ..
-    } = decoded.into_iter().next()?
-    else {
+    let DecodedEvent::DepositEscrowed { id, note, fee, .. } = decoded.into_iter().next()? else {
         return None;
     };
 
@@ -68,28 +57,23 @@ pub fn decode_escrowed(row: &RawEventRow) -> Option<(U256, EscrowedLeaves)> {
     // other; the relayer detects its own note by trial decryption, as a wallet
     // does.
     let leaves = EscrowedLeaves {
-        principal: LeafPayload {
-            cm: cm.0.to_vec(),
-            clue_rx,
-            clue_ry,
-            eph_pub_x,
-            eph_pub_y,
-            ciphertext,
-            cv_dep_x,
-            cv_dep_y,
-        },
-        fee: LeafPayload {
-            cm: fee.cm.0.to_vec(),
-            clue_rx: fee.clue_rx,
-            clue_ry: fee.clue_ry,
-            eph_pub_x: fee.eph_pub_x,
-            eph_pub_y: fee.eph_pub_y,
-            ciphertext: fee.ciphertext,
-            cv_dep_x: fee.cv_dep_x,
-            cv_dep_y: fee.cv_dep_y,
-        },
+        principal: leaf_payload(note)?,
+        fee: leaf_payload(fee)?,
     };
     Some((id, leaves))
+}
+
+/// The leaf one deposit note becomes. The event carries `inner`; the leaf is
+/// `crypto::note::commitment_from_inner`.
+fn leaf_payload(note: DepositNote) -> Option<LeafPayload> {
+    Some(LeafPayload {
+        cm: commitment_from_inner(note.asset_id, note.value, &note.inner.0).ok()?,
+        clue_rx: note.clue_rx,
+        clue_ry: note.clue_ry,
+        eph_pub_x: note.eph_pub_x,
+        eph_pub_y: note.eph_pub_y,
+        ciphertext: note.ciphertext,
+    })
 }
 
 #[cfg(test)]
@@ -98,6 +82,7 @@ mod tests {
     use alloy::primitives::{B256, Bytes};
     use alloy::sol_types::SolEvent;
     use chain_types::abi::DepositFlushed;
+    use crypto::tree::Field;
 
     fn row(id: i64, kind: EventKind, topics: Vec<Vec<u8>>, data: Vec<u8>) -> RawEventRow {
         RawEventRow {
@@ -117,7 +102,7 @@ mod tests {
     fn flushed_row(id: i64, deposit_id: u64) -> RawEventRow {
         let log = DepositFlushed {
             id: U256::from(deposit_id),
-            cm: B256::repeat_byte(0x11),
+            inner: B256::repeat_byte(0x11),
         }
         .encode_log_data();
         row(
@@ -155,54 +140,98 @@ mod tests {
         assert!(flushed_deposit_ids(&rows).is_empty());
     }
 
-    #[test]
-    fn decode_escrowed_keys_the_payload_by_deposit_id() {
+    /// A deposit note's public `(asset, value)` and its `inner`.
+    struct Note {
+        asset: u64,
+        value: u64,
+        inner: B256,
+    }
+
+    const PRINCIPAL: Note = Note {
+        asset: 7,
+        value: 10,
+        inner: B256::repeat_byte(0x11),
+    };
+    const FEE: Note = Note {
+        asset: 9,
+        value: 30,
+        inner: B256::repeat_byte(0x12),
+    };
+
+    fn leaf(note: &Note) -> Field {
+        commitment_from_inner(note.asset, note.value, &note.inner.0).expect("poseidon")
+    }
+
+    fn escrowed_row(principal: &Note, fee: &Note) -> RawEventRow {
         let ev = chain_types::abi::DepositEscrowed {
             id: U256::from(42u64),
             payer: Default::default(),
             recipient: Default::default(),
-            publicAssetId: 0,
-            publicIn: 0,
+            publicAssetId: principal.asset,
+            publicIn: principal.value,
             feeBpsAtSubmit: 0,
-            cm: B256::repeat_byte(0xcc),
-            cvDepX: U256::ZERO,
-            cvDepY: U256::ZERO,
-            rcv: U256::ZERO,
+            inner: principal.inner,
             clueRx: U256::from(1u64),
             clueRy: U256::from(2u64),
             ephPubX: U256::ZERO,
             ephPubY: U256::ZERO,
             ciphertext: Bytes::from(vec![0x00, 0x07]),
-            feeAssetId: 0,
-            feeIn: 0,
-            feeCm: B256::repeat_byte(0xdd),
-            feeCvDepX: U256::ZERO,
-            feeCvDepY: U256::ZERO,
-            feeRcv: U256::ZERO,
+            feeAssetId: fee.asset,
+            feeIn: fee.value,
+            feeInner: fee.inner,
             feeClueRx: U256::from(3u64),
             feeClueRy: U256::from(4u64),
             feeEphPubX: U256::ZERO,
             feeEphPubY: U256::ZERO,
             feeCiphertext: Bytes::from(vec![0x00, 0x09]),
+            pulled: U256::ZERO,
         };
         let log = ev.encode_log_data();
-        let stored = row(
+        row(
             1,
             EventKind::DepositEscrowed,
             log.topics().iter().map(|t| t.0.to_vec()).collect(),
             log.data.to_vec(),
-        );
+        )
+    }
+
+    #[test]
+    fn decode_escrowed_keys_the_payload_by_deposit_id() {
+        let stored = escrowed_row(&PRINCIPAL, &FEE);
 
         let (id, payload) = decode_escrowed(&stored).expect("round-trips");
 
         assert_eq!(id, U256::from(42u64));
-        assert_eq!(payload.principal.cm, vec![0xcc; 32]);
         assert_eq!(payload.principal.ciphertext, vec![0x00, 0x07]);
         // The fee leaf is carried in the same event and must land in the second
         // slot: the tree inserts it after the principal, so a swap gives both
         // notes the wrong leaf index.
-        assert_eq!(payload.fee.cm, vec![0xdd; 32]);
         assert_eq!(payload.fee.ciphertext, vec![0x00, 0x09]);
+    }
+
+    #[test]
+    fn decode_escrowed_computes_each_leaf_from_its_own_asset_value_and_inner() {
+        let stored = escrowed_row(&PRINCIPAL, &FEE);
+
+        let (_, payload) = decode_escrowed(&stored).expect("round-trips");
+
+        assert_eq!(payload.principal.cm, leaf(&PRINCIPAL));
+        assert_eq!(payload.fee.cm, leaf(&FEE));
+    }
+
+    #[test]
+    fn decode_escrowed_puts_an_unpaid_fee_note_under_asset_zero() {
+        let unpaid = Note {
+            asset: 0,
+            value: 0,
+            ..FEE
+        };
+        let stored = escrowed_row(&PRINCIPAL, &unpaid);
+
+        let (_, payload) = decode_escrowed(&stored).expect("round-trips");
+
+        assert_eq!(payload.fee.cm, leaf(&unpaid));
+        assert_ne!(payload.fee.cm, leaf(&FEE));
     }
 
     #[test]

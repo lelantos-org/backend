@@ -17,8 +17,8 @@ pub trait RawEventsRepo: Send + Sync {
     ) -> Result<Vec<RawEventRow>>;
     async fn max_id(&self, chain_id: i64) -> Result<i64>;
     /// Look up `DepositEscrowed` events by `deposit_id`, encoded as the second
-    /// topic of the log. The consume pipeline uses this to resolve cm and aux
-    /// when processing `DepositFlushed` events.
+    /// topic of the log. The consume pipeline uses this to resolve the leaves
+    /// and aux when processing `DepositFlushed` events.
     async fn fetch_escrowed_by_ids(
         &self,
         chain_id: i64,

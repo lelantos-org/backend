@@ -1,4 +1,3 @@
-use super::log_unique_violation;
 use crate::domain::error::Result;
 use async_trait::async_trait;
 use database::DbPool;
@@ -147,7 +146,7 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
             .do_nothing()
             .execute(&mut conn)
             .await
-            .inspect_err(|e| log_unique_violation("spent_nullifiers", e))?;
+            .inspect_err(log_unique_violation)?;
 
         // Emitted here rather than from the consume tick, since `seq` is assigned
         // in this function and not visible to the caller. `values` is the numbered
@@ -172,5 +171,23 @@ impl SpentNullifiersRepo for PostgresSpentNullifiersRepo {
         .execute(&mut conn)
         .await?;
         Ok(n)
+    }
+}
+
+/// Log a unique violation on `spent_nullifiers` that the insert's `ON CONFLICT`
+/// target does not absorb, naming the constraint.
+///
+/// The insert names `(chain_id, block_number, log_index)`; a collision on
+/// `spent_nullifiers_chain_seq_idx` or `spent_nullifiers_chain_id_nf_key`
+/// aborts the statement and fails the tick with a generic error.
+fn log_unique_violation(e: &diesel::result::Error) {
+    use diesel::result::{DatabaseErrorKind, Error as DieselError};
+    if let DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, info) = e {
+        tracing::error!(
+            table = "spent_nullifiers",
+            constraint = info.constraint_name().unwrap_or("<unknown>"),
+            detail = info.details().unwrap_or(""),
+            "insert hit a unique constraint the ON CONFLICT target does not cover"
+        );
     }
 }

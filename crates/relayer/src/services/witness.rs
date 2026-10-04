@@ -1,10 +1,23 @@
-//! snarkjs-shaped witness builder for `tree_update_batch.circom`.
+//! What a reserved batch proves: its challenge, and the snarkjs-shaped witness
+//! for `tree_update_batch.circom`.
 
 use crate::domain::batch::PaddedBatch;
+use crate::domain::error::AppResult;
+use crate::domain::fiat_shamir::{self, BatchChallenge};
 use crate::services::tree::{AdvancedState, ReservedSlot};
 use alloy::primitives::U256;
 use crypto::tree::Field;
 use groth16::TreeUpdateBatchWitness;
+
+/// The digest and the challenge of `batch` advancing the tree from `slot` to
+/// `advanced`: `digest` goes in calldata and `z` into [`build`].
+pub fn challenge(
+    slot: &ReservedSlot,
+    advanced: &AdvancedState,
+    batch: &PaddedBatch,
+) -> AppResult<BatchChallenge> {
+    fiat_shamir::compress(&slot.old_root, &advanced.new_root, slot.start_index, batch)
+}
 
 /// The `tree_update_batch` witness for `batch` advancing the tree from `slot` to
 /// `advanced`, under challenge `z`.
@@ -12,30 +25,24 @@ use groth16::TreeUpdateBatchWitness;
 /// Every leaf-indexed signal is read from `batch`, already padded to
 /// `MAX_L_BATCH`: the circuit rejects a short or long signal with no useful
 /// message, and zero is the padding the circuit and the contract both enforce.
-/// A spend batch carries no deposit binding, so its `is_deposit`, `leaf_asset`,
-/// `leaf_public_in` and `rcv` columns are already zero.
+/// A spend batch has no deposit leaves, so its `is_deposit`, `leaf_asset` and
+/// `leaf_public_in` columns are already zero.
 pub fn build(
     slot: &ReservedSlot,
     advanced: &AdvancedState,
     batch: &PaddedBatch,
-    z: String,
+    z: U256,
 ) -> TreeUpdateBatchWitness {
     TreeUpdateBatchWitness {
-        z,
+        z: z.to_string(),
         old_root: field_to_dec(&slot.old_root),
         new_root: field_to_dec(&advanced.new_root),
         start_index: slot.start_index.to_string(),
         actual_count: batch.actual_count.to_string(),
         cms: batch.cms.iter().map(|cm| field_to_dec(&cm.0)).collect(),
-        cv_dep: batch
-            .cv_deps
-            .iter()
-            .map(|cv| [cv[0].to_string(), cv[1].to_string()])
-            .collect(),
         leaf_asset: dec_column(&batch.leaf_asset),
         leaf_public_in: dec_column(&batch.leaf_public_in),
         is_deposit: dec_column(&batch.is_deposit),
-        rcv: dec_column(&batch.rcv),
         frontier_in: slot
             .old_frontier
             .iter()
@@ -65,8 +72,8 @@ mod tests {
     use crate::domain::dto::TRANSACT_OUT;
     use alloy::primitives::FixedBytes;
 
-    /// A spend witness: `TRANSACT_OUT` leaves with no deposit binding, the shape
-    /// both single-spend pipelines produce.
+    /// A spend witness: `TRANSACT_OUT` leaves and no deposit leaf, the shape both
+    /// single-spend pipelines produce.
     fn spend_witness() -> TreeUpdateBatchWitness {
         let slot = ReservedSlot {
             start_index: 4,
@@ -80,14 +87,11 @@ mod tests {
         let cms: Vec<FixedBytes<32>> = (0..TRANSACT_OUT)
             .map(|i| FixedBytes::<32>::from([6u8 + i as u8; 32]))
             .collect();
-        let cv_deps: Vec<[U256; 2]> = (0..TRANSACT_OUT)
-            .map(|i| [U256::from(8u8 + i as u8), U256::from(9u8 + i as u8)])
-            .collect();
         build(
             &slot,
             &advanced,
-            &PaddedBatch::from_spend(&cms, &cv_deps),
-            "12".to_string(),
+            &PaddedBatch::from_spend(&cms),
+            U256::from(12u8),
         )
     }
 
@@ -115,11 +119,9 @@ mod tests {
             assert_eq!(width(scalar), 1, "{scalar}");
         }
         assert_eq!(width("cms"), MAX_L_BATCH);
-        assert_eq!(width("cv_dep"), 2 * MAX_L_BATCH, "flattened BJJ points");
         assert_eq!(width("leaf_asset"), MAX_L_BATCH);
         assert_eq!(width("leaf_public_in"), MAX_L_BATCH);
         assert_eq!(width("is_deposit"), MAX_L_BATCH);
-        assert_eq!(width("rcv"), MAX_L_BATCH);
         assert_eq!(width("frontier_in"), 3 * 10, "depth rows of 3 siblings");
     }
 
@@ -129,12 +131,14 @@ mod tests {
     fn padding_slots_are_zero() {
         let w = spend_witness();
         let signals = w.signals();
-        for (name, from) in [("cms", TRANSACT_OUT), ("cv_dep", 2 * TRANSACT_OUT)] {
-            for (i, v) in signal(&signals, name).iter().enumerate().skip(from) {
-                assert_eq!(*v, "0", "{name}[{i}] should be padding");
-            }
+        for (i, v) in signal(&signals, "cms")
+            .iter()
+            .enumerate()
+            .skip(TRANSACT_OUT)
+        {
+            assert_eq!(*v, "0", "cms[{i}] should be padding");
         }
-        for name in ["leaf_asset", "leaf_public_in", "is_deposit", "rcv"] {
+        for name in ["leaf_asset", "leaf_public_in", "is_deposit"] {
             assert!(signal(&signals, name).iter().all(|v| *v == "0"), "{name}");
         }
     }

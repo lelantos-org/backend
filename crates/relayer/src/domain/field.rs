@@ -12,3 +12,8 @@ pub static BN254_R: LazyLock<U256> = LazyLock::new(|| {
     )
     .expect("BN254 modulus literal")
 });
+
+/// Whether a big-endian word is a field element, that is below [`BN254_R`].
+pub fn is_canonical(word: &[u8; 32]) -> bool {
+    U256::from_be_bytes(*word) < *BN254_R
+}

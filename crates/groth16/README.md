@@ -123,7 +123,8 @@ here.
 `cargo test -p groth16`. Two are conditional:
 
 - `verifier`'s published-key test skips unless
-  `circuits/build/4x6_verification_key.json` exists.
+  `stack/circuits/4x6_verification_key.json` exists (`just fetch-circuits` in
+  `stack/`).
 - `tests/zkey_compat.rs` proves a published golden vector with a real zkey and
   dumps `proof.json` / `public.json` in snarkjs shape, so the result can be
   checked with the snarkjs CLI. Skipped unless `ZKEY_COMPAT_DIR` points at a

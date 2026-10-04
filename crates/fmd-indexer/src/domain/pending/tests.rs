@@ -62,8 +62,6 @@ impl Rows {
             ephPubX: U256::ZERO,
             ephPubY: U256::ZERO,
             ciphertext: Bytes::from(ciphertext),
-            cvDepX: U256::ZERO,
-            cvDepY: U256::ZERO,
         };
         self.push(tx, block, EventKind::NoteCreated, ev.encode_log_data())
     }
@@ -83,7 +81,7 @@ impl Rows {
     fn flushed(&mut self, tx: u8, block: i64, deposit_id: u64) -> &mut Self {
         let ev = DepositFlushed {
             id: U256::from(deposit_id),
-            cm: B256::repeat_byte(0x11),
+            inner: B256::repeat_byte(0x11),
         };
         self.push(tx, block, EventKind::DepositFlushed, ev.encode_log_data())
     }
@@ -126,10 +124,7 @@ impl Rows {
             publicAssetId: 1,
             publicIn: 5,
             feeBpsAtSubmit: 0,
-            cm: B256::repeat_byte(0x33),
-            cvDepX: U256::ZERO,
-            cvDepY: U256::ZERO,
-            rcv: U256::ZERO,
+            inner: B256::repeat_byte(0x33),
             clueRx: U256::from(1u64),
             clueRy: U256::from(2u64),
             ephPubX: U256::ZERO,
@@ -137,15 +132,13 @@ impl Rows {
             ciphertext: Bytes::from(usable_ciphertext()),
             feeAssetId: 0,
             feeIn: 0,
-            feeCm: B256::repeat_byte(0x34),
-            feeCvDepX: U256::ZERO,
-            feeCvDepY: U256::ZERO,
-            feeRcv: U256::ZERO,
+            feeInner: B256::repeat_byte(0x34),
             feeClueRx: U256::from(1u64),
             feeClueRy: U256::from(2u64),
             feeEphPubX: U256::ZERO,
             feeEphPubY: U256::ZERO,
             feeCiphertext: Bytes::from(usable_ciphertext()),
+            pulled: U256::ZERO,
         };
         self.push(tx, block, EventKind::DepositEscrowed, ev.encode_log_data())
     }
@@ -179,14 +172,12 @@ fn usable_ciphertext() -> Vec<u8> {
 
 fn escrow(deposit_id: u64, ciphertext: Vec<u8>) -> EscrowedMap {
     let leaf = |tag: u8, ciphertext: Vec<u8>| LeafPayload {
-        cm: vec![tag; 32],
+        cm: [tag; 32],
         clue_rx: U256::from(1u64),
         clue_ry: U256::from(2u64),
         eph_pub_x: U256::ZERO,
         eph_pub_y: U256::ZERO,
         ciphertext,
-        cv_dep_x: U256::ZERO,
-        cv_dep_y: U256::ZERO,
     };
     let leaves = EscrowedLeaves {
         principal: leaf(deposit_id as u8, ciphertext.clone()),
@@ -217,6 +208,23 @@ fn a_complete_tx_commits_with_contract_assigned_leaf_indices() {
     assert_eq!(leaf_indices(&plan), [64, 65]);
     assert_eq!(plan.last_event_id, AFTER + 3, "cursor clears the whole tx");
     assert_eq!(plan.last_block_number, 10);
+}
+
+#[test]
+fn a_leaf_is_its_cm_whether_or_not_it_became_a_note() {
+    // The tree takes `cm` as published. The second leaf cannot be scanned, so
+    // it is no note, but the contract inserted it all the same.
+    let mut rows = Rows::default();
+    rows.root(0x01, 10, 0, 2)
+        .note(0x01, 10, 0xa0, usable_ciphertext())
+        .note(0x01, 10, 0xa1, vec![0x00]);
+
+    let plan = rows.plan_bare().expect("tx is complete");
+
+    let leaves: Vec<_> = plan.leaves.iter().map(|l| l.cm).collect();
+    assert_eq!(leaves, [[0xa0; 32], [0xa1; 32]]);
+    assert_eq!(plan.notes.len(), 1);
+    assert_eq!(plan.notes[0].cm, vec![0xa0; 32]);
 }
 
 #[test]

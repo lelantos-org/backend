@@ -268,8 +268,6 @@ async fn insert_note_payload_event(
         ephPubX: U256::from(0u64),
         ephPubY: U256::from(0u64),
         ciphertext,
-        cvDepX: U256::from(0u64),
-        cvDepY: U256::from(0u64),
     };
     let log = ev.encode_log_data();
     insert_raw_event(
@@ -425,34 +423,23 @@ async fn spawn_fmd_webserver(pool: &database::DbPool) -> String {
     format!("http://{addr}")
 }
 
-/// The chunk feed serves one pre-hashed leaf per entry, as `0x`-prefixed hex.
+/// The chunk feed serves one leaf per entry, as `0x`-prefixed hex.
 ///
-/// Two properties matter. The prefix is required: the SDK decodes field elements
-/// with a helper accepting decimal or `0x`-hex, so a bare-hex value whose digits
-/// are all decimal would parse as a different number.
-///
-/// The raw inputs must also be absent. `cm` and `cv_dep` exist only for clients
-/// to hash into the leaf themselves, so serving them alongside `leafHash` would
-/// send three field elements where one suffices, tripling the largest feed in a
-/// cold sync.
+/// The prefix is required: the SDK decodes field elements with a helper
+/// accepting decimal or `0x`-hex, so a bare-hex value whose digits are all
+/// decimal would parse as a different number.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
     use bigdecimal::BigDecimal;
     use fmd_indexer::repositories::notes::{NewNote, NotesRepo, PostgresNotesRepo};
-    use std::str::FromStr;
 
     let (pool, _guard) = fresh_pool().await;
 
-    // A value whose hex form is all decimal digits — the exact input that a
-    // bare-hex wire format would mis-decode on the client.
-    // 305419896 == 0x12345678, and "12345678" is also a valid decimal literal
-    // for a different number entirely.
-    let cv_x = BigDecimal::from_str("305419896").unwrap();
-    // A full-width element, to pin the zero-padding and the 64-char width.
-    let cv_y = BigDecimal::from_str(
-        "21888242871839275222246405745257275088548364400416034343698204186575808495616",
-    )
-    .unwrap();
+    // A commitment whose hex form is all decimal digits, the input a bare-hex
+    // wire format would mis-decode on the client, and short enough to pin the
+    // zero-padding and the 64-char width.
+    let mut cm = vec![0u8; 32];
+    cm[28..].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
 
     let repo = PostgresNotesRepo::new(pool.clone());
     repo.insert_batch(&[NewNote {
@@ -460,15 +447,13 @@ async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
         block_number: 1,
         tx_hash: vec![0xaa; 32],
         log_index: 0,
-        cm: vec![0xbb; 32],
+        cm,
         clue_rx: BigDecimal::from(0),
         clue_ry: BigDecimal::from(0),
         eph_pub_x: BigDecimal::from(7),
         eph_pub_y: BigDecimal::from(0),
         ciphertext: vec![0x00, 0x07],
         leaf_index: 0,
-        cv_dep_x: cv_x,
-        cv_dep_y: cv_y,
     }])
     .await
     .unwrap();
@@ -483,22 +468,12 @@ async fn commitment_chunk_serves_only_a_prefixed_hex_leaf_hash() {
         .await
         .unwrap();
 
+    // The leaf is the note commitment itself.
     let entry = &body["entries"][0];
-    let leaf = entry["leafHash"].as_str().expect("leafHash is served");
-    assert!(leaf.starts_with("0x"), "must be 0x-prefixed: {leaf}");
-    assert_eq!(leaf.len(), 66, "0x + 64 hex chars, left-padded: {leaf}");
-    assert!(
-        leaf[2..].chars().all(|c| c.is_ascii_hexdigit()),
-        "must be hex: {leaf}"
+    assert_eq!(
+        entry["leafHash"].as_str().expect("leafHash is served"),
+        format!("0x{}12345678", "0".repeat(56)),
     );
-
-    // The inputs the client used to hash itself are no longer on the wire.
-    for gone in ["cmHex", "cvDepX", "cvDepY"] {
-        assert!(
-            entry.get(gone).is_none(),
-            "{gone} should no longer be served"
-        );
-    }
 }
 
 /// A subscription's match feed must be scoped to the chain the caller asks
@@ -547,8 +522,6 @@ async fn list_matches_returns_only_the_requested_chains_notes() {
                 notes::eph_pub_y.eq(bigdecimal::BigDecimal::from(4)),
                 notes::ciphertext.eq(vec![0x00, 0x1f, 0xaa, 0xbb]),
                 notes::leaf_index.eq(i as i64),
-                notes::cv_dep_x.eq(bigdecimal::BigDecimal::from(5)),
-                notes::cv_dep_y.eq(bigdecimal::BigDecimal::from(6)),
             ))
             .returning(notes::id)
             .get_result(&mut conn)
@@ -700,8 +673,8 @@ async fn head_reports_per_chain_watermarks() {
     assert_eq!(empty["maxNoteId"], 0);
     assert_eq!(empty["maxNullifierSeq"], 0);
 
-    // `cm` varies per note: `notes` is UNIQUE (chain_id, cm), so a shared
-    // commitment would make every insert past the first a no-op.
+    // `leaf_index` varies per note: `notes` is UNIQUE (chain_id, leaf_index),
+    // so a shared position would make every insert past the first a no-op.
     let note = |chain_id: i64, log_index: i32| NewNote {
         chain_id,
         block_number: 1,
@@ -714,8 +687,6 @@ async fn head_reports_per_chain_watermarks() {
         eph_pub_y: BigDecimal::from(0),
         ciphertext: vec![0x00, 0x07],
         leaf_index: log_index as i64,
-        cv_dep_x: BigDecimal::from(1),
-        cv_dep_y: BigDecimal::from(1),
     };
 
     let repo = PostgresNotesRepo::new(pool.clone());

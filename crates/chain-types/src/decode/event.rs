@@ -2,22 +2,13 @@
 
 use alloy::primitives::{Address, B256, U256};
 
-/// The fee leaf of a `DepositEscrowed`: a note addressed to the party the
-/// payer chose to pay for the flush.
-///
-/// Grouped into one struct because every field is either part of the escrow
-/// digest preimage or required to spend the note; a partial set yields a
-/// deposit that cannot be flushed.
+/// One of the two notes a `DepositEscrowed` publishes.
 #[derive(Debug, Clone)]
-pub struct DepositFeeNote {
-    /// Asset the fee note is minted in. Independent of the deposit's
-    /// `public_asset_id`; 0 exactly when `fee_in` is 0.
-    pub fee_asset_id: u64,
-    pub fee_in: u64,
-    pub cm: B256,
-    pub cv_dep_x: U256,
-    pub cv_dep_y: U256,
-    pub rcv: U256,
+pub struct DepositNote {
+    pub asset_id: u64,
+    pub value: u64,
+    /// `inner`; the leaf is `crypto::note::commitment_from_inner`.
+    pub inner: B256,
     pub clue_rx: U256,
     pub clue_ry: U256,
     pub eph_pub_x: U256,
@@ -35,8 +26,6 @@ pub enum DecodedEvent {
         eph_pub_x: U256,
         eph_pub_y: U256,
         ciphertext: Vec<u8>,
-        cv_dep_x: U256,
-        cv_dep_y: U256,
     },
     AssetRegistered {
         asset_id: u64,
@@ -74,26 +63,18 @@ pub enum DecodedEvent {
         id: U256,
         payer: Address,
         recipient: Address,
-        public_asset_id: u64,
-        public_in: u64,
         fee_bps_at_submit: u16,
-        cm: B256,
-        cv_dep_x: U256,
-        cv_dep_y: U256,
-        rcv: U256,
-        clue_rx: U256,
-        clue_ry: U256,
-        eph_pub_x: U256,
-        eph_pub_y: U256,
-        ciphertext: Vec<u8>,
-        /// The relayer's fee note — the second leaf every deposit mints.
-        /// Carried alongside the depositor's note so consumers see one row per
-        /// deposit and the pair cannot be observed half-applied.
-        fee: DepositFeeNote,
+        /// The depositor's note, the deposit's first leaf.
+        note: DepositNote,
+        /// The relayer's fee note, the second leaf. Its asset is independent of
+        /// `note`'s and 0 exactly when its value is 0.
+        fee: DepositNote,
+        /// The refund cap, digest preimage; see [`crate::abi::DepositEscrowed`].
+        pulled: U256,
     },
     DepositFlushed {
         id: U256,
-        cm: B256,
+        inner: B256,
     },
     DepositCanceled {
         id: U256,

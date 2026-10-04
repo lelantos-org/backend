@@ -104,7 +104,7 @@ pub(super) fn error_name(reason: &[u8]) -> Option<String> {
         "PublicOutTooLarge()",
         "MustHaveWithdraw()",
         "MustNotHaveWithdraw()",
-        "MustNotHaveDeposit()",
+        "MustNotNameAsset()",
         "AdapterNotRecipient()",
         "AdapterNotRelayer()",
         "NothingUnshielded()",

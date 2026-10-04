@@ -14,13 +14,13 @@
 //! 1. The proof is verified first. `verify_transact_proof` runs before this, so
 //!    `out_cm` and `nullifier[0]` are values a valid SNARK committed to rather
 //!    than caller-supplied.
-//! 2. `out_aux_digest` binds the ciphertext. The final coefficient of the
-//!    Fiat-Shamir compression covers every `aux` entry, so the ciphertext this
+//! 2. `out_aux_digest` binds the ciphertext. The final word of the Fiat-Shamir
+//!    challenge preimage covers every `aux` entry, so the ciphertext this
 //!    module decrypts is the one the prover committed to; nobody, this relayer
 //!    included, can swap it and keep the proof valid.
-//! 3. The commitment is rebuilt. `cm = Poseidon(asset·2^64 + value, pk, rho,
-//!    rcm)` is recomputed from the decrypted plaintext against the relayer's own
-//!    `pk` and must equal `out_cm[j]`. A note encrypted to us but owned by
+//! 3. The commitment is rebuilt. `cm = Poseidon(TAG_CM, asset·2^64 + value,
+//!    Poseidon(TAG_INNER, pk, rho, rcm))` is recomputed from the decrypted
+//!    plaintext against the relayer's own `pk` and must equal `out_cm[j]`. A note encrypted to us but owned by
 //!    another party fails this, as does one whose plaintext inflates the value.
 //!
 //! Only `ivk` is required, so the spending key that could move collected fees
@@ -54,7 +54,8 @@ pub struct Payment {
 pub struct FeeRecipient {
     /// Big-endian incoming viewing key. Decrypt-only.
     ivk: Field,
-    /// `Poseidon(TAG_PK, ivk)`, derived once at boot.
+    /// `Poseidon(TAG_PK, ivk, d)` under the key's default diversifier, derived
+    /// once at boot.
     pk: Field,
     /// The published address, echoed by `/chains`. Never re-derived from `ivk`:
     /// publishing the operator's string verbatim makes a mismatch between the two
@@ -85,7 +86,7 @@ impl FeeRecipient {
     /// refused with nothing to point at, so boot fails instead.
     pub fn new(address: String, ivk: Field) -> AppResult<Self> {
         let decoded = crate::domain::shielded_address::decode(&address)?;
-        let pk = note::derive_pk(&ivk)
+        let pk = note::derive_pk(&ivk, &note::default_diversifier(&ivk))
             .map_err(|e| AppError::Internal(format!("shielded fee: derive pk: {e}")))?;
         if pk != decoded.pk {
             return Err(AppError::Internal(format!(
@@ -109,8 +110,8 @@ impl FeeRecipient {
         &self.ivk
     }
 
-    /// `Poseidon(TAG_PK, ivk)`. Rebuilding a commitment against this separates a
-    /// note encrypted to this relayer from one it owns.
+    /// The `pk` of this relayer's address. Rebuilding a commitment against this
+    /// separates a note encrypted to this relayer from one it owns.
     pub fn pk(&self) -> &Field {
         &self.pk
     }
@@ -235,7 +236,7 @@ fn pack_point(x: &str, y: &str, array: &str, index: usize) -> AppResult<[u8; 32]
 }
 
 /// A payload field element as big-endian bytes, rejecting anything non-canonical,
-/// the same bar `parse_spend_inputs` applies.
+/// the same bar `parse_spend_batch` applies.
 fn field_of(s: &str, at: FieldRef<'_>) -> AppResult<Field> {
     Ok(parse_field(s, at)?.0)
 }
@@ -244,84 +245,13 @@ fn field_of(s: &str, at: FieldRef<'_>) -> AppResult<Field> {
 mod tests {
     use super::*;
     use crate::domain::dto::PointDto;
-    use serde::Deserialize;
-
-    /// Built by the SDK's own encrypt path; see the generator note in
-    /// `crates/crypto/src/note/tests.rs`. Every ciphertext here is one a real
-    /// wallet would produce for these keys.
-    #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Fixture {
-        address: String,
-        ivk_hex: String,
-        nullifier0: String,
-        asset_id: u64,
-        /// A slot no key can open.
-        pad: PointAndCiphertext,
-        /// A correct fee note: owned by the relayer, sent to the relayer.
-        fee: Slot,
-        /// A second fee note in the same asset, in another slot.
-        fee_second: Slot,
-        /// A fee note in a different asset.
-        fee_other_asset: Slot,
-        /// Encrypted to the relayer but owned by another party: it decrypts and
-        /// its commitment does not match.
-        foreign_owner: Slot,
-        /// Encrypted to another party: must not decrypt.
-        not_ours: Slot,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct PointAndCiphertext {
-        x: String,
-        y: String,
-        ct: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Slot {
-        /// Which output slot this note was built for. `rho` is pinned to it, so a
-        /// note is valid only in the slot it names.
-        index: usize,
-        cm: String,
-        aux: AuxFixture,
-    }
-
-    #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct AuxFixture {
-        clue_r: PointFixture,
-        eph_pub: PointFixture,
-        ciphertext: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct PointFixture {
-        x: String,
-        y: String,
-    }
+    use crate::services::fees::shielded::fixture::{Fixture, Slot, fixture, recipient};
 
     fn point(x: &str, y: &str) -> PointDto {
         PointDto {
             x: x.to_string(),
             y: y.to_string(),
         }
-    }
-
-    fn fixture() -> Fixture {
-        serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/vectors/shielded-fee.json"
-        )))
-        .expect("shielded-fee.json parses")
-    }
-
-    fn recipient(f: &Fixture) -> FeeRecipient {
-        let ivk = parse_field(&f.ivk_hex, FieldRef::Named("ivk"))
-            .expect("ivk parses")
-            .0;
-        FeeRecipient::new(f.address.clone(), ivk).expect("address and key agree")
     }
 
     /// A submission whose every slot is a pad, until one is filled in.
@@ -338,6 +268,7 @@ mod tests {
         fn new(f: &Fixture) -> Self {
             let pad = OutputAuxDto {
                 clue_r: point(&f.pad.x, &f.pad.y),
+                clue_q: point(&f.pad.x, &f.pad.y),
                 eph_pub: point(&f.pad.x, &f.pad.y),
                 ciphertext: f.pad.ct.clone(),
             };
@@ -363,11 +294,7 @@ mod tests {
         }
 
         fn put(&mut self, slot: &Slot, at: usize) {
-            self.aux[at] = OutputAuxDto {
-                clue_r: point(&slot.aux.clue_r.x, &slot.aux.clue_r.y),
-                eph_pub: point(&slot.aux.eph_pub.x, &slot.aux.eph_pub.y),
-                ciphertext: slot.aux.ciphertext.clone(),
-            };
+            self.aux[at] = slot.aux.clone();
             self.out_cm[at] = slot.cm.clone();
         }
 
@@ -381,7 +308,6 @@ mod tests {
         }
 
         fn pub_inputs(&self) -> PubInputsDto {
-            let zero = || point("0", "1");
             PubInputsDto {
                 merkle_root: "0".to_string(),
                 nullifier: [
@@ -391,12 +317,9 @@ mod tests {
                     "4".to_string(),
                 ],
                 out_cm: self.out_cm.clone(),
-                public_asset_id: 1,
-                public_in: 0,
+                public_asset_id: 0,
                 public_out: 0,
-                in_cv: std::array::from_fn(|_| zero()),
-                out_cv: std::array::from_fn(|_| zero()),
-                out_cv_dep: std::array::from_fn(|_| zero()),
+                digest: "0".to_string(),
                 recipient: "0x0000000000000000000000000000000000000000".to_string(),
                 chain_id: 31337,
                 payer: "0x0000000000000000000000000000000000000000".to_string(),

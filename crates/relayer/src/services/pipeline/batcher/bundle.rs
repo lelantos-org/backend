@@ -4,8 +4,10 @@ use super::worker::{Pass, Phase};
 use super::{BundleItem, Job};
 use crate::adapters::abi::{IBundler, IMasp};
 use crate::domain::error::{AppError, AppResult};
+use crate::domain::fiat_shamir::BatchChallenge;
 use crate::services::fees::gas_witness::EntryPoint;
 use crate::services::tree::{AdvancedState, ROOT_HISTORY, ReservedSlot, TreeMirror};
+use crate::services::witness;
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
 
@@ -59,9 +61,44 @@ pub(super) fn reserve_item(
         .merkle_root()
         .map(|root| mirror.anchor_index(&root))
         .transpose()?;
-    let (mut slot, advanced) = mirror.reserve_and_advance_batch(&item.leaves())?;
+    let (mut slot, advanced) = mirror.reserve_and_advance_batch(&item.batch().leaves()?)?;
     slot.anchor_index = anchor_index;
     Ok((slot, advanced))
+}
+
+/// A job's reservation: where its leaves land, the root they advance the tree
+/// to, and the digest and challenge of that advance.
+pub(super) struct Reserved {
+    pub(super) slot: ReservedSlot,
+    pub(super) advanced: AdvancedState,
+    pub(super) challenge: BatchChallenge,
+}
+
+/// Derive every reserved job's challenge, once per reservation. A job that
+/// kept the slot its proof was made at reuses that proof's. A batch with no
+/// digest fails its job.
+pub(super) fn with_challenges(
+    mirror: &mut TreeMirror,
+    jobs: &mut Vec<Job>,
+    slots: Vec<(ReservedSlot, AdvancedState)>,
+) -> Phase<Vec<Reserved>> {
+    let mut reserved = Vec::with_capacity(slots.len());
+    for (index, (slot, advanced)) in slots.into_iter().enumerate() {
+        let job = &jobs[index];
+        let challenge = match job.proof_at(&slot, &advanced) {
+            Some(cached) => Ok(cached.challenge),
+            None => witness::challenge(&slot, &advanced, job.item.batch()),
+        };
+        match challenge {
+            Ok(challenge) => reserved.push(Reserved {
+                slot,
+                advanced,
+                challenge,
+            }),
+            Err(e) => return ControlFlow::Break(fail_one(mirror, jobs, index, e)),
+        }
+    }
+    ControlFlow::Continue(reserved)
 }
 
 /// How many of `calls` fit in `max_tx_bytes` of `execute` calldata, or `None` if
@@ -84,16 +121,16 @@ pub(super) fn fits(calls: &[IBundler::Call], max_tx_bytes: usize) -> Option<usiz
 pub(super) fn encode_calls(
     mirror: &mut TreeMirror,
     jobs: &mut Vec<Job>,
-    slots: &[(ReservedSlot, AdvancedState)],
+    slots: &[Reserved],
     proof: impl Fn(&Job) -> IMasp::Proof,
 ) -> Phase<Vec<IBundler::Call>> {
     let encoded: Result<Vec<IBundler::Call>, (usize, AppError)> = jobs
         .iter()
         .zip(slots)
         .enumerate()
-        .map(|(i, (job, (slot, advanced)))| {
+        .map(|(i, (job, at))| {
             job.item
-                .encode(slot, advanced, proof(job))
+                .encode(&at.slot, &at.advanced, at.challenge.digest, proof(job))
                 .map_err(|e| (i, e))
         })
         .collect();

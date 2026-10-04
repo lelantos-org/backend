@@ -194,8 +194,12 @@ either faster.
 
 The relayer's side of that boundary is `services/witness.rs`, which builds the
 witness in the shape the circuit declares, and `services/transact_verifier/`,
-which derives the transact circuit's two public signals and hands them over as
-plain 32-byte words.
+which derives the transact circuit's three public signals, `[y, digest, z]`,
+and hands them over as plain 32-byte words. `digest` is the payload's own
+`pubInputs.digest`, required to be a canonical field element and otherwise
+passed through: a wrong one fails the proof. For the tree update the relayer
+computes the digest itself (`domain::fiat_shamir`), as `TreeUpdateBatch.digest`
+on a flush and `SpendTree.digest` on a spend.
 
 ## Bundling
 
@@ -315,6 +319,9 @@ without a node:
 * **`public_in` over `uint48`** — `_drainDeposit` bounds it before narrowing,
   so it reverts however it is replayed. Quarantined; the deposit's own fields
   prove it.
+* **`inner` or `feeInner` not a field element** — a deposit escrows any
+  non-zero word, but `flushBatch` evaluates both as batch coefficients and
+  reverts `CoefficientOutOfField`. Quarantined once the digest has matched.
 * **empty escrow slot** — zero is the contract's "no pending deposit" sentinel:
   canceled, or flushed by someone else with the indexer still catching up.
   Dropped from this batch and nothing more — it resolves on its own, so it is
@@ -515,9 +522,12 @@ The payer funds one of the transact circuit's three output slots with a note
 addressed to that address. It rides in the `aux` the relayer already receives,
 so there is no extra request, no extra calldata, and — the point — no on-chain
 transfer linking the payer to the spend. The relayer trial-decrypts each output
-with its viewing key, rebuilds `cm = Poseidon(asset·2^64 + value, pk, rho, rcm)`
+with its viewing key, rebuilds
+`cm = Poseidon(TAG_CM, asset·2^64 + value, Poseidon(TAG_INNER, pk, rho, rcm))`
 over its own `pk`, and accepts the value only if that equals the `out_cm` the
-proof committed to. A note encrypted to the relayer but owned by someone else,
+proof committed to. A deposit's fee leaf is matched through `feeInner` instead:
+the escrow publishes it beside `(feeAssetId, feeIn)`, from which the batch
+circuit builds the leaf. A note encrypted to the relayer but owned by someone else,
 or one whose plaintext inflates the value, fails there.
 
 Consequences worth knowing before enabling it:

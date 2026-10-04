@@ -65,17 +65,13 @@ pub struct PubInputsDto {
     pub merkle_root: String,
     pub nullifier: [String; TRANSACT_IN],
     pub out_cm: [String; TRANSACT_OUT],
+    /// Zero on a transfer, which names no asset.
     pub public_asset_id: u64,
-    pub public_in: u64,
     pub public_out: u64,
-    pub in_cv: [PointDto; TRANSACT_IN],
-    pub out_cv: [PointDto; TRANSACT_OUT],
-    /// Per-output Pedersen value commitments anchored to the spender's
-    /// blinders (`value_j · V^assetId + rcv_dep_j · H`). The spend SNARK
-    /// rebuilds the tree leaves over these same coords, and the MASP
-    /// `transfer/withdraw` entry-points cross-bind them to
-    /// `tpi.cvDeps[0..TRANSACT_OUT-1]`. Wallet-supplied.
-    pub out_cv_dep: [PointDto; TRANSACT_OUT],
+    /// The transact circuit's digest public signal, a decimal field element.
+    /// Passed to the pool as given: it is hashed into the challenge and handed
+    /// to the verifier, so any other value fails the proof.
+    pub digest: String,
     pub recipient: String,
     pub chain_id: u64,
     pub payer: String,
@@ -98,6 +94,8 @@ pub struct PointDto {
 #[serde(rename_all = "camelCase")]
 pub struct OutputAuxDto {
     pub clue_r: PointDto,
+    /// Subgroup witness for the clue: `[8]·clue_q == clue_r`.
+    pub clue_q: PointDto,
     pub eph_pub: PointDto,
     pub ciphertext: String,
 }

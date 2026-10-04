@@ -11,7 +11,6 @@
 //! [`super::governance`] — so this module is
 //! the routing table and nothing else.
 
-use super::deposits::encode_aux;
 use super::plan::CommitPlan;
 use chain_types::decode::DecodedEvent;
 use database::RawEventRow;
@@ -51,38 +50,21 @@ pub fn plan_event(plan: &mut CommitPlan, chain_id: i64, row: &RawEventRow, event
             id,
             payer,
             recipient,
-            public_asset_id,
-            public_in,
             fee_bps_at_submit,
-            cm,
-            cv_dep_x,
-            cv_dep_y,
-            rcv,
-            clue_rx,
-            clue_ry,
-            eph_pub_x,
-            eph_pub_y,
-            ciphertext,
+            note,
             fee,
-        } => {
-            let aux = encode_aux(clue_rx, clue_ry, eph_pub_x, eph_pub_y, &ciphertext);
-            plan.deposits.push_escrowed(
-                chain_id,
-                row,
-                id,
-                payer,
-                recipient,
-                public_asset_id,
-                public_in,
-                fee_bps_at_submit,
-                cm,
-                cv_dep_x,
-                cv_dep_y,
-                rcv,
-                aux,
-                fee,
-            );
-        }
+            pulled,
+        } => plan.deposits.push_escrowed(
+            chain_id,
+            row,
+            id,
+            payer,
+            recipient,
+            fee_bps_at_submit,
+            note,
+            fee,
+            pulled,
+        ),
         DecodedEvent::DepositFlushed { id, .. } => plan.deposits.push_flushed(chain_id, row, id),
         DecodedEvent::DepositCanceled { id, .. } => plan.deposits.push_canceled(chain_id, row, id),
         DecodedEvent::YieldAssetAdded {

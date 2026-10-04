@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 
 pub use frontier::{Frontier, decode_frontier, encode_frontier};
-pub use hash::{TAG_LEAF, TAG_MERKLE, leaf_hash};
+pub use hash::TAG_MERKLE;
 /// Field elements cross this crate's boundary big-endian. This is the single
 /// conversion pair, shared with `note` so the two cannot disagree.
 pub(crate) use hash::{be_to_fq, fq_to_be};

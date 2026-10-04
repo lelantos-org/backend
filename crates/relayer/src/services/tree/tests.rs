@@ -5,14 +5,13 @@ use super::*;
 
 const CHAIN_ID: i64 = 31337;
 
+/// A leaf distinct per `n` and never zero: a zero leaf is the empty leaf, which
+/// leaves the root where it was.
 fn cm(n: u8) -> Field {
     let mut f = [0u8; 32];
+    f[30] = 1;
     f[31] = n;
     f
-}
-
-fn cv(n: u8) -> [U256; 2] {
-    [U256::from(n), U256::from(n) + U256::from(1u8)]
 }
 
 /// Two-leaf advance. Real spends insert `TRANSACT_OUT` leaves and a flush inserts
@@ -22,30 +21,28 @@ fn advance2(
     m: &mut TreeMirror,
     cm0: Field,
     cm1: Field,
-    cv0: [U256; 2],
-    cv1: [U256; 2],
 ) -> AppResult<(ReservedSlot, AdvancedState)> {
-    m.reserve_and_advance_batch(&[(cm0, cv0), (cm1, cv1)])
+    m.reserve_and_advance_batch(&[cm0, cm1])
 }
 
 /// A mirror with `pairs` pairs already committed.
 fn mirror(pairs: u8) -> TreeMirror {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
     for i in 0..pairs {
-        advance2(&mut m, cm(2 * i), cm(2 * i + 1), cv(i), cv(i + 1)).unwrap();
+        advance2(&mut m, cm(2 * i), cm(2 * i + 1)).unwrap();
     }
     m
 }
 
 fn reserve_one(m: &mut TreeMirror) -> AppResult<()> {
-    advance2(m, cm(200), cm(201), cv(9), cv(10)).map(|_| ())
+    advance2(m, cm(200), cm(201)).map(|_| ())
 }
 
 #[test]
 fn reserve_advances_by_two_leaves() {
     let mut m = mirror(1);
     assert_eq!(m.committed_count(), 2);
-    let (slot, advanced) = advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    let (slot, advanced) = advance2(&mut m, cm(10), cm(11)).unwrap();
     assert_eq!(slot.start_index, 2);
     assert_eq!(m.committed_count(), 4);
     assert_ne!(slot.old_root, advanced.new_root);
@@ -57,7 +54,7 @@ fn reserve_advances_by_two_leaves() {
 fn unwind_rolls_back_a_clean_failure() {
     let mut m = mirror(1);
     let before = m.current_root();
-    advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
 
     let err = m.unwind(2, AppError::Reverted("tx reverted".into()));
 
@@ -73,7 +70,7 @@ fn unwind_rolls_back_a_clean_failure() {
 #[test]
 fn unwind_parks_on_an_unknown_outcome() {
     let mut m = mirror(1);
-    advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
 
     let err = m.unwind(2, AppError::SubmitUnknown("no receipt".into()));
 
@@ -115,18 +112,16 @@ fn parking_keeps_the_first_reason() {
     assert!(reason.contains("first"), "got {reason}");
 }
 
-/// A wallet-supplied `cm` at or above the BN254 modulus makes Poseidon refuse the
-/// leaf. Hashing after the first insert would leave leaf 0 in the tree with
-/// nothing to remove it, running the mirror one leaf ahead of the chain.
+/// A wallet-supplied `cm` at or above the BN254 modulus is a leaf the pool
+/// cannot insert. Refusing it after the first insert would leave leaf 0 in the
+/// tree with nothing to remove it, running the mirror one leaf ahead of the chain.
 #[test]
 fn a_non_canonical_leaf_leaves_the_tree_untouched() {
     let mut m = mirror(1);
     let before_root = m.current_root();
     let modulus: Field = crate::domain::field::BN254_R.to_be_bytes();
 
-    let err = m
-        .reserve_and_advance_batch(&[(cm(10), cv(3)), (modulus, cv(4))])
-        .unwrap_err();
+    let err = m.reserve_and_advance_batch(&[cm(10), modulus]).unwrap_err();
 
     assert!(matches!(err, AppError::Internal(_)), "got {err}");
     assert_eq!(m.committed_count(), 2, "no leaf may survive a failed batch");
@@ -135,31 +130,15 @@ fn a_non_canonical_leaf_leaves_the_tree_untouched() {
     reserve_one(&mut m).expect("mirror should still accept work");
 }
 
-/// Same shape, but the bad element is the value commitment rather than the
-/// commitment itself.
+/// Capacity is a length check and must precede the leaf check: an oversized
+/// batch is refused without reading a single leaf.
 #[test]
-fn a_non_canonical_cv_dep_also_leaves_the_tree_untouched() {
-    let mut m = mirror(1);
-    let bad = [*crate::domain::field::BN254_R, U256::from(1u8)];
-
-    assert!(
-        m.reserve_and_advance_batch(&[(cm(10), cv(3)), (cm(11), bad)])
-            .is_err()
-    );
-    assert_eq!(m.committed_count(), 2);
-}
-
-/// Capacity is a length check and must precede hashing: an oversized batch is
-/// refused without computing a single Poseidon, which also keeps this test fast.
-#[test]
-fn a_batch_past_capacity_is_refused_before_any_hashing() {
+fn a_batch_past_capacity_is_refused_before_any_leaf_is_read() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
-    // Non-canonical on purpose: if the capacity check ran after hashing, this
-    // would fail as a hash error, after hashing a million leaves.
-    let bad = *crate::domain::field::BN254_R;
-    let leaves: Vec<(Field, [U256; 2])> = (0..MAX_LEAVES + 1)
-        .map(|_| (bad.to_be_bytes::<32>(), cv(1)))
-        .collect();
+    // Non-canonical on purpose: if the capacity check ran after the leaf check,
+    // this would fail as a leaf error.
+    let bad: Field = crate::domain::field::BN254_R.to_be_bytes();
+    let leaves: Vec<Field> = vec![bad; MAX_LEAVES + 1];
 
     let err = m.reserve_and_advance_batch(&leaves).unwrap_err();
 
@@ -177,7 +156,7 @@ fn the_snapshot_tracks_every_mutation() {
     assert_eq!(snap.leaf_count(), 0);
     assert!(!snap.is_desynced());
 
-    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(1), cm(2)).unwrap();
     assert_eq!(snap.leaf_count(), 2);
     assert_eq!(snap.root(), m.current_root());
 
@@ -197,7 +176,7 @@ fn root_history_remembers_what_the_mirror_has_held() {
     let empty = m.current_root();
     assert!(m.knows_root(&empty));
 
-    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(1), cm(2)).unwrap();
     let after = m.current_root();
     assert!(m.knows_root(&empty), "the previous root is still valid");
     assert!(m.knows_root(&after));
@@ -212,7 +191,7 @@ fn a_rolled_back_root_stops_being_accepted() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
     let before = m.current_root();
 
-    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(1), cm(2)).unwrap();
     let speculative = m.current_root();
     assert!(m.knows_root(&speculative), "published while in flight");
 
@@ -233,10 +212,10 @@ fn a_rolled_back_root_stops_being_accepted() {
 #[test]
 fn a_rollback_retracts_only_the_advance_it_undid() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
-    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(1), cm(2)).unwrap();
     let landed = m.current_root();
 
-    advance2(&mut m, cm(3), cm(4), cv(3), cv(4)).unwrap();
+    advance2(&mut m, cm(3), cm(4)).unwrap();
     m.rollback(2).unwrap();
 
     assert!(m.knows_root(&landed));
@@ -258,7 +237,7 @@ fn root_history_is_bounded() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
     let first = m.current_root();
     for i in 0..ROOT_HISTORY as u8 + 2 {
-        advance2(&mut m, cm(i), cm(i + 1), cv(i), cv(i + 1)).unwrap();
+        advance2(&mut m, cm(i), cm(i + 1)).unwrap();
     }
     assert!(m.recent_roots.len() <= ROOT_HISTORY);
     assert!(!m.knows_root(&first), "the oldest root must roll off");
@@ -281,10 +260,10 @@ fn rollback_past_the_start_is_rejected() {
 #[test]
 fn a_rollback_restores_the_state_the_next_proof_builds_on() {
     let mut m = mirror(2);
-    let (first, _) = advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    let (first, _) = advance2(&mut m, cm(10), cm(11)).unwrap();
     m.rollback(2).unwrap();
 
-    let (again, _) = advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    let (again, _) = advance2(&mut m, cm(10), cm(11)).unwrap();
     assert_eq!(again.start_index, first.start_index);
     assert_eq!(again.old_root, first.old_root);
     assert_eq!(again.old_frontier, first.old_frontier);
@@ -296,7 +275,7 @@ fn a_rollback_restores_the_state_the_next_proof_builds_on() {
 #[test]
 fn rollback_of_anything_but_the_last_reserve_is_rejected() {
     let mut m = mirror(2);
-    advance2(&mut m, cm(10), cm(11), cv(3), cv(4)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
     let root = m.current_root();
 
     assert!(m.rollback(1).is_err(), "half a batch is not a state");
@@ -321,9 +300,9 @@ fn rollback_of_anything_but_the_last_reserve_is_rejected() {
 fn a_fully_kept_bundle_keeps_every_item_and_root() {
     let mut m = mirror(1);
     m.begin_bundle().unwrap();
-    let (a, a_adv) = advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
-    let (b, b_adv) = advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
-    let (c, c_adv) = advance2(&mut m, cm(14), cm(15), cv(5), cv(6)).unwrap();
+    let (a, a_adv) = advance2(&mut m, cm(10), cm(11)).unwrap();
+    let (b, b_adv) = advance2(&mut m, cm(12), cm(13)).unwrap();
+    let (c, c_adv) = advance2(&mut m, cm(14), cm(15)).unwrap();
 
     assert_eq!(b.start_index, a.start_index + 2, "items chain");
     assert_eq!(b.old_root, a_adv.new_root, "each builds on the one before");
@@ -345,9 +324,9 @@ fn a_fully_kept_bundle_keeps_every_item_and_root() {
 fn a_partial_prefix_keeps_only_the_items_that_landed() {
     let mut m = mirror(1);
     m.begin_bundle().unwrap();
-    let (_, a_adv) = advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
-    let (b, b_adv) = advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
-    let (_, c_adv) = advance2(&mut m, cm(14), cm(15), cv(5), cv(6)).unwrap();
+    let (_, a_adv) = advance2(&mut m, cm(10), cm(11)).unwrap();
+    let (b, b_adv) = advance2(&mut m, cm(12), cm(13)).unwrap();
+    let (_, c_adv) = advance2(&mut m, cm(14), cm(15)).unwrap();
 
     m.commit_prefix(1).unwrap();
     assert_eq!(m.committed_count(), 4, "one item of two leaves kept");
@@ -358,7 +337,7 @@ fn a_partial_prefix_keeps_only_the_items_that_landed() {
 
     // Re-reserving the discarded item lands it exactly where it was, so a proof
     // made for it before the rollback is still the right one.
-    let (again, again_adv) = advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
+    let (again, again_adv) = advance2(&mut m, cm(12), cm(13)).unwrap();
     assert_eq!(again.start_index, b.start_index);
     assert_eq!(again.old_root, b.old_root);
     assert_eq!(again.old_frontier, b.old_frontier);
@@ -372,8 +351,8 @@ fn rolling_back_a_bundle_restores_the_pre_bundle_state() {
     let window = m.recent_roots.clone();
 
     m.begin_bundle().unwrap();
-    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
-    advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
+    advance2(&mut m, cm(12), cm(13)).unwrap();
     m.rollback_bundle().unwrap();
 
     assert_eq!(m.committed_count(), 4);
@@ -386,7 +365,7 @@ fn a_bundle_cannot_be_opened_twice_or_kept_past_its_length() {
     let mut m = mirror(1);
     m.begin_bundle().unwrap();
     assert!(m.begin_bundle().is_err(), "already open");
-    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
     assert!(m.commit_prefix(2).is_err(), "only one item reserved");
     assert!(
         m.commit_prefix(0).is_err(),
@@ -400,7 +379,7 @@ fn a_bundle_cannot_be_opened_twice_or_kept_past_its_length() {
 fn abandoning_a_bundle_on_an_unknown_outcome_parks() {
     let mut m = mirror(1);
     m.begin_bundle().unwrap();
-    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
 
     let err = m.abandon_bundle(AppError::SubmitUnknown("no receipt".into()));
     assert!(matches!(err, AppError::SubmitUnknown(_)));
@@ -417,7 +396,7 @@ fn abandoning_a_bundle_on_a_clean_failure_rolls_it_back() {
     let mut m = mirror(1);
     let root = m.current_root();
     m.begin_bundle().unwrap();
-    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
 
     let err = m.abandon_bundle(AppError::Rpc("refused".into()));
     assert!(matches!(err, AppError::Rpc(_)));
@@ -430,8 +409,8 @@ fn root_age_counts_advances_since_a_root_was_current() {
     let mut m = TreeMirror::new(CHAIN_ID).unwrap();
     let empty = m.current_root();
     assert_eq!(m.root_age(&empty), Some(0));
-    advance2(&mut m, cm(1), cm(2), cv(1), cv(2)).unwrap();
-    advance2(&mut m, cm(3), cm(4), cv(3), cv(4)).unwrap();
+    advance2(&mut m, cm(1), cm(2)).unwrap();
+    advance2(&mut m, cm(3), cm(4)).unwrap();
     assert_eq!(m.root_age(&empty), Some(2));
     assert_eq!(m.root_age(&m.current_root()), Some(0));
     assert_eq!(m.root_age(&[0xEEu8; 32]), None);
@@ -444,17 +423,37 @@ fn root_age_counts_advances_since_a_root_was_current() {
 fn a_bundle_item_witness_zeroes_the_frontier_slots_it_does_not_read() {
     let mut m = mirror(1);
     m.begin_bundle().unwrap();
-    advance2(&mut m, cm(10), cm(11), cv(1), cv(2)).unwrap();
+    advance2(&mut m, cm(10), cm(11)).unwrap();
     m.rollback_bundle().unwrap();
     m.begin_bundle().unwrap();
-    advance2(&mut m, cm(12), cm(13), cv(3), cv(4)).unwrap();
-    let (slot, _) = m.reserve_and_advance_batch(&[(cm(14), cv(5))]).unwrap();
+    advance2(&mut m, cm(12), cm(13)).unwrap();
+    let (slot, _) = m.reserve_and_advance_batch(&[cm(14)]).unwrap();
     // Digit d of the start index is how many slots level d reads.
     for (level, row) in slot.old_frontier.iter().enumerate() {
         let digit = ((slot.start_index >> (2 * level)) & 3) as usize;
         for (k, value) in row.iter().enumerate().skip(digit) {
             assert_eq!(*value, [0u8; 32], "level {level} slot {k} is not read");
         }
+    }
+}
+
+/// The published batch vectors: from each vector's frontier, inserting the
+/// leaves its batch builds reaches the `new_root` the circuit accepts.
+#[test]
+fn the_mirror_reaches_the_roots_of_the_published_batch_vectors() {
+    for v in crate::domain::batch_vectors::load() {
+        let tree = Frontier::resume(DEPTH, v.start_index, v.frontier_in.clone(), v.old_root)
+            .unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        let mut m = TreeMirror::new(CHAIN_ID).unwrap();
+        m.tree = tree;
+
+        let (slot, advanced) = m
+            .reserve_and_advance_batch(&v.batch.leaves().unwrap())
+            .unwrap();
+        assert_eq!(slot.start_index, v.start_index, "{}", v.name);
+        assert_eq!(slot.old_root, v.old_root, "{} old root", v.name);
+        assert_eq!(slot.old_frontier, v.frontier_in, "{} frontier", v.name);
+        assert_eq!(advanced.new_root, v.new_root, "{} new root", v.name);
     }
 }
 
@@ -499,9 +498,11 @@ fn advance_both(m: &mut TreeMirror, ring: &mut Ring, n: u16) {
 }
 
 fn advance_n(m: &mut TreeMirror, n: u16) -> (ReservedSlot, AdvancedState) {
+    // Never zero: a zero leaf is the empty leaf and would not move the root.
     let mut c = [0u8; 32];
+    c[29] = 1;
     c[30..].copy_from_slice(&n.to_be_bytes());
-    m.reserve_and_advance_batch(&[(c, cv(1))]).unwrap()
+    m.reserve_and_advance_batch(&[c]).unwrap()
 }
 
 /// Every root the mirror accepts resolves to the slot the pool holds it in, and

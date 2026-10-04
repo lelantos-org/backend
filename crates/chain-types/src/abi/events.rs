@@ -5,8 +5,8 @@ use alloy::sol;
 
 sol! {
     /// Encrypted-note payload for the spend path, emitted once per output leaf
-    /// by `MASP._emitNotes`. Carries the FMD clue, the ECDH ephemeral pubkey,
-    /// the ciphertext and the leaf's Pedersen value commitment. `cm` is
+    /// by `MASP._emitNotes`. Carries the FMD clue, the ECDH ephemeral pubkey
+    /// and the ciphertext. `cm` is the note commitment and the tree leaf; it is
     /// indexed, making this log the note-creation signal for indexers that
     /// track commitments only.
     #[derive(Debug)]
@@ -16,15 +16,12 @@ sol! {
         uint256 clueRy,
         uint256 ephPubX,
         uint256 ephPubY,
-        bytes ciphertext,
-        uint256 cvDepX,
-        uint256 cvDepY
+        bytes ciphertext
     );
 
     /// Emitted in the MASP constructor for each registered asset. `token` is
     /// the underlying ERC20; `scale` lifts a circuit `uint64` value into the
-    /// smallest token unit. The Baby-Jubjub asset generator is derived
-    /// in-circuit via `HashToAssetGen(assetId)`.
+    /// smallest token unit.
     #[derive(Debug)]
     event AssetRegistered(
         uint64 indexed assetId,
@@ -87,11 +84,16 @@ sol! {
     #[derive(Debug)]
     event NullifierConsumed(bytes32 indexed nf);
 
-    /// Emitted on `deposit` / `depositAuthorized`. A deposit occupies exactly
-    /// one leaf, so this carries a single cm plus that leaf's FMD clue, ECDH
-    /// ephemeral pubkey, ciphertext, Pedersen value commitment `cvDep` and its
-    /// blinder `rcv`. `NotePayload` is not emitted on the escrow path; this
-    /// event is the shielded-note-created signal for shields.
+    /// Emitted on `deposit` / `depositAuthorized`. A deposit occupies two
+    /// leaves, the depositor's note and the relayer's fee note, and this
+    /// carries each one's `inner`, FMD clue, ECDH ephemeral pubkey and
+    /// ciphertext. `NotePayload` is not emitted on the escrow path; this event
+    /// is the shielded-note-created signal for shields.
+    ///
+    /// `inner` is not the tree leaf. The leaf a flush inserts is
+    /// `Poseidon(TAG_CM, publicAssetId * 2^64 + publicIn, inner)`, computed by
+    /// the batch circuit and never on-chain, and likewise the fee note's from
+    /// `feeAssetId`, `feeIn` and `feeInner`.
     ///
     /// The event's block number is the deposit's `submittedAt`, which the
     /// relayer replays into `MASP.DepositMeta` at flush time and into the
@@ -104,10 +106,7 @@ sol! {
         uint64 publicAssetId,
         uint64 publicIn,
         uint16 feeBpsAtSubmit,
-        bytes32 cm,
-        uint256 cvDepX,
-        uint256 cvDepY,
-        uint256 rcv,
+        bytes32 inner,
         uint256 clueRx,
         uint256 clueRy,
         uint256 ephPubX,
@@ -119,21 +118,23 @@ sol! {
         // in, independent of `publicAssetId`; it is 0 exactly when `feeIn` is 0.
         uint64 feeAssetId,
         uint64 feeIn,
-        bytes32 feeCm,
-        uint256 feeCvDepX,
-        uint256 feeCvDepY,
-        uint256 feeRcv,
+        bytes32 feeInner,
         uint256 feeClueRx,
         uint256 feeClueRy,
         uint256 feeEphPubX,
         uint256 feeEphPubY,
-        bytes feeCiphertext
+        bytes feeCiphertext,
+        // The escrow's refund cap. For a yield asset, what was pulled at submit
+        // in the deposit asset's token, which is the most a cancel returns;
+        // exactly 0 for a plain asset. The pool stores nothing for it: the
+        // digest binds it, so a flush or a cancel hands it back as logged.
+        uint256 pulled
     );
 
     /// Emitted per deposit inside `flushBatch`. The full per-note data is
     /// carried by `DepositEscrowed`.
     #[derive(Debug)]
-    event DepositFlushed(uint256 indexed id, bytes32 cm);
+    event DepositFlushed(uint256 indexed id, bytes32 inner);
 
     /// Emitted by `cancelDeposit`. Carries the refund target and what was
     /// refunded in the deposit token (in + protocol fee, plus the relayer fee

@@ -41,8 +41,6 @@ pub struct NoteRow {
     pub eph_pub_y: BigDecimal,
     pub ciphertext: Vec<u8>,
     pub leaf_index: i64,
-    pub cv_dep_x: BigDecimal,
-    pub cv_dep_y: BigDecimal,
 }
 
 /// The insert shape of [`NoteRow`]: the same columns without the generated `id`.
@@ -63,21 +61,17 @@ pub struct NewNote {
     pub eph_pub_y: BigDecimal,
     pub ciphertext: Vec<u8>,
     pub leaf_index: i64,
-    pub cv_dep_x: BigDecimal,
-    pub cv_dep_y: BigDecimal,
 }
 
-/// One leaf's tree inputs: `leaf = Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`.
+/// One tree leaf: `cm` is the note commitment, which is the leaf.
 ///
 /// A projection of `notes` rather than the whole row: the tree mirrors read
 /// millions of these and need nothing else.
 #[derive(Debug, Clone, Queryable, Selectable)]
 #[diesel(table_name = notes)]
-pub struct LeafInputsRow {
+pub struct LeafRow {
     pub leaf_index: i64,
     pub cm: Vec<u8>,
-    pub cv_dep_x: BigDecimal,
-    pub cv_dep_y: BigDecimal,
 }
 
 /// Persisted commitment-tree state for one chain: what `/v1/tree-state` serves

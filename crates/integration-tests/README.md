@@ -33,7 +33,7 @@ row sets, so they cannot interleave.
 | `fmd_consume_pairs_root_advanced_with_note_created` | consume holds an escrowed note pending until the batch committing it lands |
 | `explorer_consume_writes_tree_advances` | `RootAdvanced` projects old root / new root / leaves inserted |
 | `nullifier_chunk_feed_slices_spent_set` | chunk boundaries and the 10-byte truncation of the spent-set feed |
-| `commitment_chunk_serves_only_a_prefixed_hex_leaf_hash` | the feed serves one `0x`-prefixed `leafHash` and *not* the raw `cm` / `cv_dep` |
+| `commitment_chunk_serves_only_a_prefixed_hex_leaf_hash` | the feed serves the leaf (`cm`) as one `0x`-prefixed, zero-padded `leafHash` |
 | `list_matches_returns_only_the_requested_chains_notes` | a subscription spans every chain, so `matches` must be filtered by `chain_id` |
 | `asset_metadata_write_leaves_the_column_it_omits_alone` | a partial `AsChangeset` write must not NULL the column it does not carry |
 

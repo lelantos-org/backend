@@ -44,6 +44,7 @@ test-support = { path = "../test-support" }
 crypto = { path = "../crypto" }
 chain-types = { path = "../chain-types" }
 shared = { path = "../shared" }
+serde_json = { workspace = true }
 hex = { workspace = true }
 alloy = { workspace = true }
 ark-ff = { workspace = true }

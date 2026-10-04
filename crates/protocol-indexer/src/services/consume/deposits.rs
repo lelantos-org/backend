@@ -9,8 +9,8 @@ use crate::domain::error::ProtocolIndexerError;
 use crate::repositories::deposit_escrowed_events::{
     self, MarkCanceled, MarkFlushed, NewDepositEscrowed,
 };
-use alloy::primitives::{Address, B256, U256};
-use chain_types::decode::DepositFeeNote;
+use alloy::primitives::{Address, U256};
+use chain_types::decode::DepositNote;
 use chain_types::numeric::u256_to_bigdecimal;
 use database::{DbPool, RawEventRow};
 use serde_json::json;
@@ -32,15 +32,10 @@ impl DepositPlan {
         id: U256,
         payer: Address,
         recipient: Address,
-        public_asset_id: u64,
-        public_in: u64,
         fee_bps_at_submit: u16,
-        cm: B256,
-        cv_dep_x: U256,
-        cv_dep_y: U256,
-        rcv: U256,
-        aux: serde_json::Value,
-        fee: DepositFeeNote,
+        note: DepositNote,
+        fee: DepositNote,
+        pulled: U256,
     ) {
         self.escrowed.push(NewDepositEscrowed {
             chain_id,
@@ -49,29 +44,16 @@ impl DepositPlan {
             deposit_id: u256_to_bigdecimal(id),
             payer: payer.as_slice().to_vec(),
             recipient: recipient.as_slice().to_vec(),
-            public_asset_id: public_asset_id as i64,
-            public_in: u256_to_bigdecimal(U256::from(public_in)),
+            public_asset_id: note.asset_id as i64,
+            public_in: u256_to_bigdecimal(U256::from(note.value)),
             fee_bps_at_submit: i32::from(fee_bps_at_submit),
-            cm: cm.0.to_vec(),
-            cv_dep_x: u256_to_bigdecimal(cv_dep_x),
-            cv_dep_y: u256_to_bigdecimal(cv_dep_y),
-            rcv: u256_to_bigdecimal(rcv),
-            aux,
-            fee_asset_id: fee.fee_asset_id as i64,
-            fee_in: u256_to_bigdecimal(U256::from(fee.fee_in)),
-            fee_cm: fee.cm.0.to_vec(),
-            fee_cv_dep_x: u256_to_bigdecimal(fee.cv_dep_x),
-            fee_cv_dep_y: u256_to_bigdecimal(fee.cv_dep_y),
-            fee_rcv: u256_to_bigdecimal(fee.rcv),
-            // Built here rather than by the caller so the fee leaf's payload
-            // keeps the same shape as the depositor's.
-            fee_aux: encode_aux(
-                fee.clue_rx,
-                fee.clue_ry,
-                fee.eph_pub_x,
-                fee.eph_pub_y,
-                &fee.ciphertext,
-            ),
+            inner: note.inner.0.to_vec(),
+            aux: encode_aux(&note),
+            fee_asset_id: fee.asset_id as i64,
+            fee_in: u256_to_bigdecimal(U256::from(fee.value)),
+            fee_inner: fee.inner.0.to_vec(),
+            fee_aux: encode_aux(&fee),
+            pulled: u256_to_bigdecimal(pulled),
             // The digest the contract stored hashes `uint32(block.number)`,
             // which on Arbitrum is the L1 height rather than `row.block_number`.
             // Rows ingested before `evm_block_number` existed fall back to
@@ -113,20 +95,13 @@ impl DepositPlan {
     }
 }
 
-/// Encode the deposit leaf's aux blob as JSON for the `aux` column. A deposit
-/// occupies one leaf, so this is a single object rather than an array.
-pub fn encode_aux(
-    clue_rx: U256,
-    clue_ry: U256,
-    eph_pub_x: U256,
-    eph_pub_y: U256,
-    ciphertext: &[u8],
-) -> serde_json::Value {
+/// One deposit note's aux blob as JSON, for the `aux` and `fee_aux` columns.
+fn encode_aux(note: &DepositNote) -> serde_json::Value {
     json!({
-        "clueRx": clue_rx.to_string(),
-        "clueRy": clue_ry.to_string(),
-        "ephPubX": eph_pub_x.to_string(),
-        "ephPubY": eph_pub_y.to_string(),
-        "ciphertext": format!("0x{}", hex::encode(ciphertext)),
+        "clueRx": note.clue_rx.to_string(),
+        "clueRy": note.clue_ry.to_string(),
+        "ephPubX": note.eph_pub_x.to_string(),
+        "ephPubY": note.eph_pub_y.to_string(),
+        "ciphertext": format!("0x{}", hex::encode(&note.ciphertext)),
     })
 }

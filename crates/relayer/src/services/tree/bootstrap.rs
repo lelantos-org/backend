@@ -1,16 +1,13 @@
 //! Where a mirror's state comes from: fmd-indexer's tables at boot and on
 //! resync, cross-checked against the pool itself.
 
-use super::leaf::leaf_hash;
 use super::{DEPTH, ROOT_HISTORY, TreeMirror, empty_root, field_to_hex, vec_to_field};
 use crate::adapters::masp::MaspReader;
 use crate::domain::error::{AppError, AppResult};
 use crate::repositories::{notes, tree_advances, tree_state};
-use ::asset_registry::bigdecimal_to_u256;
 use crypto::tree::{Field, Frontier, decode_frontier};
 use database::DbPool;
 use database::models::TreeStateRow;
-use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use tracing::info;
@@ -210,10 +207,8 @@ impl TreeMirror {
                 break;
             }
 
-            // Check row contiguity sequentially, which is cheap, then hash leaves
-            // in parallel: `leaf_hash` is a pure Poseidon call, independent per
-            // row. `appended` carries the running leaf index across pages, so a gap at
-            // a page boundary is caught like any other.
+            // `appended` carries the running leaf index across pages, so a gap at a
+            // page boundary is caught like any other.
             for (i, row) in rows.iter().enumerate() {
                 let expected = appended + i as i64;
                 if row.leaf_index != expected {
@@ -223,14 +218,10 @@ impl TreeMirror {
                     )));
                 }
             }
+            // `notes.cm` is the leaf, for a deposit's notes as for a spend's.
             let leaves: Vec<Field> = rows
-                .par_iter()
-                .map(|row| {
-                    let cm_f = vec_to_field(&row.cm)?;
-                    let cv_x = bigdecimal_to_u256(&row.cv_dep_x)?;
-                    let cv_y = bigdecimal_to_u256(&row.cv_dep_y)?;
-                    leaf_hash(&cm_f, &[cv_x, cv_y])
-                })
+                .iter()
+                .map(|row| vec_to_field(&row.cm))
                 .collect::<AppResult<Vec<Field>>>()?;
             appended += rows.len() as i64;
             tree.extend(leaves)

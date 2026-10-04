@@ -39,19 +39,9 @@ async fn prove_published_vector_and_dump() {
         start_index: w["start_index"].as_str().unwrap().into(),
         actual_count: w["actual_count"].as_str().unwrap().into(),
         cms: strs(&w["cms"]),
-        cv_dep: w["cv_dep"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| {
-                let a = strs(p);
-                [a[0].clone(), a[1].clone()]
-            })
-            .collect(),
         leaf_asset: strs(&w["leaf_asset"]),
         leaf_public_in: strs(&w["leaf_public_in"]),
         is_deposit: strs(&w["is_deposit"]),
-        rcv: strs(&w["rcv"]),
         frontier_in: w["frontier_in"]
             .as_array()
             .unwrap()
@@ -69,6 +59,17 @@ async fn prove_published_vector_and_dump() {
     )
     .expect("load zkey");
     let p = prover.prove(witness, Priority::Spend).await.expect("prove");
+
+    // The circuit's public signals, in order: its two outputs, then `z`.
+    let out = &vector["vectors"][0]["circuitOutput"];
+    assert_eq!(
+        p.public_signals,
+        [
+            out["y"].as_str().unwrap(),
+            out["digest"].as_str().unwrap(),
+            w["z"].as_str().unwrap(),
+        ]
+    );
 
     std::fs::write(
         dir.join("proof.json"),

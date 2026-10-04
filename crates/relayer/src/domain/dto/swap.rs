@@ -74,13 +74,9 @@ pub struct DepositRequestDto {
     pub public_in: u64,
     pub payer: String,
     pub recipient: String,
-    pub out_cm: String,
-    /// Depositor-anchored Pedersen value commitment, in Baby-Jubjub coordinates.
-    /// Bound on-chain into the leaf hash via `Poseidon(TAG_LEAF, cm, x, y)`.
-    pub cv_dep: [String; 2],
-    /// The leaf's `rcv_dep`. Private witness for the batch circuit's
-    /// per-leaf deposit binding; published off-chain via `DepositEscrowed`.
-    pub rcv: String,
+    /// `Poseidon(TAG_INNER, pk, rho, rcm)` of the deposited note, 0x-hex. The
+    /// batch circuit builds the leaf from it and the public amount.
+    pub inner: String,
     /// The deposit's second leaf: a note paying whoever flushes the batch.
     ///
     /// On the swap path this is a zero-value pad, since the swap already pays the
@@ -91,7 +87,6 @@ pub struct DepositRequestDto {
     /// `public_asset_id`, since `SwapWrapper` escrows only that token.
     pub fee_asset_id: u64,
     pub fee_in: u64,
-    pub fee_cm: String,
-    pub fee_cv_dep: [String; 2],
-    pub fee_rcv: String,
+    /// `inner` of the fee note, 0x-hex.
+    pub fee_inner: String,
 }

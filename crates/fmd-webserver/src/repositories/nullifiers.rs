@@ -5,7 +5,7 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
 /// One `seq`-ordered slice of the spent set. `seq` is the dense per-chain ordinal
-/// fmd-indexer assigns at insert; see `notes::list_leaf_inputs` for the
+/// fmd-indexer assigns at insert; see `notes::list_leaves` for the
 /// `leaf_index` equivalent.
 pub async fn list_chunk(
     pool: &DbPool,

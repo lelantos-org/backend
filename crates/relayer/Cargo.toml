@@ -36,7 +36,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { workspace = true }
 
 parking_lot = "0.12"
-rayon = { workspace = true }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }

@@ -10,9 +10,9 @@ use crate::repositories::{
 };
 use crate::services::cached;
 
-/// γ sets the false-positive rate at `2^-γ`. The circuit carries `out_clue_bits`
-/// as a PolyEval-bound public input with no in-circuit constraints, and the
-/// contract masks the bits above γ with 0x3FFF. A higher γ lowers the
+/// γ sets the false-positive rate at `2^-γ`. `out_clue_bits` is not a circuit
+/// signal: the contract hashes it into the Fiat-Shamir challenge and masks the
+/// bits above γ with 0x3FFF. A higher γ lowers the
 /// false-positive rate; a lower γ increases privacy through false positives.
 pub const GAMMA_MIN: i32 = 1;
 pub const GAMMA_MAX: i32 = 16;

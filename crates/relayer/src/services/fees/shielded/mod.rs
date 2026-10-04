@@ -3,6 +3,8 @@
 //! relayer quotes (this module).
 
 pub mod deposit_note;
+#[cfg(test)]
+mod fixture;
 mod recipient;
 
 pub use recipient::{FeeRecipient, Payment};

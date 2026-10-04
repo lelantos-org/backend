@@ -10,8 +10,7 @@ use crate::domain::error::{FmdIndexerError, Result};
 use crate::domain::pending::TreeLeaf;
 use crate::repositories::notes::NotesRepo;
 use crate::repositories::tree_state::{TreeStateRepo, TreeStateRow};
-use crypto::tree::{DEPTH, Field, Frontier, encode_frontier};
-use database::models::LeafInputsRow;
+use crypto::tree::{DEPTH, Frontier, encode_frontier};
 use tracing::{info, warn};
 
 /// Leaves read per round trip during [`backfill`].
@@ -28,16 +27,6 @@ fn hole(chain_id: i64, expected: i64, found: i64) -> FmdIndexerError {
         "chain {chain_id} has no note at leaf_index {expected} (found {found}); \
          cannot backfill the tree from notes"
     ))
-}
-
-fn leaf_hash_of(row: &LeafInputsRow) -> Result<Field> {
-    let cm = crypto::tree::field_from_bytes(&row.cm).map_err(tree_err)?;
-    crypto::tree::leaf_hash(
-        &cm,
-        &crate::domain::convert::bigdec_to_field(&row.cv_dep_x),
-        &crate::domain::convert::bigdec_to_field(&row.cv_dep_y),
-    )
-    .map_err(tree_err)
 }
 
 /// Fold this tick's leaves into the chain's stored frontier.
@@ -105,7 +94,7 @@ pub(super) async fn advance(
         return Ok(());
     };
     frontier
-        .extend(fresh.iter().map(|leaf| leaf.hash))
+        .extend(fresh.iter().map(|leaf| leaf.cm))
         .map_err(|e| FmdIndexerError::Decode(e.to_string()))?;
 
     let next = TreeStateRow {
@@ -158,15 +147,15 @@ async fn backfill(
     let mut next = 0i64;
     while next < leaves {
         let rows = notes
-            .leaf_inputs(chain_id, next, (next + LEAF_PAGE).min(leaves))
+            .leaves(chain_id, next, (next + LEAF_PAGE).min(leaves))
             .await?;
-        let mut hashes = Vec::with_capacity(rows.len());
+        let mut cms = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             let expected = next + i as i64;
             if row.leaf_index != expected {
                 return Err(hole(chain_id, expected, row.leaf_index));
             }
-            hashes.push(leaf_hash_of(row)?);
+            cms.push(crypto::tree::field_from_bytes(&row.cm).map_err(tree_err)?);
         }
         if rows.len() as i64 != (next + LEAF_PAGE).min(leaves) - next {
             // Short page: `notes` stops before the tree does, so the tail of
@@ -174,7 +163,7 @@ async fn backfill(
             return Err(hole(chain_id, next + rows.len() as i64, -1));
         }
         next += rows.len() as i64;
-        frontier.extend(hashes).map_err(tree_err)?;
+        frontier.extend(cms).map_err(tree_err)?;
     }
 
     let root = frontier.root();

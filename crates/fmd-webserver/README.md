@@ -95,14 +95,16 @@ proof of one `cm` tells the server — and every cache and proxy log on the way 
 exactly which note the caller is about to spend. Clients build the tree from the
 commitment feed and derive paths themselves.
 
-The commitment feed serves one pre-hashed leaf per entry,
-`Poseidon(TAG_LEAF, cm, cv_dep_x, cv_dep_y)`, as `0x`-prefixed hex:
+The commitment feed serves one leaf per entry as `leafHash`, `0x`-prefixed hex.
+The leaf is the note commitment,
+`cm = Poseidon(TAG_CM, asset * 2^64 + value, inner)`, read from `notes.cm`;
+nothing is hashed at serve time. `/v1/notes` and `/v1/matches` serve the same
+value as `commitmentHex`.
 
-- **Pre-hashed**, because hashing was the only thing any client did with the raw
-  `cm` / `cv_dep`. One field element instead of three cuts the largest feed in a
-  cold sync roughly threefold and saves each client ~1M pure-JS Poseidon-4 calls
-  over a full tree. Clients can no longer derive the leaf themselves, so they are
-  expected to verify the root they build against the on-chain root.
+- **Not re-derivable from events**: a spend publishes `cm`, but a deposit
+  publishes only `inner`, and `fmd-indexer` computes its leaf from the escrow's
+  public asset and amount. Clients are expected to verify the root they build
+  against the on-chain root.
 - **`0x`-prefixed**, because the SDK's field decoder accepts decimal *or* hex; a
   bare-hex value whose digits all happen to be decimal would silently parse as a
   completely different number.
@@ -132,7 +134,7 @@ Standard binary layout (see [ARCHITECTURE.md](../../ARCHITECTURE.md)):
 | Layer | What |
 |-------|------|
 | `app/` | Env config, shared state, the in-process caches and their keys, build stamp |
-| `domain/` | `dto/` requests, `responses/` wire bodies (including the pre-rendered chunk), capability `token`, `field` element conversions, Baby-Jubjub `point` packing, the `poseidon` leaf hash, error type |
+| `domain/` | `dto/` requests, `responses/` wire bodies (including the pre-rendered chunk), capability `token`, `field` element conversions, Baby-Jubjub `point` packing, error type |
 | `repositories/` | One module per table read: `notes`, `matches`, `nullifiers`, `subscriptions` (the one table written), `tree_state` |
 | `services/` | One module per endpoint, plus `chunks`: the page size, range and cache path both chunk feeds share |
 | `handlers/http/` | Routes, router, OpenAPI, and the `auth` bearer-token extractor |

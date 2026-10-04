@@ -10,6 +10,7 @@ ark-ed-on-bn254 = { workspace = true }
 ark-ff = { workspace = true }
 ark-ec = { workspace = true }
 blake2 = { workspace = true }
+aes = { workspace = true }
 chacha20poly1305 = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }

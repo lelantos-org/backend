@@ -60,8 +60,6 @@ diesel::table! {
         eph_pub_y -> Numeric,
         ciphertext -> Bytea,
         leaf_index -> Int8,
-        cv_dep_x -> Numeric,
-        cv_dep_y -> Numeric,
     }
 }
 
@@ -152,16 +150,10 @@ diesel::table! {
         public_asset_id -> Int8,
         public_in -> Numeric,
         fee_bps_at_submit -> Int4,
-        cm -> Bytea,
-        cv_dep_x -> Numeric,
-        cv_dep_y -> Numeric,
-        rcv -> Numeric,
+        inner -> Bytea,
         aux -> Jsonb,
         fee_in -> Numeric,
-        fee_cm -> Bytea,
-        fee_cv_dep_x -> Numeric,
-        fee_cv_dep_y -> Numeric,
-        fee_rcv -> Numeric,
+        fee_inner -> Bytea,
         fee_aux -> Jsonb,
         submitted_at_block -> Int8,
         flushed_at_block -> Nullable<Int8>,
@@ -172,6 +164,7 @@ diesel::table! {
         block_ts -> Int8,
         flushed_log_index -> Nullable<Int4>,
         fee_asset_id -> Int8,
+        pulled -> Numeric,
     }
 }
 

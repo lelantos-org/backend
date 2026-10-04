@@ -6,10 +6,10 @@
 //! per-deposit guards in `_drainDeposit` are reproducible off chain from the
 //! escrow slot and the deposit's own fields, which is what this module does.
 //!
-//! One guard is the circuit's rather than the contract's: `rcv` never enters the
-//! escrow digest, so `flushBatch` would accept a blinder the batch circuit cannot
-//! witness. That failure lands earlier still, in witness generation, and costs
-//! the same batch, so it belongs in the same table.
+//! One guard is the compression's rather than `_drainDeposit`'s: a deposit
+//! escrows any non-zero `inner`, but the batch evaluates it as a coefficient and
+//! reverts `CoefficientOutOfField` on one that is not a field element. Such a
+//! deposit has no leaf and no witness, so it belongs in the same table.
 //!
 //! [`classify`] is pure: the decision table is the part worth testing, and
 //! keeping the RPC read and the bookkeeping out of it means the table can be
@@ -17,17 +17,9 @@
 
 use crate::domain::deposit::PendingDeposit;
 use crate::domain::deposit_digest::{MAX_PUBLIC_IN, deposit_digest};
+use crate::domain::field::is_canonical;
 use crate::services::fees::shielded::deposit_note::FeeNote;
 use alloy::primitives::{Address, B256};
-
-/// `rcv` is decomposed by `Num2Bits(RCV_BITS)` inside `MulH`, where
-/// `RCV_BITS = 252`; see `circuits/src/lib/value_commit.circom`. A wider blinder
-/// has no witness, so the deposit can never be proven, and the contract cannot
-/// screen for it because `rcv` is not part of the escrow digest.
-///
-/// A deposit escrowed under an earlier 253-bit bound with `rcv` in
-/// `[2^252, 2^253)` is stranded and must be reclaimed with `cancelDeposit`.
-const RCV_BITS: usize = 252;
 
 /// What pre-flight decided about one deposit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,16 +102,11 @@ pub fn classify(
     if deposit_digest(masp, chain_id, d) != stored {
         return Verdict::DigestMismatch;
     }
-    // Checked after the digest so a mismatched replay is still reported as one: an
-    // `rcv` that did not come from the escrowed deposit says nothing about the
-    // deposit.
-    if d.rcv.bit_len() > RCV_BITS {
-        return Verdict::Reject("rcv exceeds the circuit's 252-bit blinder");
-    }
-    // The same bound applies to the fee leaf's blinder: it is witnessed by the same
-    // `MulH` and the contract cannot screen for it either.
-    if d.fee_rcv.bit_len() > RCV_BITS {
-        return Verdict::Reject("fee_rcv exceeds the circuit's 252-bit blinder");
+    // Checked after the digest so a mismatched replay is still reported as one:
+    // an `inner` that did not come from the escrowed deposit says nothing about
+    // the deposit.
+    if !is_canonical(&d.inner) || !is_canonical(&d.fee_inner) {
+        return Verdict::Reject("inner is not a field element");
     }
 
     // No fee outcome is a `Reject`, and the two kinds of "not this batch" are told
@@ -144,7 +131,6 @@ pub fn classify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::U256;
 
     const MASP: Address = Address::new([0x11; 20]);
     const CHAIN: u64 = 31337;
@@ -223,40 +209,30 @@ mod tests {
         ));
     }
 
-    /// A blinder the batch circuit cannot decompose strands the deposit: the
-    /// contract accepts it, so nothing on chain screens it out and every flush tick
-    /// including it fails in witness generation.
+    /// `_validateDeposit` escrows any non-zero `inner`, and `flushBatch` reverts
+    /// `CoefficientOutOfField` on one at or above the modulus, whoever flushes.
     #[test]
-    fn an_rcv_wider_than_the_circuit_blinder_is_rejected() {
-        let mut d = deposit();
-        d.rcv = U256::from(1u8) << RCV_BITS;
-        let stored = escrowed(&d);
-        assert!(matches!(
-            classify(&d, stored, MASP, CHAIN, &paid()),
-            Verdict::Reject(_)
-        ));
+    fn an_inner_that_is_not_a_field_element_is_rejected() {
+        let modulus: [u8; 32] = crate::domain::field::BN254_R.to_be_bytes();
+        type Mutation = fn(&mut PendingDeposit, [u8; 32]);
+        let mutations: [Mutation; 2] = [|d, v| d.inner = v, |d, v| d.fee_inner = v];
+        for mutate in mutations {
+            let mut d = deposit();
+            mutate(&mut d, modulus);
+            assert_eq!(
+                classify(&d, escrowed(&d), MASP, CHAIN, &paid()),
+                Verdict::Reject("inner is not a field element")
+            );
+        }
     }
 
-    /// The widest blinder `Num2Bits(252)` still witnesses.
+    /// A replay disagreeing with the chain is reported as a mismatch rather than
+    /// blamed on the `inner` it replayed.
     #[test]
-    fn the_widest_representable_rcv_is_still_flushable() {
-        let mut d = deposit();
-        d.rcv = (U256::from(1u8) << RCV_BITS) - U256::from(1u8);
-        let stored = escrowed(&d);
-        assert_eq!(
-            classify(&d, stored, MASP, CHAIN, &paid()),
-            Verdict::Flushable
-        );
-    }
-
-    /// `rcv` is not in the escrow preimage, so a replay disagreeing with the chain
-    /// is reported as a mismatch rather than blamed on the blinder.
-    #[test]
-    fn an_oversized_rcv_does_not_mask_a_digest_mismatch() {
+    fn a_non_canonical_inner_does_not_mask_a_digest_mismatch() {
         let mut d = deposit();
         let stored = escrowed(&d);
-        d.rcv = U256::from(1u8) << RCV_BITS;
-        d.public_asset_id += 1;
+        d.inner = crate::domain::field::BN254_R.to_be_bytes();
         assert_eq!(
             classify(&d, stored, MASP, CHAIN, &paid()),
             Verdict::DigestMismatch
@@ -271,19 +247,6 @@ mod tests {
             classify(&d, escrowed(&d), MASP, CHAIN, &paid()),
             Verdict::Flushable
         );
-    }
-
-    /// The fee leaf's blinder is witnessed by the same `MulH` as the
-    /// depositor's, and the contract screens neither.
-    #[test]
-    fn a_fee_rcv_wider_than_the_circuit_blinder_is_rejected() {
-        let mut d = deposit();
-        d.fee_rcv = U256::from(1u8) << RCV_BITS;
-        let stored = escrowed(&d);
-        assert!(matches!(
-            classify(&d, stored, MASP, CHAIN, &paid()),
-            Verdict::Reject(_)
-        ));
     }
 
     /// Not this relayer's note. Another relayer can flush it and the payer can
@@ -340,7 +303,7 @@ mod tests {
     fn a_malformed_fee_note_is_deferred() {
         let d = deposit();
         let gate = FeeGate::Charged {
-            note: FeeNote::Malformed("fee note rcv_dep is not the escrowed feeRcv"),
+            note: FeeNote::Malformed("fee note value disagrees with feeIn"),
             required: 250,
         };
         assert!(matches!(
