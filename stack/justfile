@@ -16,12 +16,12 @@ export DEBUG := env_var_or_default("DEBUG", "0")
 export TRACE := env_var_or_default("TRACE", "0")
 
 # Must be the release whose verifying keys are baked into
-# `contracts/src/verifiers/` — currently v0.18.0. A mismatch fails silently
+# `contracts/src/verifiers/` — currently v0.19.0. A mismatch fails silently
 # until the first flush: the relayer proves fine and `flushBatch` reverts
 # `TreeUpdateRejected()`. Every release runs its own setup, so no other
 # release's keys match, and the witness graph of a release with other signals
 # rejects the witness the relayer builds.
-CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.18.0")
+CIRCUITS_VERSION := env_var_or_default("CIRCUITS_VERSION", "v0.19.0")
 
 DC := "docker compose"
 # Almost every recipe acts on the active profile; spelling it once keeps the
