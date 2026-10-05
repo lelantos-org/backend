@@ -24,7 +24,7 @@ README — linked from the [backend README](../README.md#crate-readmes).
 ```
 config/dev/     service TOMLs for the local anvil stack   (mounted by default)
 config/prod/    deployment templates, real chains         (STACK_ENV=prod)
-scripts/        deploy-contracts.sh, fetch-circuits.sh, lib.sh
+scripts/        deploy-contracts.sh, fetch-circuits.sh, earn.sh, name.sh, lib.sh
 circuits/       downloaded proving artifacts              (gitignored)
 docker-compose.yml
 justfile
@@ -99,14 +99,17 @@ Under profile `all`, the one-shot `deploy` service runs before the backends:
 
 1. `forge script DeployTest.s.sol` — verifiers, MASP, mock tokens, `NativeAdapter`
 2. `forge script DeployTestSwap.s.sol` — `UniV3Adapter`, `SwapWrapper`, swap mocks,
-   `BundlerFactory` and the relayer's `Bundler` (operator `BUNDLER_OPERATOR`)
+   `GenericCallWrapper`, `BundlerFactory` and the relayer's `Bundler` (operator
+   `BUNDLER_OPERATOR`)
 3. `forge script DeployTestYield.s.sol` — a `MockERC4626` vault and its
    `ERC4626Venue` per asset, registered as new yield ids
 4. `forge script DeployTestGovernance.s.sol` — LNT, `TimelockController`,
    `LelantosGovernor`, `FeeBurner` on dev timings; the whole LNT
    supply goes to `FUND_RECIPIENT`. Ownership handover is not run.
-5. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
-6. Writes `/addresses/addresses.env` to the shared `addresses` volume
+5. `forge script DeployTestNames.s.sol` — `LelantosNameRegistrar`, charging its
+   fee in `TOKEN_1` (WETH), and a `LelantosNameResolver` for `lelantos.xyz`
+6. Funds `FUND_RECIPIENT` with native coin, WETH, and two mock ERC20s
+7. Writes `/addresses/addresses.env` to the shared `addresses` volume
 
 Every backend's entrypoint sources that file before exec'ing its binary, which
 is how the freshly deployed addresses reach the per-chain overlay.
@@ -128,6 +131,21 @@ Registration is permanent — `addYieldAsset` cannot re-point an id — so this
 phase runs once per MASP, which is why `just redeploy` re-runs the whole chain
 of scripts against a fresh one.
 
+The names step reaches three services through `addresses.env`:
+
+| Variable | Value |
+|---|---|
+| `REGISTRY_CHAIN_<id>_NAME_REGISTRAR_ADDRESS` | The registrar, published by `/v1/chains` as `nameRegistrarAddress` |
+| `REGISTRY_CHAIN_<id>_NAME_PARENTS` | `lelantos.xyz`, published as `nameParents` |
+| `RPC_PROXY_CHAIN_<id>_NAME_REGISTRAR_ADDRESS` | The registrar, which makes its views callable through the read proxy |
+| `RELAYER_CHAIN_31337_GENERIC_ALLOWED_CALLS` | The calls `/v1/generic` relays: `approve` on `TOKEN_1`, and `register` and `setValue` on the registrar |
+
+The first three are written for 31337 and 31338; the relayer's is for 31337
+only, the one chain with a `GenericCallWrapper` configured. The raw
+`NAME_REGISTRAR` and `NAME_RESOLVER` addresses are in the file too.
+`just name <label>` prints a handle's record (value, controller, nonce) from
+the registrar.
+
 ## Circuits
 
 The relayer needs `tree_update_batch` artifacts, fetched from the
@@ -142,6 +160,7 @@ by hand and `just refetch-circuits` forces a re-download. The tag is pinned by
 just env                 # resolved PROFILE / STACK_ENV / active config dir
 just check               # validate compose (both envs), scripts, and every TOML
 just addresses           # dump addresses.env written by the deploy one-shot
+just name <label>        # a handle's record from the name registrar
 just deploy-logs         # contract addresses, funding, and errors from `deploy`
 just show-config <svc>   # the TOML a running service actually mounted
 just db-shell            # psql into Postgres

@@ -38,6 +38,8 @@ pub enum TargetClass {
     Governor,
     /// The governance token: an ERC-20 with `ERC20Votes`.
     GovToken,
+    /// `LelantosNameRegistrar`, read to look up and price a handle.
+    NameRegistrar,
 }
 
 impl TargetClass {
@@ -49,6 +51,7 @@ impl TargetClass {
             TargetClass::Venue => "venue",
             TargetClass::Governor => "governor",
             TargetClass::GovToken => "gov_token",
+            TargetClass::NameRegistrar => "name_registrar",
         }
     }
 
@@ -137,6 +140,17 @@ impl TargetClass {
                 "clock()",
                 "CLOCK_MODE()",
                 "nonces(address)",
+            ],
+            // `LelantosNameRegistrar` views: a handle's record and availability,
+            // and the fee `register` charges. `register` and `setValue` change
+            // state and reach the chain through the relayer.
+            TargetClass::NameRegistrar => &[
+                "recordOf(string)",
+                "available(string)",
+                "isValidLabel(string)",
+                "feeToken()",
+                "feeAmount()",
+                "treasury()",
             ],
         }
     }
@@ -228,6 +242,7 @@ impl Targets {
             TargetClass::Venue,
             TargetClass::Governor,
             TargetClass::GovToken,
+            TargetClass::NameRegistrar,
         ]
         .into_iter()
         .map(|c| (c, c.signatures().iter().map(|s| selector(s)).collect()))
@@ -259,6 +274,17 @@ impl Targets {
             if *class == TargetClass::Erc20 {
                 *class = TargetClass::GovToken;
             }
+        }
+        self
+    }
+
+    /// Add the name registrar, optional per chain. First class wins, as for the
+    /// governor.
+    pub fn with_name_registrar(mut self, registrar: Option<Address>) -> Self {
+        if let Some(r) = registrar {
+            self.by_address
+                .entry(r)
+                .or_insert(TargetClass::NameRegistrar);
         }
         self
     }
@@ -568,6 +594,102 @@ mod tests {
             Ok(TargetClass::Masp),
             "a governor configured at the pool's address does not replace it"
         );
+    }
+
+    const REGISTRAR: Address = address!("7777777777777777777777777777777777777777");
+
+    const REGISTRAR_VIEWS: [&str; 6] = [
+        "recordOf(string)",
+        "available(string)",
+        "isValidLabel(string)",
+        "feeToken()",
+        "feeAmount()",
+        "treasury()",
+    ];
+
+    #[test]
+    fn name_registrar_views_are_accepted_on_the_registrar() {
+        let t = targets().with_name_registrar(Some(REGISTRAR));
+        for sig in REGISTRAR_VIEWS {
+            assert_eq!(
+                t.check(Some(REGISTRAR), call(sig)),
+                Ok(TargetClass::NameRegistrar),
+                "{sig}"
+            );
+        }
+    }
+
+    /// The state-changing functions, pinned to their published selectors, and a
+    /// view outside the list.
+    #[test]
+    fn name_registrar_writes_are_refused() {
+        assert_eq!(
+            hex::encode(selector("register(string,string,address)")),
+            "5664d69c"
+        );
+        assert_eq!(
+            hex::encode(selector("setValue(string,string,uint256,bytes)")),
+            "6372c204"
+        );
+
+        let t = targets().with_name_registrar(Some(REGISTRAR));
+        for sig in [
+            "register(string,string,address)",
+            "setValue(string,string,uint256,bytes)",
+            "setFee(address,uint96,address)",
+            "owner()",
+        ] {
+            let err = t.check(Some(REGISTRAR), call(sig)).unwrap_err();
+            assert_eq!(err.class_label(), "name_registrar", "{sig}");
+        }
+    }
+
+    /// Without a registrar configured, its address is unknown like any other.
+    #[test]
+    fn an_absent_name_registrar_adds_nothing() {
+        let t = targets().with_name_registrar(None);
+        assert_eq!(t.len(), 4);
+        for sig in REGISTRAR_VIEWS {
+            assert_eq!(
+                t.check(Some(REGISTRAR), call(sig)),
+                Err(Rejection::UnknownAddress(REGISTRAR)),
+                "{sig}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_registrar_selector_on_another_target_is_refused() {
+        let t = targets()
+            .with_governance(Some(GOVERNOR), Some(GOV_TOKEN))
+            .with_name_registrar(Some(REGISTRAR));
+        for to in [MASP, PERMIT2, TOKEN, VENUE, GOVERNOR, GOV_TOKEN] {
+            for sig in ["recordOf(string)", "available(string)", "feeToken()"] {
+                assert!(
+                    matches!(
+                        t.check(Some(to), call(sig)),
+                        Err(Rejection::SelectorNotAllowed { .. })
+                    ),
+                    "{sig} on {to}"
+                );
+            }
+        }
+        assert_eq!(
+            t.check(Some(MASP), call("cancelDelay()")),
+            Ok(TargetClass::Masp)
+        );
+    }
+
+    /// A registrar configured at the pool's address does not replace it.
+    #[test]
+    fn a_name_registrar_at_a_listed_address_keeps_the_first_class() {
+        let t = targets().with_name_registrar(Some(MASP));
+        assert_eq!(t.len(), 4);
+        assert_eq!(
+            t.check(Some(MASP), call("cancelDelay()")),
+            Ok(TargetClass::Masp)
+        );
+        assert!(t.check(Some(MASP), call("recordOf(string)")).is_err());
     }
 
     /// A generator that emitted one address in two lists must not widen that

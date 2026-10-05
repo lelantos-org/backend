@@ -71,3 +71,6 @@ venue_seed = []
 # Zero means absent.
 governor_address = "0x0000000000000000000000000000000000000000"
 gov_token_address = "0x0000000000000000000000000000000000000000"
+# `LelantosNameRegistrar`, whose views a handle lookup reads, as
+# RPC_PROXY_CHAIN_42161_NAME_REGISTRAR_ADDRESS. Unset, it is not callable.
+# name_registrar_address = "0x..."

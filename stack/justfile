@@ -147,6 +147,17 @@ addresses:
 earn ID AMT:
     {{DC}} run --rm --no-deps --entrypoint /scripts/earn.sh deploy {{ID}} {{AMT}}
 
+# ── names ───────────────────────────────────────────────────────────────
+
+# LABEL is the handle without its parent name. Prints value, controller and
+# nonce; the controller is zero when the label is not registered.
+#
+#   just name alice
+
+# Print a handle's record from the name registrar.
+name LABEL:
+    {{DC}} run --rm --no-deps --entrypoint /scripts/name.sh deploy {{LABEL}}
+
 # psql shell into the running postgres.
 db-shell:
     {{DC}} exec postgres psql -U postgres -d postgres
@@ -175,6 +186,7 @@ check:
     bash -n ./scripts/fetch-circuits.sh
     sh -n ./scripts/deploy-contracts.sh
     sh -n ./scripts/earn.sh
+    sh -n ./scripts/name.sh
     @echo "== config TOMLs"
     @for f in ./config/*/*.toml; do \
         python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$f" \

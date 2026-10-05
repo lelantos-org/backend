@@ -1,6 +1,6 @@
-//! `/v1/spend` and `/v1/swap`, and the body they share.
+//! `/v1/spend`, `/v1/swap` and `/v1/generic`, and the body they share.
 //!
-//! Both endpoints spend shielded notes and differ only in which pipeline executes
+//! The endpoints spend shielded notes and differ only in which pipeline executes
 //! the payload. Admission control, the replay window and the fingerprint pinning
 //! a key to its payload are identical, and the order of those steps matters, so
 //! they live here once rather than being restated per endpoint.
@@ -8,7 +8,8 @@
 use crate::adapters::parse::{FieldRef, parse_field};
 use crate::app::AppState;
 use crate::domain::dto::{
-    PubInputsDto, SubmitSpendPayload, SubmitSwapPayload, TRANSACT_IN, TRANSACT_OUT,
+    PubInputsDto, SubmitGenericPayload, SubmitSpendPayload, SubmitSwapPayload, TRANSACT_IN,
+    TRANSACT_OUT,
 };
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::responses::RelayerSubmitResponse;
@@ -47,9 +48,22 @@ pub async fn submit_swap(
     .await
 }
 
+#[instrument(skip_all, fields(chain_id = payload.chain_id))]
+pub async fn submit_generic(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SubmitGenericPayload>,
+) -> AppResult<Json<RelayerSubmitResponse>> {
+    let pipeline = st.generic_pipeline(payload.chain_id)?;
+    submit(st, headers, payload, |p, guard| async move {
+        pipeline.process(p, guard).await
+    })
+    .await
+}
+
 /// A request that spends shielded notes.
 ///
-/// Implemented by both submission payloads so [`submit`] can drive either
+/// Implemented by every submission payload so [`submit`] can drive any of them
 /// without knowing which it holds.
 trait Submission {
     fn chain_id(&self) -> i64;
@@ -67,6 +81,16 @@ impl Submission for SubmitSpendPayload {
 }
 
 impl Submission for SubmitSwapPayload {
+    fn chain_id(&self) -> i64 {
+        self.chain_id
+    }
+
+    fn pub_inputs(&self) -> &PubInputsDto {
+        &self.pub_inputs
+    }
+}
+
+impl Submission for SubmitGenericPayload {
     fn chain_id(&self) -> i64 {
         self.chain_id
     }

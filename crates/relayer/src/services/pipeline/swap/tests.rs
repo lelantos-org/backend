@@ -1,79 +1,21 @@
 //! Swap payload validation and the intent hash, against hand-built payloads.
 
-use super::validate::{
-    SWAP_DEADLINE_MARGIN_SECS, build_swap_args, swap_intent_hash, validate_refund_to,
-    validate_swap_shape,
-};
+use super::validate::{build_swap_args, swap_intent_hash, validate_swap_shape};
 use super::*;
-use crate::domain::dto::{
-    DepositRequestDto, OutputAuxDto, PointDto, ProofDto, PubInputsDto, SwapBlob,
+use crate::domain::dto::{DepositRequestDto, SwapBlob};
+use crate::domain::error::AppError;
+use crate::services::pipeline::fixtures::{
+    CHAIN_ID, binding, fake_deposit, fake_proof, fake_pub_inputs, one_aux, wrapper,
 };
+use crate::services::pipeline::wrapper::DEADLINE_MARGIN_SECS;
 use alloy::primitives::{FixedBytes, U256};
 use std::array;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn fake_proof() -> ProofDto {
-    ProofDto {
-        pi_a: ["0".into(), "0".into(), "1".into()],
-        pi_b: [
-            ["0".into(), "0".into()],
-            ["0".into(), "0".into()],
-            ["1".into(), "0".into()],
-        ],
-        pi_c: ["0".into(), "0".into(), "1".into()],
-    }
-}
-
-fn one_aux() -> OutputAuxDto {
-    let p = PointDto {
-        x: "0".into(),
-        y: "0".into(),
-    };
-    OutputAuxDto {
-        clue_r: p.clone(),
-        clue_q: p.clone(),
-        eph_pub: p,
-        ciphertext: "0x".into(),
-    }
-}
-
-fn fake_pub_inputs(recipient: &str, public_out: u64) -> PubInputsDto {
-    PubInputsDto {
-        merkle_root: format!("0x{:0>64}", "0"),
-        nullifier: array::from_fn(|i| format!("0x{:0>64}", i + 1)),
-        out_cm: array::from_fn(|i| format!("0x{:0>64}", i + 10)),
-        public_asset_id: 1,
-        public_out,
-        digest: "0".into(),
-        recipient: recipient.to_string(),
-        chain_id: 31337,
-        payer: "0x0000000000000000000000000000000000000000".into(),
-        relayer: "0x0000000000000000000000000000000000000000".into(),
-        // Set by `fake_payload` once the swap terms exist.
-        intent_hash: "0".into(),
-    }
-}
-
-fn fake_deposit(payer: &str, public_in: u64) -> DepositRequestDto {
-    DepositRequestDto {
-        chain_id: 31337,
-        public_asset_id: 2,
-        public_in,
-        payer: payer.to_string(),
-        recipient: "0x000000000000000000000000000000000000beef".into(),
-        inner: format!("0x{:0>64}", "5"),
-        // The swap pays the relayer on its withdraw leg, so the B-note
-        // deposit's fee leaf is a zero-value pad, which names no fee asset.
-        fee_asset_id: 0,
-        fee_in: 0,
-        fee_inner: format!("0x{:0>64}", "6"),
-    }
-}
-
 /// A swap whose proof commits to its own terms, as an honest wallet builds it.
 fn fake_payload(wrapper: &str) -> SubmitSwapPayload {
     let mut p = SubmitSwapPayload {
-        chain_id: 31337,
+        chain_id: CHAIN_ID,
         proof: fake_proof(),
         pub_inputs: fake_pub_inputs(wrapper, 1_000),
         aux: array::from_fn(|_| one_aux()),
@@ -106,31 +48,17 @@ fn fake_payload(wrapper: &str) -> SubmitSwapPayload {
     p
 }
 
-fn wrapper() -> Address {
-    Address::from([0x77u8; 20])
-}
-
-const CHAIN_ID: i64 = 31337;
-
 /// Payload as a well-behaved wallet would send it, plus a mutation.
 ///
 /// Leg 1 is bound to the wrapper throughout: the wrapper calls `MASP.withdraw`,
 /// so it is the pool's `msg.sender` and the address `pi.relayer` must name.
 /// Binding these to the relayer's own signer would 400 every real swap.
 fn checked(mutate: impl FnOnce(&mut SubmitSwapPayload)) -> AppResult<()> {
-    let w = wrapper();
-    let mut p = fake_payload(&w.to_string());
-    p.pub_inputs.relayer = w.to_string();
+    let w = wrapper().to_string();
+    let mut p = fake_payload(&w);
+    p.pub_inputs.relayer = w;
     mutate(&mut p);
-    validate_swap_shape(
-        &p,
-        w,
-        TransactBinding {
-            chain_id: CHAIN_ID,
-            relayer: w,
-        },
-    )
-    .map(|_| ())
+    validate_swap_shape(&p, &binding()).map(|_| ())
 }
 
 #[test]
@@ -179,19 +107,6 @@ fn validate_rejects_payer_mismatch() {
         checked(|p| p.swap.deposit_d.payer = "0x000000000000000000000000000000000000dead".into())
             .unwrap_err();
     assert!(matches!(err, AppError::BadRequest(_)));
-}
-
-fn bundler() -> Address {
-    Address::from([0x88u8; 20])
-}
-
-#[test]
-fn validate_refund_to_refuses_zero_bundler_or_wrapper() {
-    validate_refund_to(Address::repeat_byte(0x33), wrapper(), bundler()).unwrap();
-    for bad in [Address::ZERO, bundler(), wrapper()] {
-        let err = validate_refund_to(bad, wrapper(), bundler()).unwrap_err();
-        assert!(matches!(err, AppError::BadRequest(_)), "{bad}");
-    }
 }
 
 /// `SwapWrapperBindingTest.INTENT_VECTOR`: pinned in `contracts/test` against
@@ -296,7 +211,7 @@ fn validate_rejects_a_deadline_inside_the_margin() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
-        + SWAP_DEADLINE_MARGIN_SECS / 2;
+        + DEADLINE_MARGIN_SECS / 2;
     let err = checked(|p| {
         p.swap.deadline = soon.to_string();
         p.pub_inputs.intent_hash = swap_intent_hash(&build_swap_args(p).unwrap()).to_string();

@@ -130,9 +130,9 @@ pub fn build_aux(
         .map_err(|_| AppError::Internal("aux arity".into()))
 }
 
-/// Map a wire deposit request into the on-chain struct. Used by the swap
-/// pipeline; the plain deposit path is wallet-driven and reaches the relayer only
-/// through the flush flow.
+/// Map a wire deposit request into the on-chain struct. Used by the swap and
+/// generic pipelines; the plain deposit path is wallet-driven and reaches the
+/// relayer only through the flush flow.
 pub fn build_deposit_request(d: &DepositRequestDto) -> AppResult<IMasp::DepositRequest> {
     Ok(IMasp::DepositRequest {
         chainId: U256::from(d.chain_id),

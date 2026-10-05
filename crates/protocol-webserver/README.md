@@ -10,7 +10,7 @@ Port **3005**. Read-only over HTTP; the one thing it writes is the rate estimate
 
 | Fact | Whose? |
 |---|---|
-| chain name, browser RPC, explorer URL, Permit2, NativeAdapter, SwapWrapper | the **deployment** — identical for every relayer on that chain |
+| chain name, browser RPC, explorer URL, Permit2, NativeAdapter, SwapWrapper, GenericCallWrapper, name registrar and parent names | the **deployment** — identical for every relayer on that chain |
 | signer address, mirror root, fee policy | that **one relayer** |
 
 A person self-hosting a relayer to broadcast their own transactions has no business being the authority on Arbitrum's explorer URL, yet the old config made them declare one. Splitting the two means a relayer is configured only with what it operates, and this service — stateless, cacheable, freely replicated — carries the rest.
@@ -80,6 +80,16 @@ Three process-wide values also take an environment override, applied before the 
 | `METRICS_ADDR` | `metrics_addr` | `127.0.0.1:3016` |
 
 `apy_rpc_url` is separate from `rpc_url` on purpose: the first is what this service reads the chain with and needs archive state, the second is published to browsers. Absent, `rpc_url` stands in — it measures where a public endpoint happens to serve state a window back, and measures nothing where it does not. With neither set the chain is not measured at all.
+
+Handles are described by two per-chain keys, both optional:
+
+| Key | Env | `/v1/chains` field |
+|---|---|---|
+| `name_registrar_address` | `REGISTRY_CHAIN_<id>_NAME_REGISTRAR_ADDRESS` | `nameRegistrarAddress`: `LelantosNameRegistrar`, checksummed. Omitted when unset or zero |
+| `name_parents` | `REGISTRY_CHAIN_<id>_NAME_PARENTS`, comma-separated, replacing the TOML list | `nameParents`: the ENS parent names handles resolve under, in configured order; the first is the one a client displays. Omitted when empty |
+
+Each parent must be non-empty, lowercase, dotted and free of whitespace;
+anything else refuses to start.
 
 ## What it does not do
 

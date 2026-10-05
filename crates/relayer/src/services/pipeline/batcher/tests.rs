@@ -89,12 +89,12 @@ fn tag(n: u8) -> Option<Field> {
 }
 
 #[test]
-fn a_bundle_takes_the_oldest_jobs_and_puts_swaps_last() {
+fn a_bundle_takes_the_oldest_jobs_and_puts_swaps_and_generic_calls_last() {
     let mut pending: VecDeque<Job> = [
         (EntryPoint::Swap, tag(0)),
         (EntryPoint::Transfer, tag(1)),
-        (EntryPoint::Flush, tag(2)),
-        (EntryPoint::Swap, tag(3)),
+        (EntryPoint::Generic, tag(2)),
+        (EntryPoint::Flush, tag(3)),
         (EntryPoint::Withdraw, tag(4)),
     ]
     .into_iter()
@@ -106,8 +106,8 @@ fn a_bundle_takes_the_oldest_jobs_and_puts_swaps_last() {
     let order: Vec<Option<Field>> = bundle.iter().map(|j| j.item.merkle_root()).collect();
     assert_eq!(
         order,
-        vec![tag(1), tag(2), tag(0), tag(3)],
-        "queue order kept, swaps moved behind the rest"
+        vec![tag(1), tag(3), tag(0), tag(2)],
+        "queue order kept, swaps and generic calls moved behind the rest"
     );
     assert_eq!(pending.len(), 1, "the fifth job waits for the next bundle");
     assert_eq!(pending[0].item.merkle_root(), tag(4));

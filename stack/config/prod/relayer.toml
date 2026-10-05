@@ -36,6 +36,14 @@ flush_interval_s = 3
 # that at boot; a larger number here just asserts a throughput it will not get.
 flush_max_n = 4
 swap_wrapper_address = "0xE2d0494F7c5B287b2B83A347977cE4F235Fee962"
+# Enables `/v1/generic`. `generic_allowed_calls` lists the `{ target, selector }`
+# pairs an intent may call; empty relays only intents with no calls. Also
+# RELAYER_CHAIN_42161_{GENERIC_CALL_WRAPPER_ADDRESS,GENERIC_ALLOWED_CALLS}, the
+# latter a JSON array of the same records.
+# generic_call_wrapper_address = "0x..."
+# generic_allowed_calls = [
+#     { target = "0x...", selector = "0xa9059cbb" },
+# ]
 
 [prover]
 # Mounted from backend/stack/circuits/ (populated by `just fetch-circuits`).

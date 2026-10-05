@@ -3,11 +3,12 @@ use alloy::sol;
 
 sol! {
     #![sol(rpc)]
-    /// MASP, SwapWrapper and NativeAdapter ABIs. The field layout must match
-    /// `contracts/src/MASP.sol`, `contracts/src/libs/PubInputs.sol`,
-    /// `contracts/src/swap/*.sol` and
+    /// MASP, SwapWrapper, GenericCallWrapper and NativeAdapter ABIs. The field
+    /// layout must match `contracts/src/MASP.sol`,
+    /// `contracts/src/libs/PubInputs.sol`, `contracts/src/swap/*.sol`,
+    /// `contracts/src/generic/*.sol` and
     /// `contracts/src/native/NativeAdapter.sol`. Declared in one `sol!`
-    /// invocation so the wrapper and the adapter can reference
+    /// invocation so the wrappers and the adapter can reference
     /// `IMasp.{Proof, Transact, SpendTree, OutputAux, DepositRequest}`
     /// without duplicating types.
     interface IMasp {
@@ -239,9 +240,56 @@ sol! {
         function swap(SwapArgs calldata a) external returns (uint256 actualOut, uint256 depositId);
     }
 
+    /// GenericCallWrapper ABI. The field layout must match
+    /// `contracts/src/generic/GenericCallWrapper.sol :: GenericArgs` and
+    /// `contracts/src/generic/CallExecutor.sol :: Call`.
+    interface IGenericCallWrapper {
+        /// `CallExecutor.Call`. `value` is paid from the executing clone's own
+        /// native balance.
+        struct Call {
+            address target;
+            uint256 value;
+            bytes data;
+        }
+        /// One shielded output: a note of the registry token of
+        /// `deposit.publicAssetId`, escrowed for at least `minOut`.
+        struct Output {
+            uint256 minOut;
+            IMasp.DepositRequest deposit;
+            IMasp.OutputAux aux;
+            IMasp.OutputAux feeAux;
+        }
+        struct GenericArgs {
+            /// Floor on what the withdraw delivers. Not part of the intent.
+            uint256 amountIn;
+            Call[] calls;
+            Output[] outputs;
+            uint256 deadline;
+            /// Gas the call leg must be forwarded; `execute` reverts
+            /// `InsufficientGas` below it.
+            uint256 minGas;
+            /// Where a cancelled escrow is refunded.
+            address refundTo;
+            /// Receives slippage cushions, unused input and native leftovers.
+            address surplusTo;
+            IMasp.Proof p_w;
+            IMasp.Transact pi_w;
+            IMasp.Proof tp_w;
+            IMasp.SpendTree tpi_w;
+            IMasp.OutputAux[6] aux_w;
+            /// The note the input is escrowed back into when the call leg
+            /// fails, with its two leaves' payloads.
+            IMasp.DepositRequest refund_d;
+            IMasp.OutputAux refund_aux_d;
+            IMasp.OutputAux refund_fee_aux_d;
+        }
+
+        function execute(GenericArgs calldata a) external returns (uint256[] memory depositIds);
+    }
+
     /// This relayer's submission contract, `contracts/src/bundler/Bundler.sol`.
     /// Every tree-advancing call goes through it, so it is the pool's and the
-    /// swap wrapper's `msg.sender`, and the address wallets bind as their
+    /// wrappers' `msg.sender`, and the address wallets bind as their
     /// submitter. `execute` makes the calls in order and stops at the first
     /// failure, keeping the calls before it; it reverts only on a malformed bundle
     /// or an unauthorised caller.
@@ -274,7 +322,7 @@ sol! {
 
 #[cfg(test)]
 mod tests {
-    use super::{IBundler, IMasp, INativeAdapter, ISwapWrapper};
+    use super::{IBundler, IGenericCallWrapper, IMasp, INativeAdapter, ISwapWrapper};
     use alloy::sol_types::SolCall;
 
     /// Selectors of every call the relayer sends, as the contracts compile them
@@ -319,6 +367,11 @@ mod tests {
                 "SwapWrapper.swap",
                 ISwapWrapper::swapCall::SELECTOR,
                 "2037231e",
+            ),
+            (
+                "GenericCallWrapper.execute",
+                IGenericCallWrapper::executeCall::SELECTOR,
+                "2431355d",
             ),
             (
                 "Bundler.execute",

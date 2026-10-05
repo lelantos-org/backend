@@ -32,11 +32,20 @@ permit2_address = "0x0000000000000000000000000000000000000000"
 # route entirely, rather than offering one that has no entry point on chain.
 native_adapter_address = "0x0000000000000000000000000000000000000000"
 swap_wrapper_address = "0x0000000000000000000000000000000000000000"
+# `GenericCallWrapper`, as REGISTRY_CHAIN_42161_GENERIC_CALL_WRAPPER_ADDRESS. Zero
+# is published as absent.
+generic_call_wrapper_address = "0x0000000000000000000000000000000000000000"
 # Governance, as REGISTRY_CHAIN_42161_{GOVERNOR,GOV_TOKEN,TIMELOCK}_ADDRESS. Zero
 # is published as absent, which hides governance on the chain.
 governor_address = "0x0000000000000000000000000000000000000000"
 gov_token_address = "0x0000000000000000000000000000000000000000"
 timelock_address = "0x0000000000000000000000000000000000000000"
+# `LelantosNameRegistrar` and the ENS parent names its handles resolve under, as
+# REGISTRY_CHAIN_42161_NAME_REGISTRAR_ADDRESS and
+# REGISTRY_CHAIN_42161_NAME_PARENTS (comma-separated). Parents are lowercase;
+# the first is the one a client displays. Unset, neither is published.
+# name_registrar_address = "0x..."
+# name_parents = ["lelantos.xyz", "lelantosid.eth"]
 tree_depth = 11
 # Archive-capable endpoint for the rate measurement. Absent disables measurement
 # for this chain rather than failing the boot.

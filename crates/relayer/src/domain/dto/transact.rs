@@ -76,10 +76,12 @@ pub struct PubInputsDto {
     pub chain_id: u64,
     pub payer: String,
     pub relayer: String,
-    /// `SwapWrapper._intentHash`, proof-bound through the challenge.
+    /// `SwapWrapper._intentHash` or `GenericCallWrapper.intentHash`,
+    /// proof-bound through the challenge.
     /// Decimal (or 0x-hex) uint256 string like the other field words. Required
-    /// like its neighbours: a swap must carry the hash of its own output terms
-    /// (see `pipeline::swap`), and spends send `"0"`, which the pool ignores.
+    /// like its neighbours: a swap or generic call must carry the hash of its
+    /// own terms (see `pipeline::swap` and `pipeline::generic`), and spends send
+    /// `"0"`, which the pool ignores.
     pub intent_hash: String,
 }
 

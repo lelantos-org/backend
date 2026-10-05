@@ -64,6 +64,24 @@ quiet, which is why there are three mitigations rather than one:
 registry's `/v1/assets`, not hand-written. `venue_seed` especially: `ERC4626Venue`
 addresses are `CREATE`-derived at deploy and appear in no config file.
 
+### The name registrar
+
+`name_registrar_address` (env `RPC_PROXY_CHAIN_<id>_NAME_REGISTRAR_ADDRESS`)
+adds `LelantosNameRegistrar` as a target of its own class, `name_registrar`.
+Zero or absent leaves it uncallable. It serves six views and nothing else:
+
+| Function | Selector |
+|---|---|
+| `recordOf(string)` | `0x8ee9065d` |
+| `available(string)` | `0xaeb8ce9b` |
+| `isValidLabel(string)` | `0x25719540` |
+| `feeToken()` | `0x647846a5` |
+| `feeAmount()` | `0x69e15404` |
+| `treasury()` | `0x61d027b3` |
+
+`register` and `setValue` are refused, as is any of the six on another
+contract. `eth_getLogs` still names only the pool.
+
 ## Archive state is not required
 
 Historical reads — an `eth_call` at an explicit block — are permitted but are no

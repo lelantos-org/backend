@@ -104,7 +104,8 @@ fn wire(
         c.erc20_seed.iter().copied(),
         c.venue_seed.iter().copied(),
     )
-    .with_governance(c.governor(), c.gov_token());
+    .with_governance(c.governor(), c.gov_token())
+    .with_name_registrar(c.name_registrar());
 
     // Per chain, unlike the client buckets: this one bounds spend against this
     // chain's own metered upstream.

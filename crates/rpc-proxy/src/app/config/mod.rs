@@ -149,6 +149,10 @@ pub struct ChainCfg {
     /// The governance token. Zero counts as absent.
     #[serde(default)]
     pub gov_token_address: Option<Address>,
+    /// `LelantosNameRegistrar`, whose views a handle lookup reads. Zero counts
+    /// as absent.
+    #[serde(default)]
+    pub name_registrar_address: Option<Address>,
 }
 
 impl ChainCfg {
@@ -165,6 +169,11 @@ impl ChainCfg {
     /// The governance token, if one is configured and not the zero placeholder.
     pub fn gov_token(&self) -> Option<Address> {
         self.gov_token_address.filter(|a| !a.is_zero())
+    }
+
+    /// The name registrar, if one is configured and not the zero placeholder.
+    pub fn name_registrar(&self) -> Option<Address> {
+        self.name_registrar_address.filter(|a| !a.is_zero())
     }
 }
 
@@ -259,6 +268,11 @@ impl RpcProxyConfig {
             }
             if let Some(v) = config_env::lookup_parse::<Address>(PREFIX, id, "GOV_TOKEN_ADDRESS")? {
                 c.gov_token_address = Some(v);
+            }
+            if let Some(v) =
+                config_env::lookup_parse::<Address>(PREFIX, id, "NAME_REGISTRAR_ADDRESS")?
+            {
+                c.name_registrar_address = Some(v);
             }
         }
         Ok(())

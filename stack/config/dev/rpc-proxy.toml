@@ -70,6 +70,9 @@ venue_seed = []
 # absent: neither contract is callable until the deploy step runs.
 governor_address = "0x0000000000000000000000000000000000000000"
 gov_token_address = "0x0000000000000000000000000000000000000000"
+# Injected as RPC_PROXY_CHAIN_31337_NAME_REGISTRAR_ADDRESS. Zero means absent:
+# the registrar is not callable until the deploy step runs.
+name_registrar_address = "0x0000000000000000000000000000000000000000"
 
 [[chains]]
 chain_id = 31338
@@ -88,3 +91,4 @@ erc20_seed = []
 venue_seed = []
 governor_address = "0x0000000000000000000000000000000000000000"
 gov_token_address = "0x0000000000000000000000000000000000000000"
+name_registrar_address = "0x0000000000000000000000000000000000000000"

@@ -2,13 +2,10 @@
 
 mod validate;
 
-pub use validate::refund_address_error;
-
 use crate::adapters::abi::{IBundler, IMasp, ISwapWrapper};
-use crate::adapters::parse::parse_address;
 use crate::domain::batch::PaddedBatch;
 use crate::domain::dto::SubmitSwapPayload;
-use crate::domain::error::{AppError, AppResult};
+use crate::domain::error::AppResult;
 use crate::domain::responses::EstimateResponse;
 use crate::services::admission::nullifier_guard::PendingGuard;
 use crate::services::fees::gas_witness::{EntryPoint, GasWitness};
@@ -16,9 +13,9 @@ use crate::services::fees::quote::FeeQuoter;
 use crate::services::fees::shielded::ShieldedFeeChecker;
 use crate::services::pipeline::batcher::{Batcher, BundleItem, QueuedItem};
 use crate::services::pipeline::transact::{
-    FeeContext, TransactBinding, merkle_root_of, parse_spend_batch, spend_tree_for,
-    verify_transact_proof,
+    FeeContext, merkle_root_of, parse_spend_batch, spend_tree_for, verify_transact_proof,
 };
+use crate::services::pipeline::wrapper::WrapperBinding;
 use crate::services::submitter::SubmissionReceipt;
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::{AdvancedState, ReservedSlot};
@@ -28,7 +25,7 @@ use alloy::sol_types::SolCall;
 use crypto::tree::Field;
 use std::sync::Arc;
 use tracing::{info, instrument};
-use validate::{validate_refund_to, validate_swap_shape};
+use validate::validate_swap_shape;
 
 /// Per-chain swap pipeline, mirroring `SpendPipeline` except that:
 ///
@@ -137,24 +134,14 @@ impl SwapPipeline {
     /// Returns the parsed `SwapArgs`, minus the tree proof only the batcher can
     /// fill, so the calldata encoder does not parse the payload a second time.
     fn validate(&self, payload: &SubmitSwapPayload) -> AppResult<ISwapWrapper::SwapArgs> {
-        // The wrapper calls `MASP.withdraw` for leg 1, so the wrapper rather than
-        // this relayer's Bundler is the pool's `msg.sender`, and the pool checks
-        // `pi.relayer == msg.sender`. Binding to the Bundler here would reject every
-        // correctly built swap with a 400.
-        let binding = TransactBinding {
+        let binding = WrapperBinding {
             chain_id: self.chain_id,
-            relayer: self.wrapper_address,
+            wrapper: self.wrapper_address,
+            bundler: self.bundler_address,
         };
-        let args = validate_swap_shape(payload, self.wrapper_address, binding)?;
-        // The Bundler calls the wrapper, which lets only `pi.payer` drive the swap.
-        let payer = parse_address(&payload.pub_inputs.payer)?;
-        if payer != self.bundler_address {
-            return Err(AppError::BadRequest(format!(
-                "pubInputs.payer ({payer}) must equal this relayer's submitter ({})",
-                self.bundler_address
-            )));
-        }
-        validate_refund_to(args.refundTo, self.wrapper_address, self.bundler_address)?;
+        let args = validate_swap_shape(payload, &binding)?;
+        binding.check_payer(&payload.pub_inputs)?;
+        binding.check_receiver(args.refundTo, "swap.refundTo")?;
         Ok(args)
     }
 }

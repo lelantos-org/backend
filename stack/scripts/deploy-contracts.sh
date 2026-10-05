@@ -4,12 +4,15 @@
 #   1. forge script DeployTest.s.sol      → verifiers, MASP, mock tokens,
 #                                           NativeAdapter
 #   2. forge script DeployTestSwap.s.sol  → UniV3Adapter, SwapWrapper, mocks,
+#                                           GenericCallWrapper,
 #                                           BundlerFactory + the relayer's Bundler
 #   3. forge script DeployTestYield.s.sol → MockERC4626 vaults, ERC4626Venues
 #   4. forge script DeployTestGovernance.s.sol → LNT, Timelock, Governor,
 #                                           FeeBurner
-#   5. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
-#   6. write addresses.env, sourced by every backend's entrypoint wrapper
+#   5. forge script DeployTestNames.s.sol → LelantosNameRegistrar,
+#                                           LelantosNameResolver
+#   6. fund FUND_RECIPIENT with native ETH, WETH and two mock ERC20s
+#   7. write addresses.env, sourced by every backend's entrypoint wrapper
 #
 # Required env (set in docker-compose.yml):
 #   RPC_URL DEPLOYER_KEY FUND_RECIPIENT FUND_NATIVE FUND_WETH FUND_ERC20
@@ -161,6 +164,7 @@ deploy_swap() {
 
     BUNDLER=$(addr_req BUNDLER)
     SWAP_WRAPPER=$(addr_req SWAP_WRAPPER)
+    GENERIC_CALL_WRAPPER=$(addr_req GENERIC_CALL_WRAPPER)
     UNIV3_ADAPTER=$(addr_req UNIV3_ADAPTER)
     UNIV3_QUOTER=$(addr_req UNIV3_QUOTER)
     MOCK_SWAP_ROUTER=$(addr_req MOCK_SWAP_ROUTER)
@@ -169,6 +173,7 @@ deploy_swap() {
     MOCK_UNIVERSAL_ROUTER=$(addr_req MOCK_UNIVERSAL_ROUTER)
 
     log "SWAP_WRAPPER=${SWAP_WRAPPER}"
+    log "GENERIC_CALL_WRAPPER=${GENERIC_CALL_WRAPPER}"
     log "BUNDLER=${BUNDLER} (operator ${BUNDLER_OPERATOR})"
     # Swap rates are seeded inside DeployTest._deploySwap (its `setRate`
     # calls). MockSwapRouter02 mints `tokenOut` on demand, so there is no
@@ -225,6 +230,24 @@ deploy_governance() {
     debug "GOV_TOKEN=${GOV_TOKEN} (supply to ${GOV_TOKEN_RECIPIENT}) TIMELOCK=${TIMELOCK}"
 }
 
+# LelantosNameRegistrar charging its fee in TOKEN_1, and a LelantosNameResolver
+# for NAME_PARENT. A dev chain has no ENS registry, so the resolver is
+# installed nowhere; registration and `recordOf` do not involve it.
+deploy_names() {
+    step "deploy names (LelantosNameRegistrar + LelantosNameResolver)"
+    # DeployTestNames' `PARENT`, which the script does not log.
+    NAME_PARENT="lelantos.xyz"
+    export TOKEN_1
+    forge_script "DeployTestNames.s.sol:DeployTestNames"
+    reload_addresses
+
+    NAME_REGISTRAR=$(addr_req NAME_REGISTRAR)
+    NAME_RESOLVER=$(addr_req NAME_RESOLVER)
+
+    log "NAME_REGISTRAR=${NAME_REGISTRAR}"
+    debug "NAME_RESOLVER=${NAME_RESOLVER} (parent ${NAME_PARENT}, fee token ${TOKEN_1})"
+}
+
 fund_recipient() {
     step "fund ${FUND_RECIPIENT}"
 
@@ -263,6 +286,19 @@ fee_tokens_json() {
         "$(_token mWBTC "$TOKEN_3" 8)"
 }
 
+# The relayer's `generic_allowed_calls`, as the JSON its env overlay parses.
+#
+# Claiming a handle is two calls: the fee token's `approve(address,uint256)`,
+# then the registrar's `register(string,string,address)`. The third is its
+# `setValue(string,string,uint256,bytes)`.
+generic_allowed_calls_json() {
+    _call() { printf '{"target":"%s","selector":"%s"}' "$1" "$2"; }
+    printf '[%s,%s,%s]' \
+        "$(_call "$TOKEN_1" 0x095ea7b3)" \
+        "$(_call "$NAME_REGISTRAR" 0x5664d69c)" \
+        "$(_call "$NAME_REGISTRAR" 0x6372c204)"
+}
+
 # Write the env file that every backend's entrypoint sources. Each service
 # overlays these onto its TOML per-chain block (see `apply_env_overlay`) —
 # which only works because config/*/*.toml declare a matching chain id.
@@ -293,6 +329,9 @@ write_env_file() {
         # as the address wallets bind.
         _emit RELAYER BUNDLER_ADDRESS "$BUNDLER"
         _emit RELAYER SWAP_WRAPPER_ADDRESS "$SWAP_WRAPPER"
+        # Enables `/v1/generic`, for the calls that claim and update a handle.
+        _emit RELAYER GENERIC_CALL_WRAPPER_ADDRESS "$GENERIC_CALL_WRAPPER"
+        _emit RELAYER GENERIC_ALLOWED_CALLS "$(generic_allowed_calls_json)"
         # Enables `withdrawNative`; without it the relayer leaves
         # native_adapter_address unset and rejects native withdrawals.
         _emit RELAYER NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
@@ -328,6 +367,7 @@ write_env_file() {
         # is separately configured with the same addresses to operate them.
         _emit REGISTRY NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
         _emit REGISTRY SWAP_WRAPPER_ADDRESS "$SWAP_WRAPPER"
+        _emit REGISTRY GENERIC_CALL_WRAPPER_ADDRESS "$GENERIC_CALL_WRAPPER"
         # `apy_rpc_url` only — deliberately NOT `RPC_URL`. The registry's
         # `rpc_url` is browser-facing and stays `http://localhost:8545` from the
         # TOML; `http://anvil:8545` resolves only inside compose, so injecting it
@@ -338,6 +378,10 @@ write_env_file() {
         _emit REGISTRY GOVERNOR_ADDRESS "$GOVERNOR"
         _emit REGISTRY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
         _emit REGISTRY TIMELOCK_ADDRESS "$TIMELOCK"
+        # Handles: the registrar a wallet reads and claims through, and the
+        # parent name it displays them under.
+        _emit REGISTRY NAME_REGISTRAR_ADDRESS "$NAME_REGISTRAR"
+        _emit REGISTRY NAME_PARENTS "$NAME_PARENT"
 
         # 31338 mirrors the relayer's second chain: same anvil, same pool, so
         # the registry lists two chains and the frontend's switcher is reachable.
@@ -345,10 +389,13 @@ write_env_file() {
         _emit_for 31338 REGISTRY PERMIT2_ADDRESS "$PERMIT2"
         _emit_for 31338 REGISTRY NATIVE_ADAPTER_ADDRESS "$NATIVE_ADAPTER"
         _emit_for 31338 REGISTRY SWAP_WRAPPER_ADDRESS "$SWAP_WRAPPER"
+        _emit_for 31338 REGISTRY GENERIC_CALL_WRAPPER_ADDRESS "$GENERIC_CALL_WRAPPER"
         _emit_for 31338 REGISTRY APY_RPC_URL "$RPC_URL"
         _emit_for 31338 REGISTRY GOVERNOR_ADDRESS "$GOVERNOR"
         _emit_for 31338 REGISTRY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
         _emit_for 31338 REGISTRY TIMELOCK_ADDRESS "$TIMELOCK"
+        _emit_for 31338 REGISTRY NAME_REGISTRAR_ADDRESS "$NAME_REGISTRAR"
+        _emit_for 31338 REGISTRY NAME_PARENTS "$NAME_PARENT"
 
         # The read proxy's contract allowlist. Unlike every other service, this
         # one refuses a call to an address it was not told about — so a token or
@@ -367,6 +414,8 @@ write_env_file() {
         # The governance UI's reads (`state`, `proposalVotes`, `getVotes`, …).
         _emit RPC_PROXY GOVERNOR_ADDRESS "$GOVERNOR"
         _emit RPC_PROXY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
+        # A handle lookup's reads (`recordOf`, `available`, `feeAmount`, …).
+        _emit RPC_PROXY NAME_REGISTRAR_ADDRESS "$NAME_REGISTRAR"
 
         _emit_for 31338 RPC_PROXY MASP_ADDRESS "$MASP"
         _emit_for 31338 RPC_PROXY DEPLOY_BLOCK "$DEPLOY_BLOCK"
@@ -375,6 +424,7 @@ write_env_file() {
         _emit_for 31338 RPC_PROXY VENUE_SEED "${YIELD_VENUE_4},${YIELD_VENUE_5},${YIELD_VENUE_6}"
         _emit_for 31338 RPC_PROXY GOVERNOR_ADDRESS "$GOVERNOR"
         _emit_for 31338 RPC_PROXY GOV_TOKEN_ADDRESS "$GOV_TOKEN"
+        _emit_for 31338 RPC_PROXY NAME_REGISTRAR_ADDRESS "$NAME_REGISTRAR"
 
         # protocol-indexer reads ERC20 `decimals()` and polls `yieldState`.
         # Its TOML declares the chain; this supplies the endpoint.
@@ -401,10 +451,11 @@ write_env_file() {
 
 print_summary() {
     step "summary"
-    printf '  %-18s %s\n' \
+    printf '  %-20s %s\n' \
         MASP           "$MASP" \
         BUNDLER        "$BUNDLER" \
         SWAP_WRAPPER   "$SWAP_WRAPPER" \
+        GENERIC_CALL_WRAPPER "$GENERIC_CALL_WRAPPER" \
         UNIV3_ADAPTER  "$UNIV3_ADAPTER" \
         UNIV3_QUOTER   "$UNIV3_QUOTER" \
         UNIV4_ADAPTER  "$UNIV4_ADAPTER" \
@@ -417,6 +468,8 @@ print_summary() {
         GOV_TOKEN      "$GOV_TOKEN" \
         GOVERNOR       "$GOVERNOR" \
         TIMELOCK       "$TIMELOCK" \
+        NAME_REGISTRAR "$NAME_REGISTRAR" \
+        NAME_RESOLVER  "$NAME_RESOLVER" \
         funded         "$FUND_RECIPIENT" >&2
 }
 
@@ -426,6 +479,7 @@ main() {
     deploy_swap
     deploy_yield
     deploy_governance
+    deploy_names
     fund_recipient
     write_env_file
     print_summary

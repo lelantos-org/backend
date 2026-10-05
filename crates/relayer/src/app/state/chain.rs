@@ -16,7 +16,9 @@ use crate::services::fees::quote::{FeeQuoter, FeeToken};
 use crate::services::fees::shielded::ShieldedFeeChecker;
 use crate::services::pipeline::batcher::{self, Batcher, BatcherCfg, ResyncCtx};
 use crate::services::pipeline::flush::failures::DepositFailures;
-use crate::services::pipeline::{FlushPipeline, SpendPipeline, SwapPipeline, swap};
+use crate::services::pipeline::generic::{GenericPolicy, parse_allowed_calls};
+use crate::services::pipeline::wrapper::{WrapperBinding, receiver_error};
+use crate::services::pipeline::{FlushPipeline, GenericPipeline, SpendPipeline, SwapPipeline};
 use crate::services::submitter::Submitter;
 use crate::services::transact_verifier::TransactVerifier;
 use crate::services::tree::TreeMirror;
@@ -84,6 +86,8 @@ pub(super) struct ChainRuntime {
     pub(super) spend: Arc<SpendPipeline>,
     /// Present only where `swap_wrapper_address` is configured.
     pub(super) swap: Option<Arc<SwapPipeline>>,
+    /// Present only where `generic_call_wrapper_address` is configured.
+    pub(super) generic: Option<Arc<GenericPipeline>>,
     pub(super) flush: Arc<FlushPipeline>,
     pub(super) batcher: Batcher,
 }
@@ -132,16 +136,22 @@ pub(super) async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<Chai
         "native_adapter_address",
         c.native_adapter_address.as_deref(),
     )?;
-    let wrapper_address = parse_optional_address(
+    let swap_wrapper = parse_optional_address(
         c.chain_id,
         "swap_wrapper_address",
         c.swap_wrapper_address.as_deref(),
     )?;
-    // Swap validation refuses the same addresses, so advertising one would 400
-    // every wallet that takes the offer.
-    if let Some(why) = swap::refund_address_error(refund_address, wrapper_address, bundler_address)
-    {
-        return Err(boot_err(c.chain_id, "refund_address", why));
+    let generic_wrapper = parse_optional_address(
+        c.chain_id,
+        "generic_call_wrapper_address",
+        c.generic_call_wrapper_address.as_deref(),
+    )?;
+    // Swap and generic validation refuse the same addresses, so advertising one
+    // would 400 every wallet that takes the offer.
+    for wrapper in [swap_wrapper, generic_wrapper] {
+        if let Some(why) = receiver_error(refund_address, wrapper, bundler_address) {
+            return Err(boot_err(c.chain_id, "refund_address", why));
+        }
     }
     let fee_quoter = Arc::new(build_fee_quoter(c, shared, &rpc).await?);
     let gas_witness = Arc::new(GasWitness::new());
@@ -180,7 +190,7 @@ pub(super) async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<Chai
         assets: shared.assets.clone(),
     });
 
-    let swap = wrapper_address.map(|wrapper_address| {
+    let swap = swap_wrapper.map(|wrapper_address| {
         info!(chain_id = c.chain_id, wrapper = %wrapper_address, "swap pipeline ready");
         // Shares the chain's batcher with the spend and flush pipelines, so a
         // swap lands in the same bundles as their operations.
@@ -196,6 +206,21 @@ pub(super) async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<Chai
             assets: shared.assets.clone(),
         })
     });
+
+    let generic = generic_wrapper
+        .map(|wrapper| generic_policy(c, wrapper, bundler_address))
+        .transpose()?
+        .map(|policy| {
+            Arc::new(GenericPipeline {
+                policy,
+                batcher: batcher.clone(),
+                fee_quoter: fee_quoter.clone(),
+                gas_witness: gas_witness.clone(),
+                transact_verifier: shared.transact_verifier.clone(),
+                shielded_fee: shielded_fee.clone(),
+                assets: shared.assets.clone(),
+            })
+        });
 
     let flush = Arc::new(FlushPipeline {
         chain_id: c.chain_id,
@@ -221,6 +246,7 @@ pub(super) async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<Chai
         bundler = %bundler_address,
         bundle_max_items = c.bundle_max_items,
         swap = swap.is_some(),
+        generic = generic.is_some(),
         native = spend.native_adapter.is_some(),
         shielded_fee = shielded_fee.is_some(),
         "relayer pipelines ready"
@@ -228,8 +254,30 @@ pub(super) async fn build_chain(c: &ChainCfg, shared: &Shared) -> AppResult<Chai
     Ok(ChainRuntime {
         spend,
         swap,
+        generic,
         flush,
         batcher,
+    })
+}
+
+/// What `/v1/generic` checks on this chain: the `generic_*` keys, parsed.
+fn generic_policy(c: &ChainCfg, wrapper: Address, bundler: Address) -> AppResult<GenericPolicy> {
+    let allowed_calls = parse_allowed_calls(&c.generic_allowed_calls)
+        .map_err(|e| boot_err(c.chain_id, "generic_allowed_calls", e))?;
+    info!(
+        chain_id = c.chain_id,
+        %wrapper,
+        allowed_calls = allowed_calls.len(),
+        "generic pipeline ready"
+    );
+    Ok(GenericPolicy {
+        binding: WrapperBinding {
+            chain_id: c.chain_id,
+            wrapper,
+            bundler,
+        },
+        allowed_calls,
+        max_min_gas: c.generic_max_min_gas,
     })
 }
 

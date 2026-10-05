@@ -43,9 +43,17 @@ flush_interval_s = 5
 flush_max_n = 4
 flush_max_attempts = 5
 
-# swap_wrapper_address / native_adapter_address are injected by deploy.sh via
-# RELAYER_CHAIN_31337_{SWAP_WRAPPER,NATIVE_ADAPTER}_ADDRESS; left unset here so
-# the matching endpoints stay disabled until a deploy has actually run.
+# swap_wrapper_address / native_adapter_address / generic_call_wrapper_address
+# are injected by deploy.sh via
+# RELAYER_CHAIN_31337_{SWAP_WRAPPER,NATIVE_ADAPTER,GENERIC_CALL_WRAPPER}_ADDRESS;
+# left unset here so the matching endpoints stay disabled until a deploy has
+# actually run.
+
+# The `{ target, selector }` pairs a `/v1/generic` intent may call. Empty relays
+# only intents with no calls. Overridden by
+# RELAYER_CHAIN_31337_GENERIC_ALLOWED_CALLS, a JSON array of the same records,
+# which deploy-contracts.sh sets to the calls that claim and update a handle.
+generic_allowed_calls = []
 
 # ── shielded fees ───────────────────────────────────────────────────────
 #

@@ -21,6 +21,9 @@ fn chain(chain_id: i64) -> ChainCfg {
         flush_partial_after_s: 0,
         native_adapter_address: None,
         swap_wrapper_address: None,
+        generic_call_wrapper_address: None,
+        generic_allowed_calls: vec![],
+        generic_max_min_gas: default_generic_max_min_gas(),
         native_symbol: default_native_symbol(),
         native_decimals: default_native_decimals(),
         fee_markup_bps: default_fee_markup_bps(),
@@ -238,6 +241,58 @@ fn test_accepted_fee_tokens_without_the_env_var_keeps_the_toml_list() {
     config.apply_env_overlay();
 
     assert_eq!(config.chains[0].accepted_fee_tokens[0].symbol, "KEEP");
+}
+
+/// SAFETY: as above, the chain id is used nowhere else.
+#[test]
+fn test_generic_env_overlay_sets_the_wrapper_and_replaces_the_allowlist() {
+    const CHAIN: i64 = 987_657;
+    let wrapper_key = format!("RELAYER_CHAIN_{CHAIN}_GENERIC_CALL_WRAPPER_ADDRESS");
+    let calls_key = format!("RELAYER_CHAIN_{CHAIN}_GENERIC_ALLOWED_CALLS");
+    unsafe {
+        std::env::set_var(&wrapper_key, "0xabc");
+        std::env::set_var(
+            &calls_key,
+            r#"[{"target":"0xdef","selector":"0xa9059cbb"}]"#,
+        );
+    }
+
+    let mut config = cfg(vec![ChainCfg {
+        generic_allowed_calls: vec![AllowedCallCfg {
+            target: "0xstale".into(),
+            selector: "0x00000000".into(),
+        }],
+        ..chain(CHAIN)
+    }]);
+    config.apply_env_overlay();
+
+    unsafe {
+        std::env::remove_var(&wrapper_key);
+        std::env::remove_var(&calls_key);
+    }
+
+    let c = &config.chains[0];
+    assert_eq!(c.generic_call_wrapper_address.as_deref(), Some("0xabc"));
+    assert_eq!(c.generic_allowed_calls.len(), 1, "replaced, not merged");
+    assert_eq!(c.generic_allowed_calls[0].target, "0xdef");
+    assert_eq!(c.generic_allowed_calls[0].selector, "0xa9059cbb");
+}
+
+/// A chain block that declares none of the generic keys: the route stays off
+/// and the allowlist empty.
+#[test]
+fn test_generic_keys_default_to_disabled() {
+    let c: ChainCfg = serde_json::from_value(serde_json::json!({
+        "chain_id": 1,
+        "rpc_url": "http://localhost:8545",
+        "pool_address": "0x0000000000000000000000000000000000000001",
+        "bundler_address": "0x0000000000000000000000000000000000000002",
+        "signer_key_hex": "0x01",
+    }))
+    .expect("minimal chain block");
+    assert_eq!(c.generic_call_wrapper_address, None);
+    assert!(c.generic_allowed_calls.is_empty());
+    assert_eq!(c.generic_max_min_gas, 2_000_000);
 }
 
 /// A numeric setting that does not parse fails boot rather than leaving the

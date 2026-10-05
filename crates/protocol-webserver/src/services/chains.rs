@@ -43,6 +43,17 @@ fn to_out(c: &ChainCfg) -> Result<ChainOut> {
             "swap_wrapper_address",
             c.swap_wrapper_address.as_deref(),
         )?,
+        generic_call_wrapper_address: nonzero(checksummed(
+            c.chain_id,
+            "generic_call_wrapper_address",
+            c.generic_call_wrapper_address.as_deref(),
+        )?),
+        name_registrar_address: nonzero(checksummed(
+            c.chain_id,
+            "name_registrar_address",
+            c.name_registrar_address.as_deref(),
+        )?),
+        name_parents: c.name_parents.clone(),
         governor_address: nonzero(checksummed(
             c.chain_id,
             "governor_address",
@@ -63,10 +74,10 @@ fn to_out(c: &ChainCfg) -> Result<ChainOut> {
 
 /// Drop the zero address.
 ///
-/// Governance is optional per chain, and the dev TOML declares these keys as
-/// zero so the env overlay has something to rewrite. Publishing zero would
-/// offer a wallet a governor that does not exist; absent tells it there is
-/// none.
+/// Governance, the generic wrapper and the name registrar are optional per
+/// chain, and the dev TOML declares these keys as zero so the env overlay has
+/// something to rewrite. Publishing zero would offer a wallet a contract that
+/// does not exist; absent tells it there is none.
 fn nonzero(addr: Option<String>) -> Option<String> {
     addr.filter(|a| a.parse::<Address>().is_ok_and(|a| !a.is_zero()))
 }
@@ -105,6 +116,9 @@ mod tests {
             tree_depth: Some(11),
             native_adapter_address: None,
             swap_wrapper_address: None,
+            generic_call_wrapper_address: None,
+            name_registrar_address: None,
+            name_parents: vec![],
             governor_address: None,
             gov_token_address: None,
             timelock_address: None,
@@ -136,6 +150,56 @@ mod tests {
             "zero is absent: {json}"
         );
         assert!(json.get("timelockAddress").is_none(), "{json}");
+    }
+
+    /// The generic wrapper and the name registrar are each published
+    /// checksummed, and absent when unset or a zero placeholder.
+    #[test]
+    fn test_optional_contract_is_checksummed_and_absent_when_unset_or_zero() {
+        type Set = fn(&mut ChainCfg, Option<String>);
+        let fields: [(&str, Set); 2] = [
+            ("genericCallWrapperAddress", |c, v| {
+                c.generic_call_wrapper_address = v
+            }),
+            ("nameRegistrarAddress", |c, v| c.name_registrar_address = v),
+        ];
+        let cases = [
+            (
+                Some("0x5fbdb2315678afecb367f032d93f642f64180aa3"),
+                Some("0x5FbDB2315678afecb367f032d93F642f64180aa3"),
+            ),
+            (Some("0x0000000000000000000000000000000000000000"), None),
+            (None, None),
+        ];
+        for (key, set) in fields {
+            for (configured, published) in cases {
+                let mut c = cfg(31337, None);
+                set(&mut c, configured.map(str::to_string));
+                let json = serde_json::to_value(to_out(&c).unwrap()).unwrap();
+                assert_eq!(
+                    json.get(key).and_then(|v| v.as_str()),
+                    published,
+                    "{key} from {configured:?}: {json}"
+                );
+            }
+        }
+    }
+
+    /// The parents keep their configured order and are absent when there are
+    /// none.
+    #[test]
+    fn test_name_parents_keep_their_order_and_are_absent_when_empty() {
+        let mut c = cfg(31337, None);
+        c.name_parents = vec!["lelantos.xyz".into(), "lelantosid.eth".into()];
+        let json = serde_json::to_value(to_out(&c).unwrap()).unwrap();
+        assert_eq!(
+            json["nameParents"],
+            serde_json::json!(["lelantos.xyz", "lelantosid.eth"])
+        );
+
+        c.name_parents.clear();
+        let json = serde_json::to_value(to_out(&c).unwrap()).unwrap();
+        assert!(json.get("nameParents").is_none(), "{json}");
     }
 
     #[test]

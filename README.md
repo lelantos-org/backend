@@ -140,7 +140,7 @@ unauthenticated request path is exactly what `gas_witness` exists to avoid.
 
 ```mermaid
 flowchart TD
-  CL[client] -->|POST /v1/spend, /v1/swap| PIPE[pipeline]
+  CL[client] -->|POST /v1/spend, /v1/swap, /v1/generic| PIPE[pipeline]
   CL -->|GET /chains| REG[chain registry<br/>roots · assets · wallet config]
   PIPE --> NG[nullifier guard]
   NG --> W[witness builder]

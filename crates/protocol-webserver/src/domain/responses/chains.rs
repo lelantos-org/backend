@@ -54,6 +54,19 @@ pub struct ChainOut {
     /// simply declines the swap, which is its own answer and not this one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swap_wrapper_address: Option<String>,
+    /// `GenericCallWrapper`, when the deployment has one. Absent disables
+    /// generic calls here. A property of the deployment, as `swapWrapperAddress`
+    /// is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generic_call_wrapper_address: Option<String>,
+    /// `LelantosNameRegistrar`, when the deployment has one. Absent means
+    /// handles cannot be claimed or looked up on this chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_registrar_address: Option<String>,
+    /// ENS parent names the registrar's handles resolve under, lowercase. The
+    /// first is the one to display.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub name_parents: Vec<String>,
     /// `LelantosGovernor`, when the deployment has one. Absent hides governance
     /// on this chain. Proposals are listed by `/v1/governance/proposals`; state,
     /// quorum and voting power are read from this contract on chain.

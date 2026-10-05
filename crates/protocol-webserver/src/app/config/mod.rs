@@ -69,6 +69,14 @@ pub struct ChainCfg {
     pub native_adapter_address: Option<String>,
     /// `SwapWrapper`, enabling swaps.
     pub swap_wrapper_address: Option<String>,
+    /// `GenericCallWrapper`, enabling generic calls. Zero counts as absent.
+    pub generic_call_wrapper_address: Option<String>,
+    /// `LelantosNameRegistrar`, enabling handles. Zero counts as absent.
+    pub name_registrar_address: Option<String>,
+    /// ENS parent names the registrar's handles resolve under, lowercase. The
+    /// first is the one a client displays.
+    #[serde(default)]
+    pub name_parents: Vec<String>,
     /// `LelantosGovernor`, enabling the governance UI. The zero address counts
     /// as absent, so a TOML can declare the key for the env overlay to rewrite.
     pub governor_address: Option<String>,
@@ -170,6 +178,21 @@ impl RegistryConfig {
             if let Some(v) = get("SWAP_WRAPPER_ADDRESS") {
                 c.swap_wrapper_address = Some(v);
             }
+            if let Some(v) = get("GENERIC_CALL_WRAPPER_ADDRESS") {
+                c.generic_call_wrapper_address = Some(v);
+            }
+            if let Some(v) = get("NAME_REGISTRAR_ADDRESS") {
+                c.name_registrar_address = Some(v);
+            }
+            // Comma-separated, replacing the TOML list wholesale.
+            if let Some(v) = get("NAME_PARENTS") {
+                c.name_parents = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
             if let Some(v) = get("GOVERNOR_ADDRESS") {
                 c.governor_address = Some(v);
             }
@@ -196,6 +219,14 @@ impl RegistryConfig {
             if !seen.insert(c.chain_id) {
                 bail!("chain {} is declared twice", c.chain_id);
             }
+            for p in &c.name_parents {
+                if !is_parent_name(p) {
+                    bail!(
+                        "chain {}: name_parents entry {p:?} is not a lowercase dotted name",
+                        c.chain_id
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -209,6 +240,11 @@ impl RegistryConfig {
         cfg.validate().context("registry config")?;
         Ok(cfg)
     }
+}
+
+/// Whether `name` is dotted, lowercase and free of whitespace.
+fn is_parent_name(name: &str) -> bool {
+    name.contains('.') && !name.chars().any(|c| c.is_uppercase() || c.is_whitespace())
 }
 
 #[cfg(test)]

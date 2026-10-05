@@ -1,7 +1,9 @@
 //! `/v1/*/estimate`: fee quotes that neither prove nor submit.
 
 use crate::app::AppState;
-use crate::domain::dto::{EstimateDepositRequest, EstimateSpendRequest, EstimateSwapRequest};
+use crate::domain::dto::{
+    EstimateDepositRequest, EstimateGenericRequest, EstimateSpendRequest, EstimateSwapRequest,
+};
 use crate::domain::error::AppResult;
 use crate::domain::responses::EstimateResponse;
 use axum::Json;
@@ -24,6 +26,15 @@ pub async fn estimate_swap(
 ) -> AppResult<Json<EstimateResponse>> {
     let pipeline = st.swap_pipeline(req.chain_id)?;
     Ok(Json(pipeline.estimate().await?))
+}
+
+#[instrument(skip_all, fields(chain_id = req.chain_id))]
+pub async fn estimate_generic(
+    State(st): State<AppState>,
+    Json(req): Json<EstimateGenericRequest>,
+) -> AppResult<Json<EstimateResponse>> {
+    let pipeline = st.generic_pipeline(req.chain_id)?;
+    Ok(Json(pipeline.estimate(req.min_gas).await?))
 }
 
 /// What a deposit must pay this relayer for the flush that will commit it.

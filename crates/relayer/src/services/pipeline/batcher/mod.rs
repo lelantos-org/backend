@@ -66,8 +66,8 @@ use worker::Worker;
 
 /// What one operation contributes to a bundle.
 ///
-/// Implemented once per pipeline — spend, swap, flush — so the batcher treats
-/// every operation the same way and holds no knowledge of calldata shapes.
+/// Implemented once per pipeline — spend, swap, generic, flush — so the batcher
+/// treats every operation the same way and holds no knowledge of calldata shapes.
 pub trait BundleItem: Send + Sync {
     fn entry(&self) -> EntryPoint;
 

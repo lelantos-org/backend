@@ -35,15 +35,19 @@ pub enum EntryPoint {
     /// receipt covers the whole batch, so `FlushPipeline` observes
     /// `gas_used / deposits` and each deposit is quoted that share.
     Flush = 4,
+    /// `GenericCallWrapper.execute`, excluding the call leg: a submission's
+    /// `minGas` is quoted on top and subtracted from its observation.
+    Generic = 5,
 }
 
 impl EntryPoint {
-    pub const ALL: [EntryPoint; 5] = [
+    pub const ALL: [EntryPoint; 6] = [
         EntryPoint::Transfer,
         EntryPoint::Withdraw,
         EntryPoint::WithdrawNative,
         EntryPoint::Swap,
         EntryPoint::Flush,
+        EntryPoint::Generic,
     ];
     const COUNT: usize = Self::ALL.len();
 
@@ -65,6 +69,9 @@ impl EntryPoint {
             // same reason as the rest, and until a batch has landed there is
             // nothing to average.
             EntryPoint::Flush => 420_000,
+            // The wrapper's overhead excluding the call leg: the withdraw, the
+            // escrows and the balance checks.
+            EntryPoint::Generic => 950_000,
         }
     }
 
@@ -75,6 +82,7 @@ impl EntryPoint {
             EntryPoint::WithdrawNative => "withdrawNative",
             EntryPoint::Swap => "swap",
             EntryPoint::Flush => "flush",
+            EntryPoint::Generic => "generic",
         }
     }
 }

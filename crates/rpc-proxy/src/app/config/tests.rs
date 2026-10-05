@@ -42,6 +42,7 @@ fn chain(chain_id: u64) -> ChainCfg {
         venue_seed: vec![],
         governor_address: None,
         gov_token_address: None,
+        name_registrar_address: None,
     }
 }
 
@@ -165,6 +166,41 @@ fn a_malformed_governor_address_fails_startup() {
     assert!(
         err.to_string()
             .contains("RPC_PROXY_CHAIN_881007_GOVERNOR_ADDRESS"),
+        "{err}"
+    );
+}
+
+#[test]
+fn overlay_supplies_the_name_registrar_and_zero_reads_as_absent() {
+    let registrar = "0x8888888888888888888888888888888888888888";
+    let _r = EnvVar::set("RPC_PROXY_CHAIN_881008_NAME_REGISTRAR_ADDRESS", registrar);
+    let _z = EnvVar::set(
+        "RPC_PROXY_CHAIN_881009_NAME_REGISTRAR_ADDRESS",
+        "0x0000000000000000000000000000000000000000",
+    );
+
+    let mut c = cfg(vec![chain(881008), chain(881009), chain(881010)]);
+    c.apply_env_overlay().unwrap();
+
+    assert_eq!(
+        c.chains[0].name_registrar(),
+        Some(registrar.parse().unwrap())
+    );
+    assert_eq!(
+        c.chains[1].name_registrar(),
+        None,
+        "zero is the placeholder"
+    );
+    assert_eq!(c.chains[2].name_registrar(), None, "unset");
+}
+
+#[test]
+fn a_malformed_name_registrar_address_fails_startup() {
+    let _r = EnvVar::set("RPC_PROXY_CHAIN_881011_NAME_REGISTRAR_ADDRESS", "0xnope");
+    let err = cfg(vec![chain(881011)]).apply_env_overlay().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("RPC_PROXY_CHAIN_881011_NAME_REGISTRAR_ADDRESS"),
         "{err}"
     );
 }

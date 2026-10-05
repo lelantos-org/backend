@@ -8,7 +8,7 @@ use crate::services::admission::idempotency::IdempotencyCache;
 use crate::services::admission::nullifier_guard::NullifierGuards;
 use crate::services::events::EventBroadcaster;
 use crate::services::pipeline::batcher::Batcher;
-use crate::services::pipeline::{FlushPipeline, SpendPipeline, SwapPipeline};
+use crate::services::pipeline::{FlushPipeline, GenericPipeline, SpendPipeline, SwapPipeline};
 use ::asset_registry::AssetRegistry;
 use chain::{Shared, build_chain};
 use database::DbPool;
@@ -24,6 +24,9 @@ pub struct AppState {
     /// Built only for chains with a configured `swap_wrapper_address`. `/v1/swap`
     /// looks one up by `payload.chain_id`.
     pub swap_pipelines: Arc<HashMap<i64, Arc<SwapPipeline>>>,
+    /// Built only for chains with a configured `generic_call_wrapper_address`.
+    /// `/v1/generic` looks one up by `payload.chain_id`.
+    pub generic_pipelines: Arc<HashMap<i64, Arc<GenericPipeline>>>,
     /// One flush pipeline per chain, for `/v1/deposit/estimate` and the flush
     /// workers `main` spawns.
     pub flush_pipelines: Arc<HashMap<i64, Arc<FlushPipeline>>>,
@@ -62,6 +65,12 @@ impl AppState {
         lookup(&self.swap_pipelines, chain_id)
     }
 
+    /// The generic pipeline serving `chain_id`. Absent on chains with no
+    /// `generic_call_wrapper_address`, which reads as the same 404 to a caller.
+    pub fn generic_pipeline(&self, chain_id: i64) -> AppResult<Arc<GenericPipeline>> {
+        lookup(&self.generic_pipelines, chain_id)
+    }
+
     /// The flush pipeline serving `chain_id`.
     pub fn flush_pipeline(&self, chain_id: i64) -> AppResult<Arc<FlushPipeline>> {
         lookup(&self.flush_pipelines, chain_id)
@@ -92,6 +101,7 @@ pub async fn build_state(
 
     let mut spend_pipelines = HashMap::new();
     let mut swap_pipelines = HashMap::new();
+    let mut generic_pipelines = HashMap::new();
     let mut flush_pipelines = HashMap::new();
     let mut batchers = HashMap::new();
     // Built concurrently rather than one after another: each chain's mirror
@@ -116,11 +126,15 @@ pub async fn build_state(
         if let Some(swap) = chain.swap {
             swap_pipelines.insert(c.chain_id, swap);
         }
+        if let Some(generic) = chain.generic {
+            generic_pipelines.insert(c.chain_id, generic);
+        }
     }
 
     Ok(AppState {
         spend_pipelines: Arc::new(spend_pipelines),
         swap_pipelines: Arc::new(swap_pipelines),
+        generic_pipelines: Arc::new(generic_pipelines),
         flush_pipelines: Arc::new(flush_pipelines),
         batchers: Arc::new(batchers),
         test_hooks: cfg.test_hooks.enabled,

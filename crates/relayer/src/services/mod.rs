@@ -6,8 +6,8 @@
 //!   submission reaches a pipeline.
 //! - `transact_verifier/`: local verification of a wallet's transact proof.
 //! - `fees/`: quoting gas in fee tokens, and collecting shielded fees.
-//! - `pipeline/`: the spend, swap and flush pipelines and the per-chain batcher
-//!   that proves and submits their operations.
+//! - `pipeline/`: the spend, swap, generic and flush pipelines and the per-chain
+//!   batcher that proves and submits their operations.
 //! - `submitter`, `witness` and `events`: sending transactions, building the
 //!   tree-update witness and publishing deposit lifecycle events.
 

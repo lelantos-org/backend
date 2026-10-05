@@ -122,6 +122,11 @@ pub(super) fn error_name(reason: &[u8]) -> Option<String> {
         "MalformedCall(uint256)",
         "ItemOutOfGas()",
         "VenueOutOfGas()",
+        "TokenInMismatch()",
+        "DuplicateOutputToken(address)",
+        "YieldAssetNotSupported(uint64)",
+        "InsufficientGas(uint256,uint256)",
+        "CallLegOutOfGas()",
     ];
     let selector = reason.get(..4)?;
     if selector == [0x08, 0xc3, 0x79, 0xa0] {

@@ -12,6 +12,9 @@ fn chain(chain_id: i64) -> ChainCfg {
         tree_depth: None,
         native_adapter_address: None,
         swap_wrapper_address: None,
+        generic_call_wrapper_address: None,
+        name_registrar_address: None,
+        name_parents: vec![],
         governor_address: None,
         gov_token_address: None,
         timelock_address: None,
@@ -93,4 +96,60 @@ fn test_the_overlay_supplies_the_governance_addresses() {
     assert_eq!(got.governor_address.as_deref(), Some(KEYS[0].1));
     assert_eq!(got.gov_token_address.as_deref(), Some(KEYS[1].1));
     assert_eq!(got.timelock_address.as_deref(), Some(KEYS[2].1));
+}
+
+/// The parent list arrives comma-separated and replaces the TOML's.
+#[test]
+fn test_the_overlay_supplies_the_name_registrar_and_parents() {
+    const REGISTRAR: (&str, &str) = (
+        "REGISTRY_CHAIN_772002_NAME_REGISTRAR_ADDRESS",
+        "0x4444444444444444444444444444444444444444",
+    );
+    const PARENTS: (&str, &str) = (
+        "REGISTRY_CHAIN_772002_NAME_PARENTS",
+        "lelantos.xyz, lelantosid.eth",
+    );
+    for (k, v) in [REGISTRAR, PARENTS] {
+        // SAFETY: these keys name a chain id no other test uses.
+        unsafe { std::env::set_var(k, v) };
+    }
+    let mut c = cfg(vec![chain(772002)]);
+    c.chains[0].name_parents = vec!["stale.eth".into()];
+    c.apply_env_overlay();
+    for (k, _) in [REGISTRAR, PARENTS] {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(k) };
+    }
+
+    let got = &c.chains[0];
+    assert_eq!(got.name_registrar_address.as_deref(), Some(REGISTRAR.1));
+    assert_eq!(got.name_parents, ["lelantos.xyz", "lelantosid.eth"]);
+    assert!(c.validate().is_ok());
+}
+
+/// A chain block that declares neither key has no registrar and no parents.
+#[test]
+fn test_name_keys_default_to_absent() {
+    let c: ChainCfg =
+        serde_json::from_value(serde_json::json!({ "chain_id": 1 })).expect("minimal chain block");
+    assert_eq!(c.name_registrar_address, None);
+    assert!(c.name_parents.is_empty());
+}
+
+/// A client appends a parent to a label and resolves the result, so each one
+/// must already be a normalised name.
+#[test]
+fn test_a_malformed_name_parent_is_rejected() {
+    for bad in [
+        "",
+        "lelantos",
+        "Lelantos.xyz",
+        "lelantos .xyz",
+        "lelantos.xyz\n",
+    ] {
+        let mut c = cfg(vec![chain(31337)]);
+        c.chains[0].name_parents = vec!["lelantos.xyz".into(), bad.into()];
+        let err = c.validate().expect_err("must reject");
+        assert!(format!("{err}").contains("name_parents"), "{bad:?}: {err}");
+    }
 }

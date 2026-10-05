@@ -49,10 +49,10 @@ pub struct ChainCfg {
     /// This relayer's `Bundler` clone, created with `BundlerFactory.create` from
     /// the relayer's owner key with `signer_key_hex`'s address as operator.
     ///
-    /// Every submission is sent to it, so it is the pool's and the swap wrapper's
+    /// Every submission is sent to it, so it is the pool's and the wrappers'
     /// caller, and it is the address `/chains` publishes for wallets to bind:
-    /// `pi.relayer` on a pool spend and `pi_w.payer` on a swap. A native unshield
-    /// still binds `native_adapter_address` as `pi.relayer`.
+    /// `pi.relayer` on a pool spend and `pi_w.payer` on a swap or generic call. A
+    /// native unshield still binds `native_adapter_address` as `pi.relayer`.
     pub bundler_address: String,
     /// Most operations one transaction carries. `1` sends every operation alone,
     /// as before bundling; see `pipeline::batcher` for how larger values are sized
@@ -77,7 +77,7 @@ pub struct ChainCfg {
     /// account of its own may point a swap's `swap.refundTo`, so a cancelled
     /// output escrow lands somewhere able to move it. Absent means the address of
     /// `signer_key_hex`. Must be an account that can transfer tokens, never the
-    /// Bundler or a swap wrapper, which swap validation refuses.
+    /// Bundler or a wrapper, which swap and generic validation refuse.
     #[serde(default)]
     pub refund_address: Option<String>,
     /// Receipt poll budget in seconds. On a submission revert the in-memory tree
@@ -122,6 +122,18 @@ pub struct ChainCfg {
     /// deployed alongside MASP.
     #[serde(default)]
     pub swap_wrapper_address: Option<String>,
+    /// When set, enables `/v1/generic` for this chain. The Bundler calls this
+    /// address with `GenericCallWrapper.execute` calldata.
+    #[serde(default)]
+    pub generic_call_wrapper_address: Option<String>,
+    /// The calls a `/v1/generic` intent may carry. Empty admits only intents with
+    /// no calls.
+    #[serde(default)]
+    pub generic_allowed_calls: Vec<AllowedCallCfg>,
+    /// Largest `generic.minGas` accepted. The call leg's gas is charged in full,
+    /// so this bounds what one submission can reserve of a bundle's gas.
+    #[serde(default = "default_generic_max_min_gas")]
+    pub generic_max_min_gas: u64,
     /// Oracle base symbol for the chain's native gas token, such as "ETH" or
     /// "BNB". Used as `base` in Coinbase price lookups.
     #[serde(default = "default_native_symbol")]
@@ -202,6 +214,15 @@ impl ChainCfg {
             assets: &self.shielded_fee_assets,
         })
     }
+}
+
+/// One `(target, selector)` pair a generic intent may call.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AllowedCallCfg {
+    /// Contract address, 0x-hex.
+    pub target: String,
+    /// Function selector, four bytes of 0x-hex.
+    pub selector: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -305,6 +326,10 @@ fn default_bundle_max_items() -> usize {
 /// Arbitrum's sequencer takes 95 KB, so deployments there set it lower.
 fn default_max_tx_bytes() -> usize {
     120_000
+}
+
+fn default_generic_max_min_gas() -> u64 {
+    2_000_000
 }
 
 fn default_native_symbol() -> String {

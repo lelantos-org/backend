@@ -12,13 +12,13 @@ use std::collections::VecDeque;
 use std::ops::ControlFlow;
 
 /// The next bundle: up to `max_items` from the front of `pending`, in queue order
-/// except that swaps go last. A swap's success depends on the market between
-/// simulation and inclusion, and a failure invalidates every later item's tree
-/// proof, so the fewer items behind a swap the better.
+/// except that swaps and generic calls go last. Their success depends on chain
+/// state between simulation and inclusion, and a failure invalidates every later
+/// item's tree proof, so the fewer items behind one the better.
 pub(super) fn take_bundle(pending: &mut VecDeque<Job>, max_items: usize) -> Vec<Job> {
     let n = pending.len().min(max_items);
     let mut jobs: Vec<Job> = pending.drain(..n).collect();
-    jobs.sort_by_key(|j| j.item.entry() == EntryPoint::Swap);
+    jobs.sort_by_key(|j| matches!(j.item.entry(), EntryPoint::Swap | EntryPoint::Generic));
     jobs
 }
 

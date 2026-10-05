@@ -1,7 +1,7 @@
 # relayer
 
-The only service that writes on chain. A client POSTs a spend or a swap, the
-relayer builds the batch witness against its mirror of the commitment tree,
+The only service that writes on chain. A client POSTs a spend, a swap or a
+generic call, the relayer builds the batch witness against its mirror of the commitment tree,
 proves `tree_update_batch` with Groth16, and submits the transaction. A cron
 worker does the same for escrowed deposits.
 
@@ -41,6 +41,8 @@ leaving them unable to tell a failed spend from a landed one.
 | `POST /v1/spend/estimate` | Fee quote for the same payload, including the note value to pay. Does **not** prove or submit |
 | `POST /v1/swap` | Leg-1 SNARK + leg-2 escrow blob via `SwapWrapper`. `swap.deadline` and `swap.refundTo` are required. 400, before any proving, when `pubInputs.intentHash` is not `SwapWrapper._intentHash` of the payload's `refundTo`, `tokenOut`, `minOut`, `adapter`, `deadline`, `depositD`, `auxD`, `feeAuxD`, `refundD`, `refundAuxD` and `refundFeeAuxD`, when `swap.refundTo` is zero, this relayer's Bundler, or the swap wrapper, or when `swap.deadline` is less than 180 s away (the wrapper would refund rather than swap a swap landing after it) |
 | `POST /v1/swap/estimate` | Fee quote for a swap |
+| `POST /v1/generic` | Leg-1 SNARK plus calls, output escrows and a refund escrow via `GenericCallWrapper.execute`; see [Generic calls](#generic-calls). Same `Idempotency-Key`, nullifier reservation and **402** as `/v1/spend` |
+| `POST /v1/generic/estimate` | Fee quote for a generic call forwarding `minGas` to its calls. Body `{ chainId, minGas }` |
 | `GET /v1/deposits/stream?chain_id=` | SSE of deposit lifecycle events |
 | `POST /test/bundler/{chain_id}/hold`, `GET …/queue`, `POST …/release` | Test hooks; mounted only with `[test_hooks] enabled = true`. See [Bundling](#bundling) |
 
@@ -86,6 +88,43 @@ one has aged out, so a client renders nothing rather than `0.00%`.
 
 `/v1/deposits/stream` rejects a chain the relayer does not serve. A valid stream
 that can never emit anything reads to a client as "no deposits yet".
+
+### Generic calls
+
+`/v1/generic` relays `GenericCallWrapper.execute`: an unshield to the wrapper,
+up to 16 calls made from a single-use executor, and one to four outputs
+escrowed back into the pool, or the input escrowed back as `generic.refundD`
+when the calls fail. The route exists on chains with a
+`generic_call_wrapper_address`.
+
+The body is a `/v1/swap` body with `generic` in place of `swap`:
+`amountIn`, `calls` (`{ target, value, data }`), `outputs`
+(`{ minOut, deposit, aux, feeAux }`), `deadline`, `minGas`, `refundTo`,
+`surplusTo`, `refundD`, `refundAuxD` and `refundFeeAuxD`. The leg-1 proof binds
+the wrapper as `recipient` and `relayer` and this relayer's Bundler as `payer`.
+
+400, before any proving, when:
+
+- `pubInputs.intentHash` is not `GenericCallWrapper.intentHash` of the payload:
+  `keccak256(abi.encode(refundTo, surplusTo, deadline, minGas, calls, outputs,
+  refundD, refundAuxD, refundFeeAuxD)) mod r`. `amountIn` is outside it;
+- `amountIn` or an output's `minOut` is zero, there are no outputs or more than
+  four, or there are more than 16 calls;
+- an output's `deposit` or `refundD` is not paid by the wrapper, names another
+  chain, has `publicIn = 0`, or carries an `inner` or `feeInner` outside the
+  field;
+- `refundTo` or `surplusTo` is zero, the wrapper or this relayer's Bundler;
+- `deadline` is less than 180 s away;
+- `minGas` is zero or above `generic_max_min_gas`;
+- a call's `(target, first four bytes of data)` is not in
+  `generic_allowed_calls`, or its `data` is shorter than four bytes. With an
+  empty allowlist only an intent with no calls is relayed.
+
+The fee covers `gas_witness(generic) + minGas`: the wrapper's own overhead as
+observed from receipts, plus the whole call-leg floor, since the wrapper
+reverts unless that much gas is forwarded. `/v1/generic/estimate` quotes the
+same sum for the `minGas` it is given, under the same bounds. Each receipt feeds
+`gas_used − minGas` back, so the witness tracks the overhead alone.
 
 ## Submission path
 
@@ -209,22 +248,22 @@ chain has a **batcher** (`services/pipeline/batcher/`) that sends up to
 `bundle_max_items` of them in one `Bundler.execute`: it reserves them in a row on
 the mirror, each building on the tree the previous leaves, proves the chained
 tree updates, and calls this relayer's Bundler, which `CALL`s the pool, the
-native adapter or the swap wrapper once per item. Each call sees the state the
-one before it left, so every position check passes.
+native adapter, the swap wrapper or the generic call wrapper once per item. Each
+call sees the state the one before it left, so every position check passes.
 
 **The Bundler** is created by the permissionless `BundlerFactory`, one per
 relayer (`contracts/src/README.md`, "Bundling"). Its targets — the pool, the
-native adapter and the swap wrapper — are fixed at creation, each admitting only
-its tree-advancing selectors; its owner manages operators, and `signer_key_hex`
-must be one. It stops at the first
+native adapter, the swap wrapper and the generic call wrapper — are fixed at
+creation, each admitting only its tree-advancing selectors; its owner manages
+operators, and `signer_key_hex` must be one. It stops at the first
 failing call rather than reverting, emitting `BundleItemFailed(index, reason)`
 and `BundleExecuted(executed, total)`, so earlier items stay committed.
 
 **Batching is natural.** An idle batcher sends a lone operation at once;
 operations arriving while a bundle is in flight become the next bundle. Every
-kind can be bundled; swaps go last, since their success depends on the market
-and a failure stops every item behind it. `bundle_linger_ms` optionally waits for
-more before sending. A bundle is also cut short of `max_tx_bytes` of calldata.
+kind can be bundled; swaps and generic calls go last, since their success
+depends on chain state and a failure stops every item behind it.
+`bundle_linger_ms` optionally waits for more before sending. A bundle is also cut short of `max_tx_bytes` of calldata.
 
 **Checks before sending.**
 1. Items whose wallet root is about to leave the pool's 64-root window are
@@ -476,7 +515,7 @@ signer_key_hex = "0x…"
 | `pool_address` | yes | — | MASP pool. Read from, and the target of the pool calls a bundle makes |
 | `bundler_address` | yes | — | This relayer's Bundler (`BundlerFactory.create`). Every transaction goes to it, and `/chains` publishes it as the address wallets bind. Zero refuses to boot |
 | `signer_key_hex` | yes | — | 32-byte hex. Must be an operator of `bundler_address` |
-| `refund_address` | no | signer's address | Published by `/chains` as `refundAddress`, the fallback swap `refundTo` for wallets with no EVM account. Zero, `bundler_address` or `swap_wrapper_address` refuses to boot |
+| `refund_address` | no | signer's address | Published by `/chains` as `refundAddress`, the fallback swap `refundTo` for wallets with no EVM account. Zero, `bundler_address`, `swap_wrapper_address` or `generic_call_wrapper_address` refuses to boot |
 | `bundle_max_items` | no | 1 | Operations per transaction, 1–32. See [Sizing](#sizing-bundle_max_items). `> 1` requires `prover.transact_vkey_path` |
 | `bundle_linger_ms` | no | 0 | Wait for more operations before sending a bundle |
 | `max_tx_bytes` | no | 120000 | Calldata cap per bundle; ≥ 16000 |
@@ -488,6 +527,9 @@ signer_key_hex = "0x…"
 | `flush_partial_after_s` | no | 0 | How long a batch smaller than `flush_max_n` waits for more deposits. `0` flushes on every tick |
 | `native_adapter_address` | no | — | Enables `withdrawNative`. The SNARK must name it as both `recipient` and `relayer` — the adapter is the pool's caller there |
 | `swap_wrapper_address` | no | — | Enables `/v1/swap` |
+| `generic_call_wrapper_address` | no | — | Enables `/v1/generic` |
+| `generic_allowed_calls` | no | `[]` | `{target, selector}` pairs a generic intent may call; `selector` is four bytes of hex. Empty relays only intents with no calls |
+| `generic_max_min_gas` | no | 2000000 | Largest `generic.minGas` accepted |
 | `native_symbol` | no | `ETH` | Oracle base for the native gas token |
 | `native_decimals` | no | 18 | Must be ≤ 38 |
 | `fee_markup_bps` | no | 1000 | 10%. Must be ≤ 1_000_000 |
@@ -499,11 +541,12 @@ signer_key_hex = "0x…"
 | `public` | no | — | Wallet-facing block, served verbatim by `/chains`: `name`, `rpc_url`, `tree_depth`, `permit2_address`, `explorer_url` |
 
 Per-chain env overlay:
-`RELAYER_CHAIN_<id>_{POOL_ADDRESS,BUNDLER_ADDRESS,REFUND_ADDRESS,BUNDLE_MAX_ITEMS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS,SHIELDED_FEE_ADDRESS,SHIELDED_FEE_IVK,ACCEPTED_FEE_TOKENS}`.
-`ACCEPTED_FEE_TOKENS` is the one that is not a scalar: a JSON array of
-`{symbol,address,decimals,quote_symbol}` records, replacing the TOML list
-wholesale. Malformed JSON panics at startup rather than leaving the relayer
-quoting against the compiled-in addresses.
+`RELAYER_CHAIN_<id>_{POOL_ADDRESS,BUNDLER_ADDRESS,REFUND_ADDRESS,BUNDLE_MAX_ITEMS,RPC_URL,SIGNER_KEY,SWAP_WRAPPER_ADDRESS,GENERIC_CALL_WRAPPER_ADDRESS,GENERIC_ALLOWED_CALLS,NATIVE_ADAPTER_ADDRESS,NATIVE_SYMBOL,FEE_MARKUP_BPS,SHIELDED_FEE_ADDRESS,SHIELDED_FEE_IVK,ACCEPTED_FEE_TOKENS}`.
+`ACCEPTED_FEE_TOKENS` and `GENERIC_ALLOWED_CALLS` are the two that are not
+scalars: JSON arrays of `{symbol,address,decimals,quote_symbol}` and
+`{target,selector}` records, each replacing its TOML list wholesale. Malformed
+JSON panics at startup rather than leaving the relayer on the compiled-in
+list.
 
 ⚠️ The overlay only rewrites chains **already declared** in the TOML. A variable
 naming a chain with no `[[chains]]` block is silently discarded.
@@ -601,7 +644,7 @@ Standard binary layout. `services/` groups by job:
 | `admission/` | `idempotency` and `nullifier_guard`, run before a pipeline spends anything |
 | `transact_verifier/` | Local check of a wallet's transact proof, and the public signals it is checked against |
 | `fees/` | Gas units (`gas_witness`), gas price (`gas_estimator`), prices (`oracle`), quotes (`quote`) and shielded fee collection (`shielded/`) |
-| `pipeline/` | `spend/`, `swap/` and `flush/` over the shared `transact/` checks, all submitted through the per-chain `batcher/` |
+| `pipeline/` | `spend/`, `swap/`, `generic/` and `flush/` over the shared `transact/` checks, with `wrapper` holding what `swap/` and `generic/` check about their wrapper contract, all submitted through the per-chain `batcher/` |
 
 `flush/` holds the flush worker's decision table (`preflight`) and its attempt
 bookkeeping (`failures`). The MASP view calls (`currentRoot`, the root ring,

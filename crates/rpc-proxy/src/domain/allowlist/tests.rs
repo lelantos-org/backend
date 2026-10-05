@@ -327,6 +327,36 @@ fn eth_get_logs_requires_this_chains_pool() {
     );
 }
 
+/// An `eth_call` target is not thereby a log source: the registrar's views are
+/// served and its logs are not.
+#[test]
+fn eth_get_logs_refuses_the_name_registrar() {
+    const REGISTRAR: Address = address!("7777777777777777777777777777777777777777");
+    let targets = Targets::new(MASP, PERMIT2, [TOKEN], []).with_name_registrar(Some(REGISTRAR));
+    let p = Policy {
+        targets: &targets,
+        ..Fixture::new().policy(Some(10_000))
+    };
+
+    // `feeAmount()`.
+    assert!(
+        check(
+            &p,
+            "eth_call",
+            json!([{"to": REGISTRAR.to_string(), "data": "0x69e15404"}, "latest"])
+        )
+        .is_ok()
+    );
+    assert!(
+        check(
+            &p,
+            "eth_getLogs",
+            json!([{"address": REGISTRAR.to_string(), "fromBlock": "0x1900", "toBlock": "latest"}])
+        )
+        .is_err()
+    );
+}
+
 /// Each of these denotes a scan from genesis on a metered node.
 #[test]
 fn eth_get_logs_requires_an_explicit_from_block() {

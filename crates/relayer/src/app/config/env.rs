@@ -1,6 +1,7 @@
 //! The per-chain env overlay, applied on top of the TOML before validation.
 
-use super::{FeeTokenCfg, RelayerConfig};
+use super::RelayerConfig;
+use serde::de::DeserializeOwned;
 
 impl RelayerConfig {
     /// Overlay env vars on top of the TOML defaults, per chain, using the
@@ -15,9 +16,9 @@ impl RelayerConfig {
     ///
     /// # Panics
     ///
-    /// If `ACCEPTED_FEE_TOKENS` is set to something that is not a JSON array of
-    /// fee-token records, or a numeric field to something that does not parse;
-    /// see `overlay_parse`.
+    /// If `ACCEPTED_FEE_TOKENS` or `GENERIC_ALLOWED_CALLS` is set to something
+    /// that is not a JSON array of its records, or a numeric field to something
+    /// that does not parse; see `overlay_json_list` and `overlay_parse`.
     pub fn apply_env_overlay(&mut self) {
         for c in &mut self.chains {
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "POOL_ADDRESS") {
@@ -42,6 +43,17 @@ impl RelayerConfig {
                 c.swap_wrapper_address = Some(v);
             }
             if let Some(v) =
+                shared::config_env::lookup("RELAYER", c.chain_id, "GENERIC_CALL_WRAPPER_ADDRESS")
+            {
+                c.generic_call_wrapper_address = Some(v);
+            }
+            overlay_json_list(
+                &mut c.generic_allowed_calls,
+                c.chain_id,
+                "GENERIC_ALLOWED_CALLS",
+                "{target,selector}",
+            );
+            if let Some(v) =
                 shared::config_env::lookup("RELAYER", c.chain_id, "NATIVE_ADAPTER_ADDRESS")
             {
                 c.native_adapter_address = Some(v);
@@ -61,27 +73,38 @@ impl RelayerConfig {
             if let Some(v) = shared::config_env::lookup("RELAYER", c.chain_id, "SHIELDED_FEE_IVK") {
                 c.shielded_fee_ivk = Some(v);
             }
-            // JSON, because this is a list of records while every other overlay is
-            // a scalar. Deployments learn their ERC-20 addresses from a deploy
-            // script, so without this the per-chain config carrying them would have
-            // to be written into the committed TOML.
-            //
-            // Malformed JSON is a hard failure: keeping the TOML's list would leave
-            // the relayer quoting fees against whatever addresses were compiled
-            // in.
-            if let Some(v) =
-                shared::config_env::lookup("RELAYER", c.chain_id, "ACCEPTED_FEE_TOKENS")
-            {
-                match serde_json::from_str::<Vec<FeeTokenCfg>>(&v) {
-                    Ok(tokens) => c.accepted_fee_tokens = tokens,
-                    Err(e) => panic!(
-                        "RELAYER_CHAIN_{}_ACCEPTED_FEE_TOKENS is not a JSON array of \
-                         {{symbol,address,decimals,quote_symbol}}: {e}",
-                        c.chain_id
-                    ),
-                }
-            }
+            // Deployments learn their ERC-20 addresses from a deploy script, so
+            // without this the per-chain config carrying them would have to be
+            // written into the committed TOML.
+            overlay_json_list(
+                &mut c.accepted_fee_tokens,
+                c.chain_id,
+                "ACCEPTED_FEE_TOKENS",
+                "{symbol,address,decimals,quote_symbol}",
+            );
         }
+    }
+}
+
+/// Overlay `RELAYER_CHAIN_<chain_id>_<field>`, a JSON array of `shape` records,
+/// onto `target` when set, replacing the TOML's list wholesale.
+///
+/// # Panics
+///
+/// If the variable is set but is not such an array. Keeping the TOML's list
+/// would run the chain on entries nobody chose.
+fn overlay_json_list<T: DeserializeOwned>(
+    target: &mut Vec<T>,
+    chain_id: i64,
+    field: &str,
+    shape: &str,
+) {
+    let Some(raw) = shared::config_env::lookup("RELAYER", chain_id, field) else {
+        return;
+    };
+    match serde_json::from_str(&raw) {
+        Ok(list) => *target = list,
+        Err(e) => panic!("RELAYER_CHAIN_{chain_id}_{field} is not a JSON array of {shape}: {e}"),
     }
 }
 

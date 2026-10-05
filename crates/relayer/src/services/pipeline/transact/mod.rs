@@ -1,10 +1,10 @@
-//! Shared building blocks for single-transact pipelines (spend + swap).
+//! Shared building blocks for single-transact pipelines (spend, swap and
+//! generic).
 //!
-//! Both pipelines insert `TRANSACT_OUT` leaves and prove the same
-//! `tree_update_batch` shape over them, differing only in which contract they
-//! call, how they encode the calldata, and which payload-shape checks they
-//! apply. This module owns what they share; the batcher owns the tree, the
-//! prover and submission.
+//! Each inserts `TRANSACT_OUT` leaves and proves the same `tree_update_batch`
+//! shape over them, differing only in which contract it calls, how it encodes
+//! the calldata, and which payload-shape checks it applies. This module owns
+//! what they share; the batcher owns the tree, the prover and submission.
 
 mod fees;
 
@@ -31,8 +31,9 @@ pub const SPEND_LEAVES: usize = TRANSACT_OUT;
 pub struct TransactBinding {
     pub chain_id: i64,
     /// Address the proof must name as `relayer`: this relayer's `Bundler` for a
-    /// pool spend, the `NativeAdapter` for a native unshield and the `SwapWrapper`
-    /// for a swap, each being the pool's caller on its path.
+    /// pool spend, the `NativeAdapter` for a native unshield, the `SwapWrapper`
+    /// for a swap and the `GenericCallWrapper` for a generic call, each being the
+    /// pool's caller on its path.
     pub relayer: Address,
 }
 
@@ -127,7 +128,7 @@ pub fn merkle_root_of(pi: &PubInputsDto) -> AppResult<Field> {
     Ok(parse_field(&pi.merkle_root, FieldRef::Named("pubInputs.merkleRoot"))?.0)
 }
 
-/// The `SpendTree` that both spend and swap calldata builders embed identically.
+/// The `SpendTree` every pipeline's calldata builder embeds identically.
 ///
 /// The anchor slot is the batcher's to set at reservation; an item that reaches
 /// encoding without one was reserved by some other path, and cannot land.

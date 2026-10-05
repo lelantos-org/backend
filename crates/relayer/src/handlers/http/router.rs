@@ -54,7 +54,9 @@ pub fn build(state: AppState) -> Router {
         .route("/v1/spend", post(handlers::submit_spend))
         .route("/v1/spend/estimate", post(handlers::estimate_spend))
         .route("/v1/swap", post(handlers::submit_swap))
-        .route("/v1/swap/estimate", post(handlers::estimate_swap));
+        .route("/v1/swap/estimate", post(handlers::estimate_swap))
+        .route("/v1/generic", post(handlers::submit_generic))
+        .route("/v1/generic/estimate", post(handlers::estimate_generic));
     // Absent unless configured, so a production relayer has no route that stalls
     // its submissions.
     if state.test_hooks {

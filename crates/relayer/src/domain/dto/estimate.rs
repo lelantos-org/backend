@@ -37,3 +37,14 @@ pub struct EstimateDepositRequest {
 pub struct EstimateSwapRequest {
     pub chain_id: i64,
 }
+
+/// Wire format for `/v1/generic/estimate`. See [`EstimateSpendRequest`].
+///
+/// `min_gas` is the `generic.minGas` the submission will carry: the quote is
+/// `EntryPoint::Generic` plus that figure, and the same bounds apply.
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimateGenericRequest {
+    pub chain_id: i64,
+    pub min_gas: u64,
+}

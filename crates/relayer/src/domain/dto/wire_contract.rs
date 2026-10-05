@@ -160,3 +160,78 @@ fn swap_payload_matches_the_sdk_encoding() {
         "0x0000000000000000000000000000000000004ef0"
     );
 }
+
+#[test]
+fn generic_payload_matches_the_sdk_encoding() {
+    let raw = serde_json::json!({
+        "chainId": 31337,
+        "proof": proof(),
+        "pubInputs": pub_inputs(),
+        "aux": auxes(TRANSACT_OUT),
+        "generic": {
+            "amountIn": "1000",
+            "calls": [
+                {
+                    "target": "0x000000000000000000000000000000000000ca11",
+                    "value": "7",
+                    "data": "0xaabbccdd01",
+                },
+            ],
+            "outputs": [
+                {
+                    "minOut": "990",
+                    "deposit": deposit_request(),
+                    "aux": aux(),
+                    "feeAux": aux(),
+                },
+            ],
+            "deadline": "1900000000",
+            "minGas": "600000",
+            "refundTo": "0x0000000000000000000000000000000000004ef0",
+            "surplusTo": "0x0000000000000000000000000000000000005e55",
+            "refundD": deposit_request(),
+            "refundAuxD": aux(),
+            "refundFeeAuxD": aux(),
+        },
+    });
+    let p: SubmitGenericPayload = serde_json::from_value(raw).expect("generic payload");
+    assert_eq!(p.chain_id, 31337);
+    assert_eq!(p.aux.len(), TRANSACT_OUT);
+    assert_eq!(p.generic.amount_in, "1000");
+    assert_eq!(
+        p.generic.calls[0].target,
+        "0x000000000000000000000000000000000000ca11"
+    );
+    assert_eq!(p.generic.calls[0].value, "7");
+    assert_eq!(p.generic.calls[0].data, "0xaabbccdd01");
+    assert_eq!(p.generic.outputs[0].min_out, "990");
+    assert_eq!(p.generic.outputs[0].deposit.public_in, 990);
+    assert_eq!(p.generic.outputs[0].aux.ciphertext, "0xdead");
+    assert_eq!(p.generic.outputs[0].fee_aux.ciphertext, "0xdead");
+    assert_eq!(p.generic.deadline, "1900000000");
+    assert_eq!(p.generic.min_gas, "600000");
+    assert_eq!(
+        p.generic.refund_to,
+        "0x0000000000000000000000000000000000004ef0"
+    );
+    assert_eq!(
+        p.generic.surplus_to,
+        "0x0000000000000000000000000000000000005e55"
+    );
+    assert_eq!(p.generic.refund_d.fee_in, 5);
+    assert_eq!(p.generic.refund_aux_d.ciphertext, "0xdead");
+    assert_eq!(p.generic.refund_fee_aux_d.ciphertext, "0xdead");
+}
+
+/// `calls` may be empty; `minGas` is a decimal string on a submission and a
+/// JSON number on an estimate.
+#[test]
+fn generic_estimate_request_matches_the_sdk_encoding() {
+    let raw = serde_json::json!({ "chainId": 31337, "minGas": 600000 });
+    let req: EstimateGenericRequest = serde_json::from_value(raw).expect("estimate request");
+    assert_eq!(req.chain_id, 31337);
+    assert_eq!(req.min_gas, 600_000);
+
+    let as_string = serde_json::json!({ "chainId": 31337, "minGas": "600000" });
+    assert!(serde_json::from_value::<EstimateGenericRequest>(as_string).is_err());
+}

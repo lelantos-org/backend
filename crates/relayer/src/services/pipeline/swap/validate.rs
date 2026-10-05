@@ -1,51 +1,17 @@
 //! Everything checked about a swap payload before it costs a Groth16: its shape,
-//! its refund target, its deadline and the intent hash its proof carries.
+//! its deadline and the intent hash its proof carries.
 
-use crate::adapters::abi::{IMasp, ISwapWrapper};
+use crate::adapters::abi::ISwapWrapper;
 use crate::adapters::calldata::{
     build_aux, build_deposit_request, build_one_aux, build_proof, build_pub_inputs,
 };
-use crate::adapters::parse::{FieldRef, parse_address, parse_field, parse_hex_bytes, parse_u256};
-use crate::domain::dto::{DepositRequestDto, SubmitSwapPayload};
+use crate::adapters::parse::{parse_address, parse_hex_bytes, parse_u256};
+use crate::domain::dto::SubmitSwapPayload;
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::field::BN254_R;
-use crate::services::pipeline::SUBMISSION_TIMEOUT;
-use crate::services::pipeline::batcher;
-use crate::services::pipeline::transact::TransactBinding;
-use alloy::primitives::{Address, FixedBytes, U256, keccak256};
+use crate::services::pipeline::wrapper::{WrapperBinding, check_deadline, placeholder_tree_update};
+use alloy::primitives::{U256, keccak256};
 use alloy::sol_types::SolValue;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Why `refund_to` cannot own a swap's output escrow, if it cannot: the wrapper
-/// reverts `InvalidRefundTo` on zero or itself, and the Bundler has no way to
-/// move a refund out. Shared by request validation and the boot check on the
-/// address this relayer advertises.
-pub fn refund_address_error(
-    refund_to: Address,
-    wrapper: Option<Address>,
-    bundler: Address,
-) -> Option<String> {
-    [
-        (Some(Address::ZERO), "the zero address"),
-        (Some(bundler), "this relayer's Bundler"),
-        (wrapper, "the swap wrapper"),
-    ]
-    .into_iter()
-    .find(|(forbidden, _)| *forbidden == Some(refund_to))
-    .map(|(_, what)| format!("{refund_to} is {what}, which cannot hold a refund"))
-}
-
-/// `swap.refundTo`, refused here rather than after a Groth16.
-pub(super) fn validate_refund_to(
-    refund_to: Address,
-    wrapper: Address,
-    bundler: Address,
-) -> AppResult<()> {
-    match refund_address_error(refund_to, Some(wrapper), bundler) {
-        Some(why) => Err(AppError::BadRequest(format!("swap.refundTo: {why}"))),
-        None => Ok(()),
-    }
-}
 
 /// `SwapWrapper._intentHash`: the value a swap's withdraw proof must
 /// carry as `pi_w.intentHash`.
@@ -89,16 +55,10 @@ fn check_intent(a: &ISwapWrapper::SwapArgs) -> AppResult<()> {
     Ok(())
 }
 
-/// How long before its deadline a swap is still accepted. A swap accepted
-/// closer to it could be proved and bundled only after the deadline, and the
-/// wrapper would then refund it rather than swap, with the wallet's fees paid.
-/// The longest a caller waits for a submission, since one still queued past
-/// that is already a slow bundle.
-pub(super) const SWAP_DEADLINE_MARGIN_SECS: u64 = SUBMISSION_TIMEOUT.as_secs();
-
 /// Parse every caller-supplied swap field into `SwapArgs`, leaving the tree
 /// proof (`tp_w`, `tpi_w`) at its default for the batcher to fill.
 pub(super) fn build_swap_args(payload: &SubmitSwapPayload) -> AppResult<ISwapWrapper::SwapArgs> {
+    let (tp_w, tpi_w) = placeholder_tree_update();
     Ok(ISwapWrapper::SwapArgs {
         tokenIn: parse_address(&payload.swap.token_in)?,
         tokenOut: parse_address(&payload.swap.token_out)?,
@@ -110,14 +70,8 @@ pub(super) fn build_swap_args(payload: &SubmitSwapPayload) -> AppResult<ISwapWra
         refundTo: parse_address(&payload.swap.refund_to)?,
         p_w: build_proof(&payload.proof)?,
         pi_w: build_pub_inputs(&payload.pub_inputs)?,
-        // Placeholders: the batcher fills the tree proof in at encode.
-        tp_w: batcher::zero_proof(),
-        tpi_w: IMasp::SpendTree {
-            newRoot: FixedBytes::ZERO,
-            startIndex: 0,
-            anchorIndex: 0,
-            digest: U256::ZERO,
-        },
+        tp_w,
+        tpi_w,
         aux_w: build_aux(&payload.aux)?,
         deposit_d: build_deposit_request(&payload.swap.deposit_d)?,
         aux_d: build_one_aux(&payload.swap.aux_d)?,
@@ -128,63 +82,13 @@ pub(super) fn build_swap_args(payload: &SubmitSwapPayload) -> AppResult<ISwapWra
     })
 }
 
-/// The shape checks leg 2's deposit and the refund deposit share: each is
-/// chain-bound on its own, paid for by the wrapper, and built into two leaves
-/// by the flush that materialises it.
-fn check_swap_deposit(
-    d: &DepositRequestDto,
-    name: &'static str,
-    binding: &TransactBinding,
-    wrapper: Address,
-) -> AppResult<()> {
-    // It rides in the same calldata as leg 1, but the wrapper escrows it into
-    // MASP under its own `chainId` field.
-    if d.chain_id != binding.chain_id as u64 {
-        return Err(AppError::BadRequest(format!(
-            "{name}.chainId ({}) must equal the request chainId ({})",
-            d.chain_id, binding.chain_id
-        )));
-    }
-    let payer = parse_address(&d.payer)?;
-    if payer != wrapper {
-        return Err(AppError::BadRequest(format!(
-            "{name}.payer ({payer}) must equal swap_wrapper_address ({wrapper})"
-        )));
-    }
-    if d.public_in == 0 {
-        return Err(AppError::BadRequest(format!("{name}.publicIn must be > 0")));
-    }
-    // The flush that materialises it takes `inner` and `feeInner` as batch
-    // coefficients and reverts `CoefficientOutOfField` on a non-canonical one,
-    // which would leave the escrow unflushable.
-    let field = |suffix: &str| format!("{name}.{suffix}");
-    parse_field(&d.inner, FieldRef::Named(&field("inner")))?;
-    parse_field(&d.fee_inner, FieldRef::Named(&field("feeInner")))?;
-    Ok(())
-}
-
 pub(super) fn validate_swap_shape(
     p: &SubmitSwapPayload,
-    wrapper: Address,
-    binding: TransactBinding,
+    binding: &WrapperBinding,
 ) -> AppResult<ISwapWrapper::SwapArgs> {
-    binding.check(&p.pub_inputs)?;
-    // Leg 1 is structurally a withdraw: shielded notes to a public token held by
-    // the wrapper. The transact SNARK enforces conservation, so this check only
-    // rejects a clearly wrong shape early.
-    if p.pub_inputs.public_out == 0 {
-        return Err(AppError::BadRequest(
-            "swap payload must have publicOut > 0".into(),
-        ));
-    }
-    let pi_recipient = parse_address(&p.pub_inputs.recipient)?;
-    if pi_recipient != wrapper {
-        return Err(AppError::BadRequest(format!(
-            "pi.recipient ({pi_recipient}) must equal swap_wrapper_address ({wrapper})"
-        )));
-    }
-    check_swap_deposit(&p.swap.deposit_d, "deposit_d", &binding, wrapper)?;
-    check_swap_deposit(&p.swap.refund_d, "refund_d", &binding, wrapper)?;
+    binding.check_leg1(&p.pub_inputs)?;
+    binding.check_deposit(&p.swap.deposit_d, "deposit_d")?;
+    binding.check_deposit(&p.swap.refund_d, "refund_d")?;
     // `minOut == 0` accepts any output, which is full sandwich exposure. The
     // wrapper honours it; the relayer does not relay it.
     if parse_u256(&p.swap.min_out)?.is_zero() {
@@ -198,16 +102,7 @@ pub(super) fn validate_swap_shape(
     // `adapter` would cost every operation in it a retry. The parsed args are
     // kept, so the encoder does not parse again.
     let args = build_swap_args(p)?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    if args.deadline < U256::from(now + SWAP_DEADLINE_MARGIN_SECS) {
-        return Err(AppError::BadRequest(format!(
-            "swap.deadline ({}) is less than {SWAP_DEADLINE_MARGIN_SECS}s away; the swap \
-             could land after it and be refunded instead",
-            args.deadline
-        )));
-    }
+    check_deadline(args.deadline, "swap.deadline")?;
     check_intent(&args)?;
     Ok(args)
 }
