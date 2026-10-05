@@ -69,23 +69,23 @@ fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
         let epk = bytes32(&v.epk_le_hex);
         let wire = hex::decode(&v.wire_ciphertext_hex).expect("hex");
 
-        let body = strip_clue_prefix(&wire).expect("wire carries a clue prefix");
+        let (_, body) = split_clue_prefix(&wire).expect("wire carries a clue prefix");
         let plaintext = try_decrypt(&ivk, &epk, body).unwrap_or_else(|| {
             panic!("vector {i}: the recipient's own ivk failed to decrypt the note")
         });
         assert_eq!(hex::encode(&plaintext), v.plaintext_hex, "vector {i}");
 
-        let note = NotePlaintext::decode(&plaintext).expect("80-byte plaintext");
+        let note = NotePlaintext::decode(&plaintext).expect("96-byte plaintext");
         assert_eq!(note.asset_id.to_string(), v.asset_id, "vector {i}");
         assert_eq!(note.value.to_string(), v.value, "vector {i}");
         assert_eq!(note.rho, fq(&v.rho_dec), "vector {i}");
-        assert_eq!(note.rcm, fq(&v.rcm_dec), "vector {i}");
+        let rcm = expand_seed(&note.rseed, &note.rho).rcm;
+        assert_eq!(rcm, fq(&v.rcm_dec), "vector {i}");
 
-        // `ivk` alone recovers the owner key of its default address, letting a
-        // party without a spending key verify a payment to that address.
-        let d = default_diversifier(&ivk);
-        assert_eq!(d, fq(&v.d_dec), "vector {i}");
-        let pk = derive_pk(&ivk, &d).expect("poseidon");
+        // `ivk` and the plaintext's `d` recover the owner key of the address,
+        // letting a party without a spending key verify a payment to it.
+        assert_eq!(note.d, fq(&v.d_dec), "vector {i}");
+        let pk = derive_pk(&ivk, &note.d).expect("poseidon");
         assert_eq!(pk, fq(&v.pk_dec), "vector {i}");
 
         // The circuit pins output rho, so it is recomputable from public inputs
@@ -93,12 +93,11 @@ fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
         let rho = derive_rho(&fq(&v.nf0_dec), v.out_index).expect("poseidon");
         assert_eq!(rho, note.rho, "vector {i}");
 
-        let cm =
-            commitment(note.asset_id, note.value, &pk, &note.rho, &note.rcm).expect("poseidon");
+        let cm = commitment(note.asset_id, note.value, &pk, &note.rho, &rcm).expect("poseidon");
         assert_eq!(cm, fq(&v.cm_dec), "vector {i}");
 
         // The deposit path: `inner` is published and the leaf built from it.
-        let inner = inner(&pk, &note.rho, &note.rcm).expect("poseidon");
+        let inner = inner(&pk, &note.rho, &rcm).expect("poseidon");
         assert_eq!(inner, fq(&v.inner_dec), "vector {i}");
         let leaf = commitment_from_inner(note.asset_id, note.value, &inner).expect("poseidon");
         assert_eq!(leaf, cm, "vector {i}");
@@ -113,7 +112,7 @@ fn a_foreign_ivk_yields_nothing() {
     let mine = &vs[0];
     let theirs = &vs[1];
     let wire = hex::decode(&mine.wire_ciphertext_hex).expect("hex");
-    let body = strip_clue_prefix(&wire).expect("prefix");
+    let (_, body) = split_clue_prefix(&wire).expect("prefix");
 
     assert!(
         try_decrypt(
@@ -134,7 +133,7 @@ fn a_tampered_ciphertext_fails_the_tag() {
     let last = wire.len() - 1;
     wire[last] ^= 0x01;
 
-    let body = strip_clue_prefix(&wire).expect("prefix");
+    let (_, body) = split_clue_prefix(&wire).expect("prefix");
     assert!(try_decrypt(&ivk_be(&v.ivk_le_hex), &bytes32(&v.epk_le_hex), body).is_none());
 }
 
@@ -166,12 +165,12 @@ fn a_crafted_epk_has_its_torsion_term_annihilated() {
     let body = seal(
         &epk_packed,
         &shared,
-        b"an 80-byte plaintext is not needed here",
+        b"a 96-byte plaintext is not needed here",
     );
 
     assert_eq!(
         try_decrypt(&ivk_be, &epk_packed, &body).as_deref(),
-        Some(&b"an 80-byte plaintext is not needed here"[..]),
+        Some(&b"a 96-byte plaintext is not needed here"[..]),
     );
 }
 
@@ -253,11 +252,20 @@ fn a_plaintext_of_the_wrong_length_is_refused() {
     assert!(NotePlaintext::decode(&[0u8; NOTE_PLAINTEXT_BYTES]).is_some());
 }
 
+/// `rho` feeds the seed expansion byte for byte, so `rho + r` must not pass
+/// for `rho`.
+#[test]
+fn a_plaintext_with_a_non_canonical_rho_is_refused() {
+    let mut buf = [0u8; NOTE_PLAINTEXT_BYTES];
+    buf[16..48].fill(0xff);
+    assert!(NotePlaintext::decode(&buf).is_none());
+}
+
 #[test]
 fn a_ciphertext_shorter_than_the_clue_prefix_has_no_body() {
-    assert!(strip_clue_prefix(&[]).is_none());
-    assert!(strip_clue_prefix(&[0x00]).is_none());
-    assert_eq!(strip_clue_prefix(&[0x00, 0x2a]), Some(&[][..]));
+    assert!(split_clue_prefix(&[]).is_none());
+    assert!(split_clue_prefix(&[0x00]).is_none());
+    assert_eq!(split_clue_prefix(&[0x00, 0x2a]), Some((0x2a, &[][..])));
 }
 
 /// The order-2 point `(0, -1)`. On the curve, outside the prime-order subgroup.

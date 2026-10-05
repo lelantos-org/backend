@@ -15,6 +15,8 @@ pub struct MatchedNote {
     pub leaf_index: i64,
     pub eph_pub_x: BigDecimal,
     pub eph_pub_y: BigDecimal,
+    pub clue_rx: BigDecimal,
+    pub clue_ry: BigDecimal,
 }
 
 /// Matches for `subscription_id` on `chain_id` only.
@@ -47,6 +49,8 @@ pub async fn list_for_subscription(
             notes::leaf_index,
             notes::eph_pub_x,
             notes::eph_pub_y,
+            notes::clue_rx,
+            notes::clue_ry,
         ))
         .load::<MatchedNote>(&mut conn)
         .await

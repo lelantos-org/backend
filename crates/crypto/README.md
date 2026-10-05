@@ -19,11 +19,11 @@ a new dependency edge has to be caught in review.
 
 | Module | Contents |
 |--------|----------|
-| `clue` | FMD scheme `lelantos.fmd.v1`: point coords, `pack`/`unpack`, `test_clue`, `test_clue_batch` |
+| `clue` | FMD scheme `lelantos.fmd.v1`: point coords, `pack`/`unpack`, `test_clue`, `test_clue_batch`, `detection_key`, `expected_clue` |
 | `filter` | Detection-key parsing and the `fmd-indexer`-facing clue tests |
 | `poseidon` | circomlib-compatible Poseidon, arities 1–12 (state width 2–13), the sparse variant, and `coeff_digest`, the circuits' coefficient digest |
 | `babyjubjub` | Scalar mul, public key from secret key, byte conversions |
-| `note` | Note plaintext codec, `derive_pk`/`derive_rho`/`commitment`, and trial decryption |
+| `note` | Note plaintext codec, diversified address keys, seed expansion, `derive_rho`/`commitment`, and trial decryption |
 | `tree` | Quaternary sparse Merkle tree with Poseidon-arity-5 nodes |
 
 Field elements cross this crate's boundary as `tree::Field`: big-endian 32
@@ -59,14 +59,20 @@ committed to. Building notes is the wallet's job and lives in the SDK.
 use crypto::note;
 
 // `body` is the wire ciphertext minus its two-byte FMD clue prefix.
-let body = note::strip_clue_prefix(&wire)?;
-let plaintext = note::try_decrypt(&ivk, &epk_packed, body)?;   // None ⇒ not ours
+let (clue_bits, body) = note::split_clue_prefix(&wire)?;
+let plaintext = note::try_decrypt(&ivk, &pack(&epk), body)?;   // None ⇒ not ours
 let plain = note::NotePlaintext::decode(&plaintext)?;
 
+// `rcm`, the ECDH ephemeral and the clue blinder all expand from the seed.
+let seed = note::expand_seed(&plain.rseed, &plain.rho);
+let keys = note::address_keys(&ivk, &plain.d)?;
+
 // The check that makes `plain.value` worth acting on.
-let pk = note::derive_pk(&ivk, &note::default_diversifier(&ivk))?;
-let cm = note::commitment(plain.asset_id, plain.value, &pk, &plain.rho, &plain.rcm)?;
+let cm = note::commitment(plain.asset_id, plain.value, &keys.pk, &plain.rho, &seed.rcm)?;
 assert_eq!(cm, out_cm_from_the_proof);
+
+// The check that makes it a note the wallet keeps.
+assert_eq!(seed.published(&keys), note::Published { epk, clue_r, clue_bits });
 ```
 
 A decrypted plaintext on its own proves nothing — a ciphertext says whatever its
@@ -75,6 +81,13 @@ to the `out_cm` a verified proof committed to is what rules out a note encrypted
 to you but owned by someone else, and a plaintext whose value is inflated.
 `derive_rho` recomputes the `rho` the circuit pins to `(nullifier[0], index)`,
 which additionally stops a note being replayed into a different transaction.
+
+The plaintext is `asset(8) ‖ value(8) ‖ rho(32) ‖ rseed(32) ‖ d(16)`. `d` is the
+diversifier of the address the note is for: `ivk` derives that address's `pk`,
+base point `g_d`, `pk_d` and `ck_d` from it (`address_keys`). The wallet's
+scanner (`sdk/src/sync/scan.ts`) drops a note whose published `epk` or clue is
+not what `rseed` yields on `g_d`, so `ExpandedSeed::published` rebuilds both for
+a verifier that must agree with it.
 
 `try_decrypt` returns `None` for every failure — a foreign note, an `epk` that
 will not decompress, one outside the prime-order subgroup, a bad AEAD tag — and
@@ -118,6 +131,9 @@ serves `/v1/tree-state` from it; `relayer` builds `tree_update_batch` witnesses
 `tests/fmd_vectors.rs` replays [`tests/vectors/fmd.json`](../../tests/vectors/fmd.json)
 — shared with the SDK, which is what pins cross-language agreement rather than
 merely testing this implementation against itself.
+`tests/diversified_vectors.rs` does the same against
+[`tests/vectors/diversified.json`](../../tests/vectors/diversified.json) for
+address keys, detection scalars and seed-derived outputs.
 
 `src/note/tests.rs` does the same for notes, against
 `tests/vectors/note-parity.json` — emitted by the SDK's own encrypt path, so it

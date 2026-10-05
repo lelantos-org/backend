@@ -17,4 +17,7 @@ pub struct NoteOut {
     ///
     /// The receiver feeds these bytes to `decryptNote` as `epk` unchanged.
     pub eph_pub_packed_hex: String,
+    /// The FMD clue point `R`, packed like `eph_pub_packed_hex`. The receiver
+    /// compares it with the clue it recomputes from the opened note.
+    pub clue_r_packed_hex: String,
 }

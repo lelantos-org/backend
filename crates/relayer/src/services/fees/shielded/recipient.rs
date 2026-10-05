@@ -9,7 +9,7 @@
 //! # What makes the amount trustworthy
 //!
 //! A ciphertext asserts whatever its author chose, so three checks are needed to
-//! make it actionable:
+//! make it actionable, and a fourth to make it collectable:
 //!
 //! 1. The proof is verified first. `verify_transact_proof` runs before this, so
 //!    `out_cm` and `nullifier[0]` are values a valid SNARK committed to rather
@@ -20,8 +20,14 @@
 //!    included, can swap it and keep the proof valid.
 //! 3. The commitment is rebuilt. `cm = Poseidon(TAG_CM, asset·2^64 + value,
 //!    Poseidon(TAG_INNER, pk, rho, rcm))` is recomputed from the decrypted
-//!    plaintext against the relayer's own `pk` and must equal `out_cm[j]`. A note encrypted to us but owned by
-//!    another party fails this, as does one whose plaintext inflates the value.
+//!    plaintext against the relayer's own `pk`, with `rcm` expanded from the
+//!    plaintext's `rseed`, and must equal `out_cm[j]`. A note encrypted to us
+//!    but owned by another party fails this, as does one whose plaintext
+//!    inflates the value.
+//! 4. The ephemeral key and clue are rebuilt. The plaintext's `rseed` also
+//!    fixes `epk` and the FMD clue, and the relayer's wallet drops a note whose
+//!    published ones differ (`sdk/src/sync/scan.ts`). A note that passed 1–3
+//!    alone could be one the wallet never stores.
 //!
 //! Only `ivk` is required, so the spending key that could move collected fees
 //! never exists on this host.
@@ -29,8 +35,8 @@
 use crate::adapters::parse::{FieldRef, parse_field, parse_hex_bytes};
 use crate::domain::dto::{OutputAuxDto, PubInputsDto, TRANSACT_OUT};
 use crate::domain::error::{AppError, AppResult};
-use crypto::clue::{fq_from_be_bytes, pack, point_from_xy};
-use crypto::note::{self, NotePlaintext};
+use crypto::clue::{CircomPoint, fq_from_be_bytes, pack, point_from_xy};
+use crypto::note::{self, AddressKeys, NotePlaintext, Published};
 use crypto::tree::Field;
 use std::fmt;
 
@@ -46,7 +52,17 @@ pub struct Payment {
     pub circuit_total: u128,
 }
 
-/// Recognises notes addressed to one shielded identity.
+/// A note [`FeeRecipient::open`] accepted. Not yet matched to a leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenedNote {
+    pub asset_id: u64,
+    pub value: u64,
+    pub rho: Field,
+    /// Commitment blinder, expanded from the plaintext's `rseed`.
+    pub rcm: Field,
+}
+
+/// Recognises notes addressed to one shielded address.
 ///
 /// Pure: no network, database or clock. Everything that makes a decrypted value
 /// trustworthy lives here, so it can be tested against real wallet-produced
@@ -54,9 +70,9 @@ pub struct Payment {
 pub struct FeeRecipient {
     /// Big-endian incoming viewing key. Decrypt-only.
     ivk: Field,
-    /// `Poseidon(TAG_PK, ivk, d)` under the key's default diversifier, derived
-    /// once at boot.
-    pk: Field,
+    /// What `ivk` derives for the published address, once at boot. A note
+    /// naming another address of `ivk` is not credited.
+    keys: AddressKeys,
     /// The published address, echoed by `/chains`. Never re-derived from `ivk`:
     /// publishing the operator's string verbatim makes a mismatch between the two
     /// a boot failure.
@@ -86,40 +102,58 @@ impl FeeRecipient {
     /// refused with nothing to point at, so boot fails instead.
     pub fn new(address: String, ivk: Field) -> AppResult<Self> {
         let decoded = crate::domain::shielded_address::decode(&address)?;
-        let pk = note::derive_pk(&ivk, &note::default_diversifier(&ivk))
-            .map_err(|e| AppError::Internal(format!("shielded fee: derive pk: {e}")))?;
-        if pk != decoded.pk {
-            return Err(AppError::Internal(format!(
-                "shielded_fee_ivk does not belong to shielded_fee_address (the address commits \
-                 to pk 0x{}, the key derives 0x{})",
-                hex::encode(decoded.pk),
-                hex::encode(pk)
-            )));
+        let keys = note::address_keys(&ivk, &decoded.d)
+            .map_err(|e| AppError::Internal(format!("shielded fee: derive address keys: {e}")))?;
+        if !decoded.is_address_of(&keys) {
+            return Err(AppError::Internal(
+                "shielded_fee_ivk does not belong to shielded_fee_address (the key derives \
+                 another pk, pk_d or ck_d for the address's diversifier)"
+                    .to_string(),
+            ));
         }
-        Ok(Self { ivk, pk, address })
+        Ok(Self { ivk, keys, address })
     }
 
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    /// Decrypt-only viewing key, for callers that trial-decrypt a payload this
-    /// module does not shape: the deposit fee leaf arrives from the event ledger
-    /// rather than from a `PubInputsDto`.
-    pub fn ivk(&self) -> &Field {
-        &self.ivk
-    }
-
     /// The `pk` of this relayer's address. Rebuilding a commitment against this
     /// separates a note encrypted to this relayer from one it owns.
     pub fn pk(&self) -> &Field {
-        &self.pk
+        &self.keys.pk
     }
 
-    /// Pack an ephemeral public key given as two decimal-string coordinates,
-    /// the form the indexer stores in `deposit_escrowed_events.fee_aux`.
-    pub fn pack_epk(&self, x: &str, y: &str) -> AppResult<[u8; 32]> {
-        pack_point(x, y, "fee_aux.ephPub", 0)
+    /// Open a published output as this relayer's wallet would.
+    ///
+    /// `Some` when the ciphertext decrypts under `ivk`, its plaintext names this
+    /// address, and `epk`, `clue_r` and the clue bits ahead of the ciphertext
+    /// are the ones the plaintext's seed yields. The caller still has to match
+    /// the note to the leaf the chain holds.
+    ///
+    /// `None` covers a foreign note, a pad and a malformed one alike.
+    pub fn open(&self, epk: CircomPoint, clue_r: CircomPoint, wire: &[u8]) -> Option<OpenedNote> {
+        let (clue_bits, body) = note::split_clue_prefix(wire)?;
+        let plaintext = note::try_decrypt(&self.ivk, &pack(&epk), body)?;
+        let plain = NotePlaintext::decode(&plaintext)?;
+        if plain.d != self.keys.d {
+            return None;
+        }
+        let seed = note::expand_seed(&plain.rseed, &plain.rho);
+        let published = Published {
+            epk,
+            clue_r,
+            clue_bits,
+        };
+        if seed.published(&self.keys) != published {
+            return None;
+        }
+        Some(OpenedNote {
+            asset_id: plain.asset_id,
+            value: plain.value,
+            rho: plain.rho,
+            rcm: seed.rcm,
+        })
     }
 
     /// Everything in this submission that was paid to this recipient.
@@ -174,7 +208,7 @@ impl FeeRecipient {
         Ok(payment)
     }
 
-    /// One slot: trial-decrypt, then prove the plaintext is the one the SNARK
+    /// One slot: open it, then prove the plaintext is the one the SNARK
     /// committed to.
     fn decrypt_slot(
         &self,
@@ -182,16 +216,11 @@ impl FeeRecipient {
         nf0: &Field,
         out_cm: &str,
         index: usize,
-    ) -> AppResult<Option<NotePlaintext>> {
+    ) -> AppResult<Option<OpenedNote>> {
         let wire = parse_hex_bytes(&slot.ciphertext, "aux ciphertext")?;
-        let Some(body) = note::strip_clue_prefix(&wire) else {
-            return Ok(None);
-        };
-        let epk = pack_point(&slot.eph_pub.x, &slot.eph_pub.y, "aux.ephPub", index)?;
-        let Some(plaintext) = note::try_decrypt(&self.ivk, &epk, body) else {
-            return Ok(None);
-        };
-        let Some(plain) = NotePlaintext::decode(&plaintext) else {
+        let epk = point_of(&slot.eph_pub.x, &slot.eph_pub.y, "aux.ephPub", index)?;
+        let clue_r = point_of(&slot.clue_r.x, &slot.clue_r.y, "aux.clueR", index)?;
+        let Some(note) = self.open(epk, clue_r, &wire) else {
             return Ok(None);
         };
 
@@ -200,39 +229,30 @@ impl FeeRecipient {
         // commitment below binds the value.
         let rho = note::derive_rho(nf0, index as u64)
             .map_err(|e| AppError::Internal(format!("derive rho: {e}")))?;
-        if rho != plain.rho {
+        if rho != note.rho {
             return Ok(None);
         }
 
         // Rebuilt against this relayer's own `pk`, so a note encrypted to us but
         // owned by another party fails, and rebuilt from the plaintext's own asset
         // and value, so an inflated value fails too.
-        let cm = note::commitment(
-            plain.asset_id,
-            plain.value,
-            &self.pk,
-            &plain.rho,
-            &plain.rcm,
-        )
-        .map_err(|e| AppError::Internal(format!("note commitment: {e}")))?;
+        let cm = note::commitment(note.asset_id, note.value, self.pk(), &note.rho, &note.rcm)
+            .map_err(|e| AppError::Internal(format!("note commitment: {e}")))?;
         // Parsed only now: several slots are examined per submission, and all but
         // the paying one have already been discarded.
         if cm != field_of(out_cm, FieldRef::Index("pubInputs.outCm", index))? {
             return Ok(None);
         }
-        Ok(Some(plain))
+        Ok(Some(note))
     }
 }
 
-/// Compress an `(x, y)` pair back to the 32 wire bytes the note KDF hashes.
-///
-/// The payload carries coordinates because the contract needs them, while the KDF
-/// was keyed over the packed form the wallet sent. Packing is canonical, so this
-/// recovers exactly those bytes. `array` and `index` name the point for an error.
-fn pack_point(x: &str, y: &str, array: &str, index: usize) -> AppResult<[u8; 32]> {
+/// A point the payload carries as two decimal-string coordinates. `array` and
+/// `index` name it for an error.
+pub(super) fn point_of(x: &str, y: &str, array: &str, index: usize) -> AppResult<CircomPoint> {
     let x = fq_from_be_bytes(&field_of(x, FieldRef::Coord(array, index, "x"))?);
     let y = fq_from_be_bytes(&field_of(y, FieldRef::Coord(array, index, "y"))?);
-    Ok(pack(&point_from_xy(x, y)))
+    Ok(point_from_xy(x, y))
 }
 
 /// A payload field element as big-endian bytes, rejecting anything non-canonical,
@@ -378,6 +398,60 @@ mod tests {
     fn refuses_a_note_encrypted_to_us_but_owned_by_someone_else() {
         let f = fixture();
         assert!(Submission::new(&f).with(&f.foreign_owner).pays_nothing(&f));
+    }
+
+    /// Whether `slot` decrypts under the fixture's key and opens its own
+    /// commitment under the address its plaintext names. Read independently of
+    /// `open`, to show a refusal below is not a decryption or commitment failure.
+    fn opens_its_commitment(f: &Fixture, slot: &Slot) -> bool {
+        let Some(plain) = f.plaintext_of(&slot.aux) else {
+            return false;
+        };
+        let pk = note::derive_pk(&f.ivk(), &plain.d).expect("pk");
+        let rcm = note::expand_seed(&plain.rseed, &plain.rho).rcm;
+        let cm = note::commitment(plain.asset_id, plain.value, &pk, &plain.rho, &rcm).expect("cm");
+        cm == field_of(&slot.cm, FieldRef::Named("cm")).expect("cm parses")
+    }
+
+    /// The fee is owed at the published address. The key opens a note to any of
+    /// its addresses; one naming another diversifier is not credited.
+    #[test]
+    fn refuses_a_note_to_another_address_of_the_same_key() {
+        let f = fixture();
+        assert!(opens_its_commitment(&f, &f.other_address));
+        assert!(Submission::new(&f).with(&f.other_address).pays_nothing(&f));
+    }
+
+    /// The wallet drops a note whose `epk` is not `esk·g_d` for the seed's
+    /// `esk`, so crediting one would be relaying for nothing.
+    #[test]
+    fn refuses_a_note_whose_ephemeral_key_is_not_its_seeds() {
+        let f = fixture();
+        assert!(opens_its_commitment(&f, &f.wrong_ephemeral));
+        assert!(
+            Submission::new(&f)
+                .with(&f.wrong_ephemeral)
+                .pays_nothing(&f)
+        );
+    }
+
+    #[test]
+    fn refuses_a_note_whose_clue_point_is_not_its_seeds() {
+        let f = fixture();
+        let mut sub = Submission::new(&f).with(&f.fee);
+        sub.aux[f.fee.index].clue_r = f.fee_second.aux.clue_r.clone();
+        assert!(sub.pays_nothing(&f));
+    }
+
+    /// The clue bits are the two bytes ahead of the AEAD body, outside its tag.
+    #[test]
+    fn refuses_a_note_whose_clue_bits_are_not_its_seeds() {
+        let f = fixture();
+        let mut sub = Submission::new(&f).with(&f.fee);
+        let ct = &mut sub.aux[f.fee.index].ciphertext;
+        let flipped = if &ct[4..6] == "00" { "01" } else { "00" };
+        ct.replace_range(4..6, flipped);
+        assert!(sub.pays_nothing(&f));
     }
 
     #[test]

@@ -7,36 +7,52 @@
 //!
 //! ```text
 //! HRP     "lelantos"
-//! payload pk_d (32 B, Baby-Jubjub packed  — ECDH target)
+//! payload d    (16 B, little-endian       — diversifier, selects the base g_d)
+//!      || pk_d (32 B, Baby-Jubjub packed  — ECDH target)
 //!      || pk   (32 B, little-endian field — note-commitment binding)
-//!      || ck   (32 B, Baby-Jubjub packed  — FMD clue key)
+//!      || ck_d (32 B, Baby-Jubjub packed  — FMD clue key)
 //! ```
 //!
-//! The HRP carries the format version, so a future layout change fails to
-//! decode rather than being misread.
+//! 112 bytes. A payload of any other length fails to decode.
 
 use crate::domain::error::{AppError, AppResult};
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32m, Hrp};
-use crypto::clue::unpack_subgroup;
+use crypto::clue::{pack, unpack_subgroup};
+use crypto::note::{AddressKeys, DIVERSIFIER_BYTES};
 use crypto::tree::Field;
 
 pub const ADDRESS_HRP: &str = "lelantos";
 const FIELD_BYTES: usize = 32;
-const PAYLOAD_LEN: usize = 3 * FIELD_BYTES;
+const PK_D_OFFSET: usize = DIVERSIFIER_BYTES;
+const PK_OFFSET: usize = PK_D_OFFSET + FIELD_BYTES;
+const CK_D_OFFSET: usize = PK_OFFSET + FIELD_BYTES;
+const PAYLOAD_LEN: usize = CK_D_OFFSET + FIELD_BYTES;
 
 /// The public halves of a shielded identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShieldedAddress {
+    /// Diversifier as a field element below `2^128`, big-endian.
+    pub d: Field,
     /// ECDH target, packed. Kept in wire form: it is only ever compared
     /// against a freshly packed point, never used as a field element.
     pub pk_d_packed: [u8; FIELD_BYTES],
     /// Note-commitment binding key, big-endian — this crate's field
     /// convention, not the address payload's little-endian one.
     pub pk: Field,
-    /// FMD clue key, packed. Unused by the fee path, but decoded and validated so
-    /// a malformed address is caught at boot rather than at first use.
-    pub ck_packed: [u8; FIELD_BYTES],
+    /// FMD clue key, packed.
+    pub ck_d_packed: [u8; FIELD_BYTES],
+}
+
+impl ShieldedAddress {
+    /// Whether `keys`, derived from a viewing key for some diversifier, are
+    /// this address's. Mirrors `ownsAddress` in `sdk/src/keys/diversified.ts`.
+    pub fn is_address_of(&self, keys: &AddressKeys) -> bool {
+        self.d == keys.d
+            && self.pk == keys.pk
+            && self.pk_d_packed == pack(&keys.pk_d)
+            && self.ck_d_packed == pack(&keys.ck_d)
+    }
 }
 
 /// Decode and fully validate an address.
@@ -61,25 +77,28 @@ pub fn decode(addr: &str) -> AppResult<ShieldedAddress> {
         )));
     }
 
-    let pk_d_packed = slot(&payload, 0);
-    let ck_packed = slot(&payload, 2);
+    let pk_d_packed = slot(&payload, PK_D_OFFSET);
+    let ck_d_packed = slot(&payload, CK_D_OFFSET);
     check_point(&pk_d_packed, "pk_d")?;
-    check_point(&ck_packed, "ck")?;
+    check_point(&ck_d_packed, "ck_d")?;
 
-    // The payload spells `pk` little-endian; everything downstream of here is
-    // big-endian.
-    let mut pk = slot(&payload, 1);
+    // The payload spells `d` and `pk` little-endian; everything downstream of
+    // here is big-endian.
+    let mut d = [0u8; FIELD_BYTES];
+    d[..DIVERSIFIER_BYTES].copy_from_slice(&payload[..DIVERSIFIER_BYTES]);
+    d.reverse();
+    let mut pk = slot(&payload, PK_OFFSET);
     pk.reverse();
 
     Ok(ShieldedAddress {
+        d,
         pk_d_packed,
         pk,
-        ck_packed,
+        ck_d_packed,
     })
 }
 
-fn slot(payload: &[u8], index: usize) -> [u8; FIELD_BYTES] {
-    let start = index * FIELD_BYTES;
+fn slot(payload: &[u8], start: usize) -> [u8; FIELD_BYTES] {
     payload[start..start + FIELD_BYTES]
         .try_into()
         .expect("payload length checked above")
@@ -120,6 +139,15 @@ mod tests {
             // `crates/crypto/tests/vectors/note-parity.json`.
             "14126bf4ddca945ee6a4345054e0d4c60a99e2b82daeefbb71e769d0e6adca92"
         );
+    }
+
+    /// The pre-diversifier layout, `pk_d || pk || ck`: 96 bytes.
+    #[test]
+    fn rejects_a_payload_without_a_diversifier() {
+        let hrp = Hrp::parse_unchecked(ADDRESS_HRP);
+        let short = bech32::encode::<Bech32m>(hrp, &[1u8; 96]).expect("encodes");
+        let err = decode(&short).expect_err("96 bytes is not an address");
+        assert!(err.to_string().contains("bad payload length 96"), "{err}");
     }
 
     #[test]

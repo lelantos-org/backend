@@ -67,6 +67,7 @@ pub async fn list(st: &AppState, req: ListRequest) -> AppResult<Arc<MatchesPage>
                         commitment_hex: hex::encode(&m.cm),
                         ciphertext_hex: hex::encode(&m.ciphertext),
                         eph_pub_packed_hex: pack_point_hex(&m.eph_pub_x, &m.eph_pub_y)?,
+                        clue_r_packed_hex: pack_point_hex(&m.clue_rx, &m.clue_ry)?,
                     })
                 })
                 .collect::<AppResult<Vec<_>>>()?;

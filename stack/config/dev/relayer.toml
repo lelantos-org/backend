@@ -53,7 +53,7 @@ flush_max_attempts = 5
 # spend and swap — a wallet that does not build one is refused with 402 — and
 # it also makes deposits pay: the relayer trial-decrypts each deposit's fee
 # leaf and flushes only what pays it. Point a client at this only if it builds
-# fee notes (SDK >= 0.24).
+# fee notes (SDK >= 0.45).
 #
 # The address and the decrypt-only viewing key are injected by compose as
 # RELAYER_CHAIN_31337_SHIELDED_FEE_{ADDRESS,IVK}; both are dev-only test

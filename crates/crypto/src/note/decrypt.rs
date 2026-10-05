@@ -9,11 +9,11 @@
 //! ct    = ChaCha20-Poly1305(key, nonce, plaintext)
 //! ```
 //!
-//! The sender picks `esk` and sets `epk = esk·B8`, `shared = esk·pk_d`. The
-//! holder of `ivk` recovers the same `shared` as `ivk·epk`, since
-//! `pk_d = ivk·B8`. `epk` is fresh per note, so the key is single-use and the
-//! nonce cannot repeat; deriving the nonce from `epk` is defence in depth against
-//! a path that reuses a key.
+//! The sender sets `epk = esk·g_d`, `shared = esk·pk_d`, on the base `g_d` of
+//! the recipient's address. The holder of `ivk` recovers the same `shared` as
+//! `ivk·epk`, since `pk_d = ivk·g_d`, without knowing `g_d`. `epk` is fresh per
+//! note, so the key is single-use and the nonce cannot repeat; deriving the
+//! nonce from `epk` is defence in depth against a path that reuses a key.
 
 use crate::clue::{pack, scalar_mul, unpack};
 use crate::tree::Field;

@@ -9,37 +9,39 @@
 //! `sdk/src/crypto/derive.ts`:
 //!
 //! ```text
-//! nsk -> ivk = Poseidon(TAG_IVK, nsk) -> pk   = Poseidon(TAG_PK, ivk, d)
-//!                                     -> pk_d = (ivk mod q)·B8
+//! nsk -> ivk = Poseidon(TAG_IVK, nsk) -> pk      = Poseidon(TAG_PK, ivk, d)
+//!                                     -> pk_d    = (ivk mod q)·g_d
+//!                                     -> dk_root = Poseidon(TAG_DK, ivk) mod q
+//!                                     -> ck_d    = dk_root·g_d
 //!     -> nk  = Poseidon(TAG_NK, nsk)
 //! ```
 //!
-//! `d` is the diversifier of the address the note is held under. An account's
-//! default address uses [`default_diversifier`], a function of `ivk`.
+//! `d` is the 16-byte diversifier of the address the note is held under and
+//! `g_d` its base point, a function of `d` alone ([`diversified_base`]). An
+//! address publishes `(d, pk_d, pk, ck_d)`; see [`address_keys`].
 //!
-//! `ivk` is all this module requires. It recovers `pk`, and with it the ability
-//! to recognise a note, but not `nsk`, so it confers no ability to spend. That
-//! lets a service verify payments to an address whose spend authority is held
-//! elsewhere.
+//! `ivk` is all this module requires. It recovers every key of an address, and
+//! with them the ability to recognise a note, but not `nsk`, so it confers no
+//! ability to spend. That lets a service verify payments to an address whose
+//! spend authority is held elsewhere.
 //!
 //! Field elements cross this module's boundary as [`Field`]: big-endian 32 bytes,
 //! matching `tree`. The wire format's little-endian spellings do not escape.
 
 mod decrypt;
+mod diversified;
+mod seed;
 #[cfg(test)]
 mod tests;
 
 pub use decrypt::try_decrypt;
+pub use diversified::{AddressKeys, address_keys, diversified_base};
+pub use seed::{ExpandedSeed, Published, expand_seed};
 
 use crate::poseidon::{self, PoseidonError};
 use crate::tree::{Field, be_to_fq, fq_to_be};
-use aes::Aes128;
-use aes::cipher::{BlockEncrypt, KeyInit};
 use ark_ed_on_bn254::Fq;
-use ark_ff::PrimeField;
-use blake2::Blake2b;
-use blake2::digest::Digest;
-use blake2::digest::consts::U16;
+use ark_ff::{BigInteger, PrimeField};
 
 /// Domain-separation tags mirroring `circuits/src/lib/tags.circom`. The values
 /// are consensus; changing one invalidates every issued proof.
@@ -48,17 +50,29 @@ pub const TAG_PK: u64 = 3;
 pub const TAG_RHO: u64 = 11;
 pub const TAG_INNER: u64 = 14;
 
-/// Mirrors `DVK_DOMAIN` in `sdk/src/keys/diversifier.ts`.
-const DVK_DOMAIN: &[u8] = b"lelantos.addr.dvk.v1";
+/// Off-circuit tags, mirroring `sdk/src/crypto/tags.ts`.
+pub const TAG_DK: u64 = 6;
+pub const TAG_GD: u64 = 16;
 
 /// `asset_id` and `value` are packed into one field element as
 /// `asset_id · 2^64 + value`, so the circuit range-checks both to 64 bits.
 const POW_2_64: u128 = 1 << 64;
 
-/// Plaintext length for `asset(8) || value(8) || rho(32) || rcm(32)`, every
-/// field little-endian. Mirrors `NOTE_PLAINTEXT_BYTES` in
+/// Byte width of a diversifier.
+pub const DIVERSIFIER_BYTES: usize = 16;
+
+/// Byte width of `rseed`.
+pub const SEED_BYTES: usize = 32;
+
+const VALUE_OFFSET: usize = 8;
+const RHO_OFFSET: usize = VALUE_OFFSET + 8;
+const RSEED_OFFSET: usize = RHO_OFFSET + 32;
+const D_OFFSET: usize = RSEED_OFFSET + SEED_BYTES;
+
+/// Plaintext length for `asset(8) || value(8) || rho(32) || rseed(32) || d(16)`,
+/// every integer little-endian: 96. Mirrors `NOTE_PLAINTEXT_BYTES` in
 /// `sdk/src/notes/codec.ts`.
-pub const NOTE_PLAINTEXT_BYTES: usize = 80;
+pub const NOTE_PLAINTEXT_BYTES: usize = D_OFFSET + DIVERSIFIER_BYTES;
 
 /// The wire ciphertext carries the FMD clue bits ahead of the AEAD body as two
 /// big-endian bytes. `PubInputs.sol` reads the same two bytes to recompute the
@@ -68,39 +82,45 @@ pub const CLUE_BITS_PREFIX_BYTES: usize = 2;
 
 /// What the recipient learns from a note they can decrypt.
 ///
-/// `pk` is absent because the recipient derives it from their own `ivk`.
+/// `pk` is absent because the recipient derives it from their own `ivk` and `d`.
+/// `rcm` is absent because it is expanded from `rseed`; see [`expand_seed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotePlaintext {
     pub asset_id: u64,
     pub value: u64,
     pub rho: Field,
-    pub rcm: Field,
+    /// Seed of the output's randomness.
+    pub rseed: [u8; SEED_BYTES],
+    /// Diversifier of the address the note is for, below `2^128`.
+    pub d: Field,
 }
 
 impl NotePlaintext {
-    /// Parse the fixed 80-byte layout. `None` on any other length.
+    /// Parse the fixed 96-byte layout. `None` on any other length, or when
+    /// `rho` is not a canonical field element: the seed expansion hashes its
+    /// bytes, and the wallet refuses such a note.
     ///
-    /// A non-canonical field element is reduced rather than rejected. This parse
-    /// establishes no trust: the caller must rebuild the commitment and match it
-    /// against the one the proof carried, which a reduced element fails.
+    /// This parse establishes no trust: the caller must rebuild the commitment
+    /// and match it against the one the proof carried.
     pub fn decode(buf: &[u8]) -> Option<Self> {
         if buf.len() != NOTE_PLAINTEXT_BYTES {
             return None;
         }
-        let le_field = |range: std::ops::Range<usize>| le_to_field(&buf[range]);
         Some(Self {
-            asset_id: u64::from_le_bytes(buf[0..8].try_into().ok()?),
-            value: u64::from_le_bytes(buf[8..16].try_into().ok()?),
-            rho: le_field(16..48),
-            rcm: le_field(48..80),
+            asset_id: u64::from_le_bytes(buf[..VALUE_OFFSET].try_into().ok()?),
+            value: u64::from_le_bytes(buf[VALUE_OFFSET..RHO_OFFSET].try_into().ok()?),
+            rho: le_to_canonical_field(&buf[RHO_OFFSET..RSEED_OFFSET])?,
+            rseed: buf[RSEED_OFFSET..D_OFFSET].try_into().ok()?,
+            d: le_to_field(&buf[D_OFFSET..]),
         })
     }
 }
 
-/// Split the two-byte clue prefix off a wire ciphertext, yielding the AEAD
-/// body. `None` if the ciphertext is too short to carry one.
-pub fn strip_clue_prefix(wire: &[u8]) -> Option<&[u8]> {
-    wire.get(CLUE_BITS_PREFIX_BYTES..)
+/// Split a wire ciphertext into its clue bits and AEAD body. `None` if the
+/// ciphertext is too short to carry the two-byte prefix.
+pub fn split_clue_prefix(wire: &[u8]) -> Option<(u16, &[u8])> {
+    let (prefix, body) = wire.split_at_checked(CLUE_BITS_PREFIX_BYTES)?;
+    Some((u16::from_be_bytes(prefix.try_into().ok()?), body))
 }
 
 /// `pk = Poseidon(TAG_PK, ivk, d)`, the note-commitment binding key of `ivk`
@@ -108,29 +128,6 @@ pub fn strip_clue_prefix(wire: &[u8]) -> Option<&[u8]> {
 /// sender can build a commitment for the recipient.
 pub fn derive_pk(ivk: &Field, d: &Field) -> Result<Field, PoseidonError> {
     hash_to_field(&[Fq::from(TAG_PK), be_to_fq(ivk), be_to_fq(d)])
-}
-
-/// The diversifier of the account's default address, as a field element below
-/// `2^128`. Mirrors `defaultDiversifier` in `sdk/src/keys/diversifier.ts`:
-///
-/// ```text
-/// dvk     = blake2b-128("lelantos.addr.dvk.v1" || LE32(ivk))
-/// d_bytes = AES-128-encrypt_dvk(LE4(0) || 0^12)
-/// d       = d_bytes read little-endian
-/// ```
-pub fn default_diversifier(ivk: &Field) -> Field {
-    let mut ivk_le = *ivk;
-    ivk_le.reverse();
-    let dvk = Blake2b::<U16>::new()
-        .chain_update(DVK_DOMAIN)
-        .chain_update(ivk_le)
-        .finalize();
-
-    // Index 0 in the leading four bytes, so the whole block is zero.
-    let mut block = aes::Block::default();
-    Aes128::new(&dvk).encrypt_block(&mut block);
-
-    le_to_field(&block)
 }
 
 /// `rho = Poseidon(TAG_RHO, nullifier[0], index)` for output note `index`.
@@ -184,6 +181,12 @@ pub fn commitment(
 /// Little-endian bytes as a field element, reduced.
 fn le_to_field(bytes: &[u8]) -> Field {
     fq_to_be(Fq::from_le_bytes_mod_order(bytes))
+}
+
+/// Little-endian bytes as a field element, `None` unless below the modulus.
+fn le_to_canonical_field(bytes: &[u8]) -> Option<Field> {
+    let x = Fq::from_le_bytes_mod_order(bytes);
+    (x.into_bigint().to_bytes_le() == bytes).then(|| fq_to_be(x))
 }
 
 fn hash_to_field(inputs: &[Fq]) -> Result<Field, PoseidonError> {

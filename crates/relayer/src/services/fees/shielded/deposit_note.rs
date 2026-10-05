@@ -16,7 +16,9 @@
 //!    escrow digest preimage, so it is the value the payer signed a Permit2
 //!    witness over and neither a relayer nor a flusher can vary it. Rebuilding
 //!    `Poseidon(TAG_INNER, pk, rho, rcm)` from the decrypted plaintext fails
-//!    for a note owned by someone else.
+//!    for a note owned by someone else. The note must also be sealed as its
+//!    seed dictates, or this relayer's wallet drops it; see
+//!    [`FeeRecipient::open`].
 //! 2. The plaintext must agree with the escrow: `value` with `feeIn`, and a
 //!    valued note's `asset_id` with the escrowed `feeAssetId`, which may differ
 //!    from the deposit's `publicAssetId`. The batch circuit builds the leaf as
@@ -33,7 +35,8 @@
 use crate::domain::deposit::PendingDeposit;
 use crate::domain::error::{AppError, AppResult};
 use crate::services::fees::shielded::FeeRecipient;
-use crypto::note::{self, NotePlaintext};
+use crate::services::fees::shielded::recipient::{OpenedNote, point_of};
+use crypto::note;
 use serde::Deserialize;
 
 /// What the fee leaf of one deposit turned out to be.
@@ -58,13 +61,11 @@ pub enum FeeNote {
 ///
 /// Field names match `explorer-indexer`'s `encode_aux`; the values are decimal
 /// strings and a `0x` ciphertext, exactly as they appear in the event.
-///
-/// `clueRx` and `clueRy` are present in the column and not read: FMD narrows a
-/// wallet's scan, and this relayer already knows which leaf to try. Serde ignores
-/// them.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FeeAux {
+    clue_rx: String,
+    clue_ry: String,
     eph_pub_x: String,
     eph_pub_y: String,
     ciphertext: String,
@@ -79,7 +80,7 @@ pub fn assess(recipient: &FeeRecipient, d: &PendingDeposit) -> AppResult<FeeNote
     let aux: FeeAux = serde_json::from_value(d.fee_aux.clone())
         .map_err(|e| AppError::Internal(format!("deposit {}: fee_aux is unreadable: {e}", d.id)))?;
 
-    let Some(plain) = decrypt(recipient, &aux)? else {
+    let Some(plain) = open(recipient, &aux)? else {
         return Ok(FeeNote::NotOurs);
     };
 
@@ -106,16 +107,11 @@ pub fn assess(recipient: &FeeRecipient, d: &PendingDeposit) -> AppResult<FeeNote
     Ok(FeeNote::Paid { paid: d.fee_in })
 }
 
-fn decrypt(recipient: &FeeRecipient, aux: &FeeAux) -> AppResult<Option<NotePlaintext>> {
+fn open(recipient: &FeeRecipient, aux: &FeeAux) -> AppResult<Option<OpenedNote>> {
     let wire = hex_bytes(&aux.ciphertext)?;
-    let Some(body) = note::strip_clue_prefix(&wire) else {
-        return Ok(None);
-    };
-    let epk = recipient.pack_epk(&aux.eph_pub_x, &aux.eph_pub_y)?;
-    let Some(plaintext) = note::try_decrypt(recipient.ivk(), &epk, body) else {
-        return Ok(None);
-    };
-    Ok(NotePlaintext::decode(&plaintext))
+    let epk = point_of(&aux.eph_pub_x, &aux.eph_pub_y, "fee_aux.ephPub", 0)?;
+    let clue_r = point_of(&aux.clue_rx, &aux.clue_ry, "fee_aux.clueR", 0)?;
+    Ok(recipient.open(epk, clue_r, &wire))
 }
 
 fn hex_bytes(s: &str) -> AppResult<Vec<u8>> {
@@ -153,19 +149,9 @@ mod tests {
         })
     }
 
-    /// Decrypt independently of the module under test, so the expected value is
-    /// not taken from the code being checked.
-    fn plaintext_of(r: &FeeRecipient, a: &OutputAuxDto) -> NotePlaintext {
-        let wire = hex::decode(a.ciphertext.trim_start_matches("0x")).expect("hex");
-        let body = note::strip_clue_prefix(&wire).expect("clue prefix");
-        let epk = r.pack_epk(&a.eph_pub.x, &a.eph_pub.y).expect("epk packs");
-        let raw = note::try_decrypt(r.ivk(), &epk, body).expect("decrypts for us");
-        NotePlaintext::decode(&raw).expect("plaintext decodes")
-    }
-
     /// A deposit whose fee leaf is the fixture's deposit note, escrowed correctly.
-    fn deposit_paying(f: &Fixture, r: &FeeRecipient) -> PendingDeposit {
-        let plain = plaintext_of(r, &f.deposit_fee.aux);
+    fn deposit_paying(f: &Fixture) -> PendingDeposit {
+        let plain = f.plaintext_of(&f.deposit_fee.aux).expect("decrypts");
         PendingDeposit {
             public_asset_id: f.asset_id,
             fee_asset_id: f.asset_id,
@@ -183,13 +169,14 @@ mod tests {
     fn test_the_fixture_deposit_note_opens_the_leaf_the_batch_circuit_builds() {
         let f = fixture();
         let r = recipient(&f);
-        let plain = plaintext_of(&r, &f.deposit_fee.aux);
-        let d = deposit_paying(&f, &r);
+        let plain = f.plaintext_of(&f.deposit_fee.aux).expect("decrypts");
+        let d = deposit_paying(&f);
         let leaf = note::commitment_from_inner(d.fee_asset_id, d.fee_in, &d.fee_inner)
             .expect("canonical inner");
         assert_eq!(leaf, field(&f.deposit_fee.cm));
+        let rcm = note::expand_seed(&plain.rseed, &plain.rho).rcm;
         assert_eq!(
-            note::commitment(plain.asset_id, plain.value, r.pk(), &plain.rho, &plain.rcm)
+            note::commitment(plain.asset_id, plain.value, r.pk(), &plain.rho, &rcm)
                 .expect("commitment"),
             leaf
         );
@@ -199,7 +186,7 @@ mod tests {
     fn test_assess_a_correctly_escrowed_note_returns_paid() {
         let f = fixture();
         let r = recipient(&f);
-        let d = deposit_paying(&f, &r);
+        let d = deposit_paying(&f);
         assert_eq!(
             assess(&r, &d).expect("readable"),
             FeeNote::Paid { paid: 250 }
@@ -212,7 +199,7 @@ mod tests {
     fn test_assess_a_note_owned_by_another_key_is_not_ours() {
         let f = fixture();
         let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
+        let mut d = deposit_paying(&f);
         d.fee_inner = field(&f.foreign_owner.inner);
         d.fee_aux = aux_json(&f.foreign_owner.aux);
         assert_eq!(assess(&r, &d).expect("readable"), FeeNote::NotOurs);
@@ -224,9 +211,22 @@ mod tests {
     fn test_assess_a_note_encrypted_to_someone_else_is_not_ours() {
         let f = fixture();
         let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
+        let mut d = deposit_paying(&f);
         d.fee_inner = field(&f.not_ours.inner);
         d.fee_aux = aux_json(&f.not_ours.aux);
+        assert_eq!(assess(&r, &d).expect("readable"), FeeNote::NotOurs);
+    }
+
+    /// The wallet keeps a note only when its clue is the one its seed yields, so
+    /// a leaf published under another clue point is not one this relayer finds.
+    #[test]
+    fn test_assess_a_note_whose_clue_is_not_its_seeds_is_not_ours() {
+        let f = fixture();
+        let r = recipient(&f);
+        let mut d = deposit_paying(&f);
+        let mut aux = f.deposit_fee.aux.clone();
+        aux.clue_r = f.fee.aux.clue_r.clone();
+        d.fee_aux = aux_json(&aux);
         assert_eq!(assess(&r, &d).expect("readable"), FeeNote::NotOurs);
     }
 
@@ -236,7 +236,7 @@ mod tests {
     fn test_assess_a_note_naming_another_asset_than_the_fee_asset_is_malformed() {
         let f = fixture();
         let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
+        let mut d = deposit_paying(&f);
         d.fee_asset_id += 1;
         assert_eq!(
             assess(&r, &d).expect("readable"),
@@ -250,7 +250,7 @@ mod tests {
     fn test_assess_a_cross_asset_fee_note_returns_paid() {
         let f = fixture();
         let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
+        let mut d = deposit_paying(&f);
         d.public_asset_id = f.asset_id + 1;
         assert_eq!(d.fee_asset_id, f.asset_id);
         assert_eq!(
@@ -266,7 +266,7 @@ mod tests {
     fn test_assess_a_zero_fee_escrow_does_not_check_the_note_asset() {
         let f = fixture();
         let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
+        let mut d = deposit_paying(&f);
         d.fee_in = 0;
         d.fee_asset_id = 0;
         assert_eq!(
@@ -281,7 +281,7 @@ mod tests {
     fn test_assess_a_note_whose_value_disagrees_with_fee_in_is_malformed() {
         let f = fixture();
         let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
+        let mut d = deposit_paying(&f);
         d.fee_in += 1;
         assert_eq!(
             assess(&r, &d).expect("readable"),
@@ -295,7 +295,7 @@ mod tests {
     fn test_assess_an_unreadable_fee_aux_is_an_error() {
         let f = fixture();
         let r = recipient(&f);
-        let mut d = deposit_paying(&f, &r);
+        let mut d = deposit_paying(&f);
         d.fee_aux = json!({ "ephPubX": "1" });
         assert!(assess(&r, &d).is_err());
     }

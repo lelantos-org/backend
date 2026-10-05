@@ -14,11 +14,20 @@ use ark_ed_on_bn254::{Fq, Fr};
 use ark_ff::{Field, LegendreSymbol};
 
 use super::coords::{CircomPoint, FixedBaseTable, scalar_mul};
+use super::fq_to_scalar;
 
 /// Domain-separation tag for FMD bit derivation, mirroring `TAG_FMD_BIT` in
 /// `circuits/src/lib/tags.circom`. Must not collide with the other Poseidon tags
 /// in this codebase, which occupy 1..=7.
 pub const TAG_FMD_BIT: u64 = 8;
+
+/// Tag of the public expansion constants; see [`detection_key`]. Mirrors
+/// `sdk/src/crypto/tags.ts`.
+pub const TAG_FMD_EXPAND2: u64 = 17;
+
+/// Clue bits every sender emits. Mirrors `FMD_DEFAULT_GAMMA` in
+/// `sdk/src/fmd/keys.ts`.
+pub const GAMMA: usize = 5;
 
 /// Compute the per-component `bit_i` for a given clue R + shared secret S_i.
 ///
@@ -86,6 +95,38 @@ pub fn test_clue(dk: &[Fr], r: CircomPoint, clue_bits: u16, gamma: usize) -> boo
         }
     }
     true
+}
+
+/// The [`GAMMA`] detection scalars of a root secret:
+/// `x_i = dk_root + h_i`, `h_i = Poseidon(TAG_FMD_EXPAND2, i) mod q`. Mirrors
+/// `fmdDiversifiedDetectionKey` in `sdk/src/fmd/diversified.ts`.
+///
+/// Independent of the diversifier: one key tests the clues of every address of
+/// `dk_root`.
+pub fn detection_key(dk_root: Fr) -> Vec<Fr> {
+    (0..GAMMA as u64)
+        .map(|i| {
+            let h = poseidon_hash(&[Fq::from(TAG_FMD_EXPAND2), Fq::from(i)])
+                .expect("poseidon arity 2 supported");
+            dk_root + fq_to_scalar(h)
+        })
+        .collect()
+}
+
+/// The clue a sender produces with blinder `r` for an address on base `g_d`,
+/// computed from the owner's detection key: `R = r·g_d`, `S_i = x_i·R`,
+/// `c_i = bit_i ⊕ 1`. Mirrors `fmdExpectedClueOnBase` in
+/// `sdk/src/fmd/diversified.ts`.
+///
+/// Bit `i` of the result is `c_i`, the packing [`test_clue`] reads. `dk` holds
+/// at most 16 scalars.
+pub fn expected_clue(dk: &[Fr], g_d: CircomPoint, r: Fr) -> (CircomPoint, u16) {
+    let clue_r = scalar_mul(g_d, r);
+    let bits = dk.iter().enumerate().fold(0u16, |acc, (i, x)| {
+        let c_bit = shared_bit(&clue_r, i as u32, &scalar_mul(clue_r, *x)) ^ 1;
+        acc | (u16::from(c_bit) << i)
+    });
+    (clue_r, bits)
 }
 
 /// Test one clue against many detection keys at once.

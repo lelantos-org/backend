@@ -4,7 +4,7 @@ mod coords;
 mod detect;
 
 use ark_ed_on_bn254::{Fq, Fr};
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -12,7 +12,10 @@ pub use coords::{
     COEFF_A_CIRCOM, COEFF_D_CIRCOM, CircomPoint, FixedBaseTable, base8_circom, pack, scalar_mul,
     unpack, unpack_subgroup,
 };
-pub use detect::{TAG_FMD_BIT, test_clue, test_clue_batch, usable_as_clue};
+pub use detect::{
+    GAMMA, TAG_FMD_BIT, TAG_FMD_EXPAND2, detection_key, expected_clue, test_clue, test_clue_batch,
+    usable_as_clue,
+};
 
 pub const DOMAIN: &str = "lelantos.fmd.v1";
 
@@ -44,4 +47,9 @@ pub fn fq_from_be_bytes(bytes: &[u8]) -> Fq {
 
 pub fn fq_from_le_bytes(bytes: &[u8]) -> Fq {
     Fq::from_le_bytes_mod_order(bytes)
+}
+
+/// A base-field element reduced modulo the subgroup order.
+pub(crate) fn fq_to_scalar(x: Fq) -> Fr {
+    Fr::from_le_bytes_mod_order(&x.into_bigint().to_bytes_le())
 }

@@ -5,8 +5,12 @@
 //! would produce for these keys.
 
 use super::FeeRecipient;
+use super::recipient::point_of;
 use crate::adapters::parse::{FieldRef, parse_field};
 use crate::domain::dto::OutputAuxDto;
+use crypto::clue::pack;
+use crypto::note::{self, NotePlaintext};
+use crypto::tree::Field;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +35,11 @@ pub(super) struct Fixture {
     pub(super) not_ours: Slot,
     /// The fee leaf of a deposit, from the SDK's `buildDeposit`.
     pub(super) deposit_fee: DepositSlot,
+    /// A fee note to another address of the relayer's key.
+    pub(super) other_address: Slot,
+    /// A fee note that opens its commitment, published under an ephemeral key
+    /// that is not its seed's.
+    pub(super) wrong_ephemeral: Slot,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,10 +77,27 @@ pub(super) fn fixture() -> Fixture {
     .expect("shielded-fee.json parses")
 }
 
+impl Fixture {
+    /// The relayer's viewing key.
+    pub(super) fn ivk(&self) -> Field {
+        parse_field(&self.ivk_hex, FieldRef::Named("ivk"))
+            .expect("ivk parses")
+            .0
+    }
+
+    /// The plaintext of `aux` if the relayer's key decrypts it. Read without
+    /// `FeeRecipient::open`, so a test's expectation is not taken from the code
+    /// it checks.
+    pub(super) fn plaintext_of(&self, aux: &OutputAuxDto) -> Option<NotePlaintext> {
+        let wire = hex::decode(aux.ciphertext.trim_start_matches("0x")).expect("hex");
+        let (_, body) = note::split_clue_prefix(&wire).expect("clue prefix");
+        let epk = point_of(&aux.eph_pub.x, &aux.eph_pub.y, "ephPub", 0).expect("epk parses");
+        let raw = note::try_decrypt(&self.ivk(), &pack(&epk), body)?;
+        Some(NotePlaintext::decode(&raw).expect("plaintext decodes"))
+    }
+}
+
 /// The relayer the fixture's fee notes pay.
 pub(super) fn recipient(f: &Fixture) -> FeeRecipient {
-    let ivk = parse_field(&f.ivk_hex, FieldRef::Named("ivk"))
-        .expect("ivk parses")
-        .0;
-    FeeRecipient::new(f.address.clone(), ivk).expect("address and key agree")
+    FeeRecipient::new(f.address.clone(), f.ivk()).expect("address and key agree")
 }

@@ -35,6 +35,7 @@ pub async fn list(
                     commitment_hex: hex::encode(&n.cm),
                     ciphertext_hex: hex::encode(&n.ciphertext),
                     eph_pub_packed_hex: pack_point_hex(&n.eph_pub_x, &n.eph_pub_y)?,
+                    clue_r_packed_hex: pack_point_hex(&n.clue_rx, &n.clue_ry)?,
                 })
             })
             .collect::<AppResult<Vec<_>>>()?;

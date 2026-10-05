@@ -492,7 +492,7 @@ signer_key_hex = "0x…"
 | `native_decimals` | no | 18 | Must be ≤ 38 |
 | `fee_markup_bps` | no | 1000 | 10%. Must be ≤ 1_000_000 |
 | `accepted_fee_tokens` | no | `[]` | `{symbol, address, decimals, quote_symbol}`; decimals ≤ 38 |
-| `shielded_fee_address` | no | — | bech32m address the relayer is paid at. **Setting it makes a fee mandatory** — see below |
+| `shielded_fee_address` | no | — | bech32m address the relayer is paid at (112-byte payload, `d ‖ pk_d ‖ pk ‖ ck_d`). **Setting it makes a fee mandatory** — see below |
 | `shielded_fee_ivk` | no | — | Incoming viewing key for that address, big-endian. Must be set together with it. Normally from the environment, not the TOML |
 | `shielded_fee_grace_bps` | no | 300 | How far below the submit-time quote a payment may fall. Must be < 10 000 |
 | `shielded_fee_assets` | no | `[]` | Asset ids accepted as fees. Empty means every token in `accepted_fee_tokens` |
@@ -529,6 +529,13 @@ proof committed to. A deposit's fee leaf is matched through `feeInner` instead:
 the escrow publishes it beside `(feeAssetId, feeIn)`, from which the batch
 circuit builds the leaf. A note encrypted to the relayer but owned by someone else,
 or one whose plaintext inflates the value, fails there.
+
+The note's plaintext carries a seed, not `rcm`: `rcm`, the ECDH ephemeral and
+the FMD clue blinder all expand from it. The relayer's wallet keeps a note only
+when the published ephemeral key and clue are the ones that seed yields on the
+address's base point, so the relayer checks the same before crediting one. The
+note must name the diversifier of `shielded_fee_address`: one sent to another
+address of the same viewing key is not credited.
 
 Consequences worth knowing before enabling it:
 

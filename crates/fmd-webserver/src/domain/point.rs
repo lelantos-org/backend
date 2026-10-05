@@ -1,5 +1,5 @@
-//! Baby-Jubjub point compression for the ephemeral public keys the note feeds
-//! serve.
+//! Baby-Jubjub point compression for the ephemeral public keys and clue points
+//! the note feeds serve.
 
 use crate::domain::error::{AppError, AppResult};
 use crate::domain::field::bigdec_to_field;
@@ -52,7 +52,7 @@ pub fn pack_point(x: &bigdecimal::BigDecimal, y: &bigdecimal::BigDecimal) -> App
 /// Both coordinates fail the same way, so without the name a bad row reports only
 /// that some field element was malformed.
 fn coordinate(v: &bigdecimal::BigDecimal, name: &str) -> AppResult<Field> {
-    bigdec_to_field(v).map_err(|e| AppError::Internal(format!("ephemeral pubkey {name}: {e}")))
+    bigdec_to_field(v).map_err(|e| AppError::Internal(format!("packed point {name}: {e}")))
 }
 
 /// [`pack_point`] straight to the wire form.
@@ -141,7 +141,7 @@ mod tests {
         let (x, y) = base8();
         let on_x = pack_point(&dec("-1"), &y).unwrap_err().to_string();
         let on_y = pack_point(&x, &dec("-1")).unwrap_err().to_string();
-        assert!(on_x.contains("ephemeral pubkey x"), "{on_x}");
-        assert!(on_y.contains("ephemeral pubkey y"), "{on_y}");
+        assert!(on_x.contains("packed point x"), "{on_x}");
+        assert!(on_y.contains("packed point y"), "{on_y}");
     }
 }

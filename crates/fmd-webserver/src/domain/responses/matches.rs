@@ -34,4 +34,7 @@ pub struct MatchOut {
     /// Sender's ECDH ephemeral public point, packed. Same encoding as
     /// `NoteOut::eph_pub_packed_hex`.
     pub eph_pub_packed_hex: String,
+    /// The FMD clue point `R`, packed. Same encoding as
+    /// `NoteOut::clue_r_packed_hex`.
+    pub clue_r_packed_hex: String,
 }

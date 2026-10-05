@@ -49,10 +49,10 @@ x-profiles-deploy:    &profiles-deploy    [relayer, all]
 # cannot spend them. The spending key is neither here nor needed. A real
 # deployment overrides both from the environment and commits neither.
 #
-# Lifted out of the service body because the address is ~180 characters and
+# Lifted out of the service body because the address is ~200 characters and
 # reading the relayer's env should not mean scrolling past it.
 x-dev-shielded-fee: &dev-shielded-fee
-    RELAYER_CHAIN_31337_SHIELDED_FEE_ADDRESS: "${RELAYER_CHAIN_31337_SHIELDED_FEE_ADDRESS:-lelantos1pt5x36h9te4nhc5k5dx7he4m55p9l6gl6u8t3wxkhxvx4d89c6q2qpxmsqj0ha34jkaupskyemvmpwempecmjjpcd0kswwe62phz2qcj7kh0q02j4akatg9xchazr4td8eht8ul4lzdr6k346fzsaxtf3ccnr3c9}"
+    RELAYER_CHAIN_31337_SHIELDED_FEE_ADDRESS: "${RELAYER_CHAIN_31337_SHIELDED_FEE_ADDRESS:-lelantos12nks6y88842ua99jy56n6ng02sdktcqmzzwhgpd0uuvmyzp8yzxhuc2zazlcm8kyy32hsz500rkznrrtdk4xj26kz2gg9axktesvsfhjx0h365rtj9h36wgw5xknf7swcglwq4uqw9aflmcq88rfssrflgynn8ccuyutmz886889at5hzykqsexr5w}"
     RELAYER_CHAIN_31337_SHIELDED_FEE_IVK: "${RELAYER_CHAIN_31337_SHIELDED_FEE_IVK:-0x2a60ff35984e4c2013a03867a433d5d5272df218436cc27557fddc5231fcd99d}"
 
 # Build config for every Rust backend that uses backend/Dockerfile.
