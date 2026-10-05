@@ -1,7 +1,8 @@
 target/
-# ~200MB of circuit artifacts (zkey/r1cs/wasm). Never baked into an image —
-# the relayer mounts them at runtime from stack/circuits/ → /circuits:ro.
-stack/circuits/
+# Compose files, dev config and ~200MB of circuit artifacts (zkey/r1cs/wasm).
+# Never baked into an image: config and circuits are mounted at runtime, so an
+# edit here must not invalidate the source layer of every image.
+stack/
 .github/
 .claude/
 .idea/

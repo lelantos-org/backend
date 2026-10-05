@@ -149,7 +149,7 @@ fn a_sealed_output_opens_to_what_its_seed_yields() {
             .unwrap_or_else(|| panic!("seed {i}: the recipient's ivk failed to decrypt"));
         assert_eq!(plaintext, h2b(&v.plaintext_hex), "seed {i}");
 
-        let note = NotePlaintext::decode(&plaintext).expect("96-byte plaintext");
+        let note = NotePlaintext::decode(&plaintext).expect("224-byte plaintext");
         assert_eq!(note.asset_id.to_string(), v.asset_dec, "seed {i}");
         assert_eq!(note.value.to_string(), v.value_dec, "seed {i}");
         assert_eq!(note.rho, field(&v.rho_dec), "seed {i}");

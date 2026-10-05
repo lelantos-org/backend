@@ -258,9 +258,9 @@ add up.
 
 Three caps, per chain:
 - **Transaction size.** Σ item calldata ≤ the node's limit: a transfer or
-  withdraw is ~4.5 kB and a swap ~6.1 kB, against 128 kB on Ethereum and Base
+  withdraw is ~4.7 kB and a swap ~7.9 kB, against 128 kB on Ethereum and Base
   and 95 kB on Arbitrum (set `max_tx_bytes`).
-- **Gas.** ~560–830k per item with real verifiers, against the per-transaction cap.
+- **Gas.** ~580–860k per item with real verifiers, against the per-transaction cap.
 - **Latency.** A caller can wait behind a whole bundle and then its own, roughly
   `2·(K·prove + inclusion)`, which must fit the SDK's submit timeout.
 

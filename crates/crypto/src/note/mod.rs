@@ -68,11 +68,17 @@ const VALUE_OFFSET: usize = 8;
 const RHO_OFFSET: usize = VALUE_OFFSET + 8;
 const RSEED_OFFSET: usize = RHO_OFFSET + 32;
 const D_OFFSET: usize = RSEED_OFFSET + SEED_BYTES;
+const MEMO_OFFSET: usize = D_OFFSET + DIVERSIFIER_BYTES;
 
-/// Plaintext length for `asset(8) || value(8) || rho(32) || rseed(32) || d(16)`,
-/// every integer little-endian: 96. Mirrors `NOTE_PLAINTEXT_BYTES` in
+/// Byte width of the memo field every plaintext ends with: the sender's UTF-8
+/// text, zero-padded. Mirrors `MEMO_BYTES` in `sdk/src/notes/codec.ts`.
+pub const MEMO_BYTES: usize = 128;
+
+/// Plaintext length for
+/// `asset(8) || value(8) || rho(32) || rseed(32) || d(16) || memo(128)`, every
+/// integer little-endian: 224. Mirrors `NOTE_PLAINTEXT_BYTES` in
 /// `sdk/src/notes/codec.ts`.
-pub const NOTE_PLAINTEXT_BYTES: usize = D_OFFSET + DIVERSIFIER_BYTES;
+pub const NOTE_PLAINTEXT_BYTES: usize = MEMO_OFFSET + MEMO_BYTES;
 
 /// The wire ciphertext carries the FMD clue bits ahead of the AEAD body as two
 /// big-endian bytes. `PubInputs.sol` reads the same two bytes to recompute the
@@ -83,7 +89,8 @@ pub const CLUE_BITS_PREFIX_BYTES: usize = 2;
 /// What the recipient learns from a note they can decrypt.
 ///
 /// `pk` is absent because the recipient derives it from their own `ivk` and `d`.
-/// `rcm` is absent because it is expanded from `rseed`; see [`expand_seed`].
+/// `rcm` is absent because it is expanded from `rseed`; see [`expand_seed`]. The
+/// memo is not kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotePlaintext {
     pub asset_id: u64,
@@ -96,7 +103,7 @@ pub struct NotePlaintext {
 }
 
 impl NotePlaintext {
-    /// Parse the fixed 96-byte layout. `None` on any other length, or when
+    /// Parse the fixed 224-byte layout. `None` on any other length, or when
     /// `rho` is not a canonical field element: the seed expansion hashes its
     /// bytes, and the wallet refuses such a note.
     ///
@@ -111,7 +118,7 @@ impl NotePlaintext {
             value: u64::from_le_bytes(buf[VALUE_OFFSET..RHO_OFFSET].try_into().ok()?),
             rho: le_to_canonical_field(&buf[RHO_OFFSET..RSEED_OFFSET])?,
             rseed: buf[RSEED_OFFSET..D_OFFSET].try_into().ok()?,
-            d: le_to_field(&buf[D_OFFSET..]),
+            d: le_to_field(&buf[D_OFFSET..MEMO_OFFSET]),
         })
     }
 }

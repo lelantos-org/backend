@@ -75,7 +75,7 @@ fn decrypts_and_rebuilds_the_commitment_from_sdk_vectors() {
         });
         assert_eq!(hex::encode(&plaintext), v.plaintext_hex, "vector {i}");
 
-        let note = NotePlaintext::decode(&plaintext).expect("96-byte plaintext");
+        let note = NotePlaintext::decode(&plaintext).expect("224-byte plaintext");
         assert_eq!(note.asset_id.to_string(), v.asset_id, "vector {i}");
         assert_eq!(note.value.to_string(), v.value, "vector {i}");
         assert_eq!(note.rho, fq(&v.rho_dec), "vector {i}");
@@ -249,7 +249,22 @@ fn the_identity_is_rejected_as_an_ephemeral_key() {
 fn a_plaintext_of_the_wrong_length_is_refused() {
     assert!(NotePlaintext::decode(&[0u8; NOTE_PLAINTEXT_BYTES - 1]).is_none());
     assert!(NotePlaintext::decode(&[0u8; NOTE_PLAINTEXT_BYTES + 1]).is_none());
+    // The layout without its memo field.
+    assert!(NotePlaintext::decode(&[0u8; MEMO_OFFSET]).is_none());
     assert!(NotePlaintext::decode(&[0u8; NOTE_PLAINTEXT_BYTES]).is_some());
+}
+
+/// The memo is the sender's free text: whatever it holds, the note reads the
+/// same.
+#[test]
+fn the_memo_does_not_change_what_a_plaintext_decodes_to() {
+    let empty = [0u8; NOTE_PLAINTEXT_BYTES];
+    let mut with_memo = empty;
+    with_memo[MEMO_OFFSET..].fill(0xff);
+    assert_eq!(
+        NotePlaintext::decode(&with_memo),
+        NotePlaintext::decode(&empty)
+    );
 }
 
 /// `rho` feeds the seed expansion byte for byte, so `rho + r` must not pass
